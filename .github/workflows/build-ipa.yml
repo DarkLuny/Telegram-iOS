@@ -1,0 +1,190 @@
+name: Build Telegram IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/build-ipa.yml'
+
+concurrency:
+  group: telegram-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BUILD_CONFIGURATION: release_arm64
+  BAZEL_USER_ROOT: /private/var/tmp/_bazel_containerhost
+  BAZEL_CACHE_DIR: ${{ github.workspace }}/.telegram-bazel-cache
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # The upstream .gitmodules uses relative URLs ("../rlottie.git") which would
+      # resolve to DarkLuny/rlottie.git inside a fork and fail.
+      - name: Fix relative submodule URLs for forks
+        run: |
+          set -euo pipefail
+          git config --file=.gitmodules submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+          git config --file=.gitmodules submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
+          git submodule sync --recursive
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive --depth 1 --jobs 4
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          REQUIRED="$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')"
+          echo "versions.json wants Xcode $REQUIRED"
+          CANDIDATE="/Applications/Xcode_${REQUIRED}.app"
+          if [ ! -d "$CANDIDATE" ]; then
+            CANDIDATE="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          [ -n "$CANDIDATE" ] || { echo "::error::No Xcode 27.x found"; ls -d /Applications/Xcode*.app; exit 1; }
+          sudo xcode-select -s "$CANDIDATE/Contents/Developer"
+          xcodebuild -version
+          echo "CPUS=$(sysctl -n hw.ncpu)"
+          df -h /
+
+      - name: Metal toolchain
+        run: |
+          set -euo pipefail
+          if xcrun metal -v >/dev/null 2>&1; then
+            echo "metal ok: $(xcrun -f metal)"
+          else
+            sudo xcodebuild -downloadComponent MetalToolchain
+            rm -f "$(getconf DARWIN_USER_TEMP_DIR)/xcrun_db" || true
+            xcrun metal -v
+          fi
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /Users/runner/Library/Developer/CoreSimulator/Caches \
+            /Library/Developer/CoreSimulator/Profiles/Runtimes/* \
+            /Users/runner/.cargo \
+            /Users/runner/.rustup \
+            /usr/local/lib/android \
+            /Users/runner/Library/Android \
+            /Applications/Xcode_26*.app || true
+          df -h /
+
+      - name: Restore Bazel cache
+        id: bazel-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BAZEL_CACHE_DIR }}
+          key: bazel-release_arm64-${{ hashFiles('versions.json') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-release_arm64-${{ hashFiles('versions.json') }}-
+            bazel-release_arm64-
+
+      - name: Write build configuration
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          cfg = json.load(open("build-system/appstore-configuration.json"))
+          # Unsigned/sideload build: keep the fake-codesigning bundle and team id.
+          cfg["bundle_id"] = "ph.teleg.Telegrapf"
+          cfg["team_id"] = "C67CF9S4VU"
+          cfg["is_internal_build"] = "true"
+          cfg["is_appstore_build"] = "false"
+          cfg["appstore_id"] = "0"
+          cfg["app_center_id"] = "0"
+          cfg["enable_siri"] = False
+          cfg["enable_icloud"] = False
+          api_id = os.environ.get("TELEGRAM_API_ID") or ""
+          api_hash = os.environ.get("TELEGRAM_API_HASH") or ""
+          if api_id and api_hash:
+              cfg["api_id"] = api_id
+              cfg["api_hash"] = api_hash
+          with open("build-system/ci-configuration.json", "w") as f:
+              json.dump(cfg, f, indent="\t")
+              f.write("\n")
+          print("api_id=%s bundle_id=%s team_id=%s" % (cfg["api_id"], cfg["bundle_id"], cfg["team_id"]))
+          PY
+
+      - name: Compute build number
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')"
+          BUILD_NUMBER="$(( $(cat build_number_offset) + $(git rev-list --count HEAD) ))"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "Telegram $APP_VERSION ($BUILD_NUMBER)"
+
+      - name: Build Telegram
+        run: |
+          set -euo pipefail
+          mkdir -p "$BAZEL_CACHE_DIR" build/artifacts
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
+            --cacheDir="$BAZEL_CACHE_DIR" \
+            build \
+            --configurationPath=build-system/ci-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration="$BUILD_CONFIGURATION" \
+            --buildNumber="$BUILD_NUMBER" \
+            --enableParallelSwiftmoduleGeneration \
+            --outputBuildArtifactsPath=build/artifacts
+
+      - name: Save Bazel cache
+        if: ${{ !cancelled() && steps.bazel-cache.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BAZEL_CACHE_DIR }}
+          key: bazel-release_arm64-${{ hashFiles('versions.json') }}-${{ github.run_id }}
+
+      - name: Collect IPA
+        run: |
+          set -euo pipefail
+          ls -la build/artifacts || true
+          SRC="$(find build/artifacts bazel-bin/Telegram -maxdepth 2 -name 'Telegram.ipa' -type f 2>/dev/null | head -1 || true)"
+          [ -n "$SRC" ] || { echo "::error::Telegram.ipa not found"; exit 1; }
+          mkdir -p out
+          cp -f "$SRC" "out/Telegram-${APP_VERSION}-${BUILD_NUMBER}.ipa"
+          ls -lh out
+          python3 - <<'PY'
+          import glob, zipfile
+          p = glob.glob("out/*.ipa")[0]
+          with zipfile.ZipFile(p) as z:
+              names = z.namelist()
+          print("entries=%d embedded.mobileprovision=%s _CodeSignature=%s" % (
+              len(names),
+              any(n.endswith("embedded.mobileprovision") for n in names),
+              any("/_CodeSignature/" in n for n in names)))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-ipa-${{ env.APP_VERSION }}-${{ env.BUILD_NUMBER }}
+          path: out/*.ipa
+          retention-days: 7
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: build-diagnostics
+          path: |
+            build/artifacts/Telegram.DSYMs.zip
+          retention-days: 3
+          if-no-files-found: ignore
