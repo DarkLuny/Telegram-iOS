@@ -2,10 +2,6 @@ name: Build Telegram IPA (unsigned)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
-    paths:
-      - '.github/workflows/build-ipa.yml'
 
 concurrency:
   group: telegram-ipa-${{ github.ref }}
@@ -79,7 +75,17 @@ jobs:
             /Users/runner/.rustup \
             /usr/local/lib/android \
             /Users/runner/Library/Android \
-            /Applications/Xcode_26*.app || true
+            /Applications/Xcode_26*.app \
+            /Applications/Xcode_27.2*.app \
+            /Applications/Xcode_27.0*.app \
+            /Library/Developer/CoreSimulator/Volumes \
+            /Users/runner/Library/Developer/Xcode/DerivedData \
+            /Users/runner/.gradle \
+            /Users/runner/.m2 \
+            /usr/local/share/dotnet \
+            /usr/local/Homebrew/Library/Taps || true
+          # Simulator runtime DMGs left in the image eat tens of GB and are useless here.
+          sudo rm -rf /Library/Developer/CoreSimulator/Images/* || true
           df -h /
 
       - name: Restore Bazel cache
@@ -100,16 +106,11 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os
+          # The bundled fake-codesigning profiles are issued for exactly
+          # ph.telegra.Telegraph / C67CF9S4VU, so bundle_id and team_id must stay
+          # untouched -- any other value fails with "Could not find a valid
+          # aps-environment entitlement in the provided provisioning profiles".
           cfg = json.load(open("build-system/appstore-configuration.json"))
-          # Unsigned/sideload build: keep the fake-codesigning bundle and team id.
-          cfg["bundle_id"] = "ph.teleg.Telegrapf"
-          cfg["team_id"] = "C67CF9S4VU"
-          cfg["is_internal_build"] = "true"
-          cfg["is_appstore_build"] = "false"
-          cfg["appstore_id"] = "0"
-          cfg["app_center_id"] = "0"
-          cfg["enable_siri"] = False
-          cfg["enable_icloud"] = False
           api_id = os.environ.get("TELEGRAM_API_ID") or ""
           api_hash = os.environ.get("TELEGRAM_API_HASH") or ""
           if api_id and api_hash:
@@ -118,7 +119,9 @@ jobs:
           with open("build-system/ci-configuration.json", "w") as f:
               json.dump(cfg, f, indent="\t")
               f.write("\n")
-          print("api_id=%s bundle_id=%s team_id=%s" % (cfg["api_id"], cfg["bundle_id"], cfg["team_id"]))
+          print("api_id=%s bundle_id=%s team_id=%s siri=%s icloud=%s" % (
+              cfg["api_id"], cfg["bundle_id"], cfg["team_id"],
+              cfg["enable_siri"], cfg["enable_icloud"]))
           PY
 
       - name: Compute build number
