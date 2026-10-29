@@ -29,11 +29,9 @@ swift_library(
     copts = [
         "-warnings-as-errors",
     ],
-    # JavaScriptCore is part of the OS; no bundled engine, no added IPA size.
-    sdk_frameworks = [
-        "JavaScriptCore",
-        "UniformTypeIdentifiers",
-    ],
+    # JavaScriptCore and UniformTypeIdentifiers are OS frameworks, reached
+    # through `import` and autolinked like every other system framework in this
+    # repository; nothing is bundled and the IPA does not grow.
     deps = [
         # `PluginRuntime` is the only file that needs the app's account/transport
         # side; `PluginManager`/`PluginStore`/`PluginLoader` stay Foundation plus
