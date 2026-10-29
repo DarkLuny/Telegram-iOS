@@ -180,6 +180,7 @@ enum PeerInfoSettingsSection {
     case premiumGift
     case passport
     case watch
+    case plugins
     case support
     case faq
     case tips

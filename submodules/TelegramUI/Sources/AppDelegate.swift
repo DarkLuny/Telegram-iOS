@@ -54,6 +54,7 @@ import WalletSendScreen
 import PasscodeCore
 import LiquidGlassShapes
 import MTProtoRustEngine
+import ExteraPluginKit
 
 #if DEBUG
 import AlertComponent
@@ -1196,6 +1197,15 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     return
                 }
                 strongSelf.mainWindow.present(c, on: .root)
+            }
+            
+            // Plugins need `presentGlobalController` for their bulletins, so the
+            // runtime starts only after the closure above exists. Loading and
+            // evaluating the scripts is deferred to the next turn of the main
+            // queue: plugin code is arbitrary, and a slow one must not hold up
+            // the first frame after launch.
+            Queue.mainQueue().justDispatch {
+                PluginRuntime.shared.activate(sharedContext: sharedContext)
             }
             sharedContext.presentCrossfadeController = { [weak self] in
                 guard let strongSelf = self else {

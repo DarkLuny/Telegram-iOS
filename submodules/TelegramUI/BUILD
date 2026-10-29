@@ -65,6 +65,7 @@ swift_library(
     ],
     deps = [
         "//submodules/CrashReporting:CrashReporting",
+        "//submodules/ExteraPluginKit:ExteraPluginKit",
         "//third-party/recaptcha:RecaptchaEnterprise",
         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
         "//submodules/SSignalKit/SSignalKit:SSignalKit",

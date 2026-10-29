@@ -749,7 +749,7 @@ func initializedNetwork(accountId: AccountRecordId, arguments: NetworkInitializa
                 useExperimentalFeatures = false
             }
             
-            let network = Network(queue: queue, datacenterId: datacenterId, context: context, engine: engine, switchingEngine: switchingEngine, engineFactory: arguments.networkEngineFactory, rustEngineDisabled: rustEngineDisabled, rustEngineWaitsForWebProxy: rustEngineWaitsForWebProxy, mainSession: mainSession, mainSessionDelegate: mainSessionDelegate, telemetry: telemetry, _connectionStatus: connectionStatus, basePath: basePath, appDataDisposable: appDataDisposable, encryptionProvider: arguments.encryptionProvider, useRequestTimeoutTimers: useRequestTimeoutTimers, useBetaFeatures: arguments.useBetaFeatures, useExperimentalFeatures: useExperimentalFeatures, baseTcpConnectionInterfaceFactory: baseTcpConnectionInterfaceFactory, isAppExtension: isAppExtension, initialWebProxyActive: initialActiveServer?.isWebProxy == true)
+            let network = Network(queue: queue, accountId: accountId.int64, datacenterId: datacenterId, context: context, engine: engine, switchingEngine: switchingEngine, engineFactory: arguments.networkEngineFactory, rustEngineDisabled: rustEngineDisabled, rustEngineWaitsForWebProxy: rustEngineWaitsForWebProxy, mainSession: mainSession, mainSessionDelegate: mainSessionDelegate, telemetry: telemetry, _connectionStatus: connectionStatus, basePath: basePath, appDataDisposable: appDataDisposable, encryptionProvider: arguments.encryptionProvider, useRequestTimeoutTimers: useRequestTimeoutTimers, useBetaFeatures: arguments.useBetaFeatures, useExperimentalFeatures: useExperimentalFeatures, baseTcpConnectionInterfaceFactory: baseTcpConnectionInterfaceFactory, isAppExtension: isAppExtension, initialWebProxyActive: initialActiveServer?.isWebProxy == true)
             
             if let data = appConfiguration.data, let notifyInterval = data["upload_premium_speedup_notify_period"] as? Double {
                 network.updateNetworkSpeedLimitedEventNotifyInterval(value: notifyInterval)
@@ -907,6 +907,9 @@ public final class Network: NSObject {
     public let encryptionProvider: EncryptionProvider
     
     private let queue: Queue
+    /// The local account this network was created for. Plugin hooks receive it so
+    /// a plugin can tell which account a request belongs to without a global.
+    public let accountId: Int64
     public let datacenterId: Int
     public let context: MTContext
     private var networkHelper: NetworkHelper?
@@ -995,10 +998,11 @@ public final class Network: NSObject {
         return self.engine.kind
     }
     
-    fileprivate init(queue: Queue, datacenterId: Int, context: MTContext, engine: NetworkEngine, switchingEngine: SwitchingNetworkEngine?, engineFactory: NetworkEngineFactory?, rustEngineDisabled: Bool, rustEngineWaitsForWebProxy: Bool, mainSession: NetworkEngineSession, mainSessionDelegate: NetworkMainSessionDelegate, telemetry: NetworkTelemetry?, _connectionStatus: Promise<ConnectionStatus>, basePath: String, appDataDisposable: Disposable, encryptionProvider: EncryptionProvider, useRequestTimeoutTimers: Bool, useBetaFeatures: Bool, useExperimentalFeatures: Bool, baseTcpConnectionInterfaceFactory: ((MTTcpConnectionInterfaceDelegate, DispatchQueue) -> MTTcpConnectionInterface)?, isAppExtension: Bool, initialWebProxyActive: Bool) {
+    fileprivate init(queue: Queue, accountId: Int64, datacenterId: Int, context: MTContext, engine: NetworkEngine, switchingEngine: SwitchingNetworkEngine?, engineFactory: NetworkEngineFactory?, rustEngineDisabled: Bool, rustEngineWaitsForWebProxy: Bool, mainSession: NetworkEngineSession, mainSessionDelegate: NetworkMainSessionDelegate, telemetry: NetworkTelemetry?, _connectionStatus: Promise<ConnectionStatus>, basePath: String, appDataDisposable: Disposable, encryptionProvider: EncryptionProvider, useRequestTimeoutTimers: Bool, useBetaFeatures: Bool, useExperimentalFeatures: Bool, baseTcpConnectionInterfaceFactory: ((MTTcpConnectionInterfaceDelegate, DispatchQueue) -> MTTcpConnectionInterface)?, isAppExtension: Bool, initialWebProxyActive: Bool) {
         self.encryptionProvider = encryptionProvider
         
         self.queue = queue
+        self.accountId = accountId
         self.datacenterId = datacenterId
         self.context = context
         self._contextProxyId = ValuePromise((context.apiEnvironment.socksProxySettings as MTSocksProxySettings?).flatMap(NetworkContextProxyId.init(settings:)), ignoreRepeated: true)
@@ -1418,7 +1422,29 @@ public final class Network: NSObject {
     }
     
     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+        let hookPoints = PluginHookPoints.shared
+        // Plugins see the schema constructor name (`messages.setTyping`), which is
+        // the same identifier exteraGram's `pre_request_hook` receives.
+        var functionName = data.0.name
+        var wantsRequest = false
+        if hookPoints.preRequest != nil || hookPoints.postRequest != nil {
+            functionName = functionName.replacingOccurrences(of: "_", with: ".")
+            // Asked before anything is flattened: building the JSON document walks
+            // every parameter of every TL call, and a build with plugins installed
+            // but none interested in this request must not pay that.
+            wantsRequest = hookPoints.wantsRequest?(functionName) ?? true
+        }
+        if wantsRequest, let preRequest = hookPoints.preRequest, !preRequest(functionName, self.accountId, pluginRequestParametersJSON(data.0.parameters)) {
+            // Cancelled: emit the error on subscription so the caller sees an
+            // ordinary failure and nothing reaches the engine.
+            return Signal { subscriber in
+                subscriber.putError(pluginCancelledRequestError)
+                return EmptyDisposable
+            }
+        }
         let requestService = self.requestService
+        let postRequest = wantsRequest ? hookPoints.postRequest : nil
+        let accountId = self.accountId
         return Signal { [requestService] subscriber in
             let request = NetworkEngineRequest(
                 payload: data.1.makeData(),
@@ -1438,6 +1464,9 @@ public final class Network: NSObject {
                 completed: { result in
                     switch result {
                     case let .success(response):
+                        if let postRequest = postRequest {
+                            postRequest(functionName, accountId, pluginValueJSON((response.result as? BoxedMessage)?.body), nil)
+                        }
                         if let result = (response.result as! BoxedMessage).body as? T {
                             subscriber.putNext(result)
                             subscriber.putCompletion()
@@ -1446,6 +1475,7 @@ public final class Network: NSObject {
                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
                         }
                     case let .failure(failure):
+                        postRequest?(functionName, accountId, "{}", failure.error.errorDescription)
                         subscriber.putError(failure.error)
                     }
                 }

@@ -14,6 +14,8 @@ package_group(
         "//submodules/ChatListUI",
         "//submodules/ChatPresentationInterfaceState",
         "//submodules/DirectMediaImageCache",
+        # The plugin runtime builds images/files for plugin-sent messages.
+        "//submodules/ExteraPluginKit",
         "//submodules/FeaturedStickersScreen",
         "//submodules/FetchManagerImpl",
         "//submodules/GalleryUI",

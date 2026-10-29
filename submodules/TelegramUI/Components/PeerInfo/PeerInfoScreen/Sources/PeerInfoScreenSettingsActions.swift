@@ -17,6 +17,7 @@ import PasswordSetupUI
 import InstantPageCache
 import WalletContext
 import UndoUI
+import ExteraPluginKit
 
 extension PeerInfoScreenNode {
     func openSettings(section: PeerInfoSettingsSection) {
@@ -178,6 +179,8 @@ extension PeerInfoScreenNode {
             self.controller?.push(SecureIdAuthController(context: self.context, mode: .list))
         case .watch:
             push(watchSettingsController(context: self.context))
+        case .plugins:
+            push(pluginsController(context: self.context))
         case .support:
             let supportPeer = Promise<EnginePeer.Id?>()
             supportPeer.set(context.engine.peers.supportPeerId())

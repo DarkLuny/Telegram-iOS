@@ -341,6 +341,12 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
             }))
         }
     }
+    // Outside the `globalSettings` block on purpose: the plugin list is local to
+    // the app and must be reachable even when that account data has not loaded.
+    // The Settings icon is reused because the bundle carries no plugins artwork.
+    items[.extra]!.append(PeerInfoScreenDisclosureItem(id: 2, text: "Plugins", icon: PresentationResourcesSettings.settings, action: {
+        interaction.openSettings(.plugins)
+    }))
     
     items[.support]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_Support, icon: PresentationResourcesSettings.support, action: {
         interaction.openSettings(.support)

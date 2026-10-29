@@ -39,6 +39,7 @@ import ChatMessageBubbleItemNode
 import AdsInfoScreen
 import AdsReportScreen
 import WalletContext
+import ExteraPluginKit
  
 private struct MessageContextMenuData {
     let starStatus: Bool?
@@ -2479,6 +2480,33 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
             }
         }
         
+        // Plugin context-menu items. The plugins are asked while the menu is
+        // built, because an item's visibility is a JavaScript `condition` that
+        // has to see the tapped message. A plugin that throws or is no longer
+        // loaded contributes nothing.
+        if let firstMessage = messages.first {
+            let pluginContext: [String: Any] = [
+                "peer_id": firstMessage.id.peerId.toInt64(),
+                "message_id": Int(firstMessage.id.id),
+                "text": firstMessage.text,
+                "date": Int(firstMessage.timestamp),
+                "account": context.account.id.int64,
+            ]
+            let pluginItems = PluginManager.shared.visibleMenuItems(menuType: "message_context_menu", context: pluginContext)
+            if !pluginItems.isEmpty {
+                actions.append(.separator)
+                for item in pluginItems {
+                    actions.append(.action(ContextMenuActionItem(text: item.text, textColor: .primary, icon: { theme in
+                        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Apps"), color: theme.actionSheet.primaryTextColor)
+                    }, action: { c, _ in
+                        c?.dismiss(completion: {
+                            PluginManager.shared.performMenuItem(pluginId: item.pluginId, itemId: item.itemId, context: pluginContext)
+                        })
+                    })))
+                }
+            }
+        }
+
         return ContextController.Items(content: .list(actions), tip: nil)
     }
 }

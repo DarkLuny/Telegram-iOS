@@ -728,6 +728,26 @@ private func opportunisticallyTransformOutgoingMedia(network: Network, postbox: 
 }
 
 public func enqueueMessages(account: Account, peerId: PeerId, messages: [EnqueueMessage]) -> Signal<[MessageId?], NoError> {
+    // A plugin may rewrite or drop outgoing text. This runs before the media
+    // transform so the hook sees exactly what the user typed, and before the
+    // transaction so a cancelled message never reaches the postbox.
+    var messages = messages
+    if let sendMessage = PluginHookPoints.shared.sendMessage {
+        messages = messages.compactMap { message -> EnqueueMessage? in
+            guard case let .message(text, attributes, inlineStickers, mediaReference, threadId, replyToMessageId, replyToStoryId, localGroupingKey, correlationId, bubbleUpEmojiOrStickersets) = message else {
+                return message
+            }
+            var text = text
+            guard sendMessage(account.id.int64, peerId.toInt64(), &text) else {
+                return nil
+            }
+            return .message(text: text, attributes: attributes, inlineStickers: inlineStickers, mediaReference: mediaReference, threadId: threadId, replyToMessageId: replyToMessageId, replyToStoryId: replyToStoryId, localGroupingKey: localGroupingKey, correlationId: correlationId, bubbleUpEmojiOrStickersets: bubbleUpEmojiOrStickersets)
+        }
+        if messages.isEmpty {
+            return .single([])
+        }
+    }
+
     let signal: Signal<[(Bool, EnqueueMessage)], NoError>
     if let transformOutgoingMessageMedia = account.transformOutgoingMessageMedia {
         signal = opportunisticallyTransformOutgoingMedia(network: account.network, postbox: account.postbox, transformOutgoingMessageMedia: transformOutgoingMessageMedia, messages: messages, userInteractive: true)
