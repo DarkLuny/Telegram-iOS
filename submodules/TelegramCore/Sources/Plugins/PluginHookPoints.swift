@@ -144,14 +144,13 @@ func pluginValueJSON(_ value: Any?) -> String {
 ///
 /// The constructor name is the identifier exteraGram matches against
 /// (`updateNewMessage`), and the fields are flattened exactly like a request's
-/// parameters. An update whose description cannot be produced yields `nil`
-/// rather than an exception: observing updates must never break the account
-/// state machine.
-func pluginUpdateFields(_ update: Api.Update) -> (name: String, fields: [String: Any])? {
-    guard let description = update as? TypeConstructorDescription else {
-        return nil
-    }
-    let (name, parameters) = description.descriptionFields()
+/// parameters. `descriptionFields()` reads the schema table, so it cannot fail;
+/// an update with no fields simply arrives as an empty dictionary.
+func pluginUpdateFields(_ update: Api.Update) -> (name: String, fields: [String: Any]) {
+    // `Api.Update` conforms to `TypeConstructorDescription`, so this is a plain
+    // call rather than a conditional cast; the generated enums describe
+    // themselves from the schema table.
+    let (name, parameters) = update.descriptionFields()
     var fields: [String: Any] = [:]
     for (fieldName, value) in parameters {
         fields[fieldName] = pluginJSONValue(value.value)

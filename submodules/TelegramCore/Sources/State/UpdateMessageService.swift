@@ -6,15 +6,20 @@ import MtProtoKit
 
 class UpdateMessageService: NSObject, NetworkEngineUpdateSink {
     var peerId: PeerId!
+    /// The account this service belongs to, in the same identifier the request
+    /// and send hooks pass to plugins. It is the account *record* id, not the
+    /// user's peer id: a plugin sees one value for every hook of one account.
+    var accountId: Int64 = 0
     let pipe: ValuePipe<[UpdateGroup]> = ValuePipe()
     
     override init() {
         super.init()
     }
     
-    convenience init(peerId: PeerId) {
+    convenience init(peerId: PeerId, accountId: Int64) {
         self.init()
         self.peerId = peerId
+        self.accountId = accountId
     }
     
     func networkSessionDidReset() {
@@ -47,7 +52,7 @@ class UpdateMessageService: NSObject, NetworkEngineUpdateSink {
         guard !updates.isEmpty else {
             return
         }
-        let accountId = self.peerId.toInt64()
+        let accountId = self.accountId
         let wants = hookPoints.wantsUpdate
 
         // Described once, then reused for the per-update and the batch hook:
@@ -55,10 +60,7 @@ class UpdateMessageService: NSObject, NetworkEngineUpdateSink {
         // of this path.
         var describedUpdates: [(name: String, fields: [String: Any])] = []
         for update in updates {
-            guard let described = pluginUpdateFields(update) else {
-                continue
-            }
-            describedUpdates.append(described)
+            describedUpdates.append(pluginUpdateFields(update))
         }
 
         if let receivedUpdate = receivedUpdate {

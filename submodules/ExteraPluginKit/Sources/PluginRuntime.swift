@@ -1,13 +1,11 @@
 import Foundation
 import UIKit
-import Postbox
 import SwiftSignalKit
 import TelegramCore
 import TelegramPresentationData
 import TextFormat
 import AccountContext
 import UndoUI
-import Display
 
 /// Connects the plugin runtime to the running app.
 ///
@@ -216,27 +214,18 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             let content = Self.messageContent(text: text, parseMode: options.parseMode)
-            var attributes = content.attributes
-            if options.silent {
-                attributes.append(NotificationInfoMessageAttribute(flags: .muted))
-            }
-            let message = EnqueueMessage.message(
-                text: content.text,
-                attributes: attributes,
-                inlineStickers: [:],
-                mediaReference: nil,
-                threadId: nil,
-                replyToMessageId: Self.replySubject(options: options, peerId: peerId),
-                replyToStoryId: nil,
-                localGroupingKey: nil,
-                correlationId: nil,
-                bubbleUpEmojiOrStickersets: []
-            )
             let _ = PluginRuntime.withPluginSend {
-                enqueueMessages(account: context.account, peerId: PeerId(peerId), messages: [message]).start()
+                enqueuePluginMessage(
+                    account: context.account,
+                    peerId: peerId,
+                    replyToMessageId: options.replyToMessageId,
+                    silentPosting: options.silent,
+                    content: .text(content.text, content.entities)
+                ).start()
             }
         }
     }
+
     func sendFile(kind: String, peerId: Int64, path: String, options: PluginSendOptions) {
         Queue.mainQueue().async {
             guard let context = self.context else {
@@ -249,73 +238,39 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             let size = (try? fileManager.attributesOfItem(atPath: path))?[.size] as? NSNumber
-            let randomId = Int64.random(in: Int64.min ... Int64.max)
-            let resource = LocalFileReferenceMediaResource(localFilePath: path, randomId: randomId, isUniquelyReferencedTemporaryFile: false, size: size?.int64Value)
 
-            // A photo is uploaded as an image so it arrives as a photo bubble;
+            // A photo is uploaded as an image so it arrives as a picture bubble;
             // anything else (including an undecodable image) goes as a document.
-            var media: Media?
+            // Only this layer has a `UIImage`, so the pixel size is measured here
+            // and the engine builds the matching media.
+            var photoDimensions: PixelDimensions?
             if kind == "photo", let image = UIImage(contentsOfFile: path), image.size.width > 0.0, image.size.height > 0.0 {
-                let dimensions = PixelDimensions(
+                photoDimensions = PixelDimensions(
                     width: Int32(min(image.size.width * image.scale, 4096.0)),
                     height: Int32(min(image.size.height * image.scale, 4096.0))
                 )
-                let representation = TelegramMediaImageRepresentation(
-                    dimensions: dimensions,
-                    resource: resource,
-                    progressiveSizes: [],
-                    immediateThumbnailData: nil
-                )
-                media = TelegramMediaImage(
-                    imageId: MediaId(namespace: Namespaces.Media.LocalImage, id: randomId),
-                    representations: [representation],
-                    immediateThumbnailData: nil,
-                    reference: nil,
-                    partialReference: nil,
-                    flags: []
-                )
-            }
-            if media == nil {
-                media = TelegramMediaFile(
-                    fileId: MediaId(namespace: Namespaces.Media.LocalFile, id: randomId),
-                    partialReference: nil,
-                    resource: resource,
-                    previewRepresentations: [],
-                    videoThumbnails: [],
-                    immediateThumbnailData: nil,
-                    mimeType: Self.mimeType(forPath: path),
-                    size: size?.int64Value,
-                    attributes: [.FileName(fileName: (path as NSString).lastPathComponent)],
-                    alternativeRepresentations: []
-                )
             }
 
-            var attributes: [MessageAttribute] = []
-            let caption = options.caption ?? ""
-            if !caption.isEmpty {
-                let content = Self.messageContent(text: caption, parseMode: options.parseMode)
-                attributes = content.attributes
-            }
-            if options.silent {
-                attributes.append(NotificationInfoMessageAttribute(flags: .muted))
-            }
-            guard let media = media else {
-                return
-            }
-            let message = EnqueueMessage.message(
-                text: Self.messageContent(text: options.caption ?? "", parseMode: options.parseMode).text,
-                attributes: attributes,
-                inlineStickers: [:],
-                mediaReference: AnyMediaReference.standalone(media: media),
-                threadId: nil,
-                replyToMessageId: Self.replySubject(options: options, peerId: peerId),
-                replyToStoryId: nil,
-                localGroupingKey: nil,
-                correlationId: nil,
-                bubbleUpEmojiOrStickersets: []
-            )
+            // The caption is parsed the same way a text message is, so markdown in
+            // a caption produces entities instead of literal asterisks.
+            let caption = Self.messageContent(text: options.caption ?? "", parseMode: options.parseMode)
+
             let _ = PluginRuntime.withPluginSend {
-                enqueueMessages(account: context.account, peerId: PeerId(peerId), messages: [message]).start()
+                enqueuePluginMessage(
+                    account: context.account,
+                    peerId: peerId,
+                    replyToMessageId: options.replyToMessageId,
+                    silentPosting: options.silent,
+                    content: .localFile(
+                        path: path,
+                        mimeType: Self.mimeType(forPath: path),
+                        fileName: (path as NSString).lastPathComponent,
+                        size: size?.int64Value,
+                        photoDimensions: photoDimensions,
+                        caption: caption.text,
+                        captionEntities: caption.entities
+                    )
+                ).start()
             }
         }
     }
@@ -361,19 +316,15 @@ private final class PluginActionsImpl: PluginActions {
 
     // MARK: - Message building
 
-    private static func replySubject(options: PluginSendOptions, peerId: Int64) -> EngineMessageReplySubject? {
-        guard let messageId = options.replyToMessageId else {
-            return nil
-        }
-        let id = EngineMessage.Id(peerId: PeerId(peerId), namespace: Namespaces.Message.Cloud, id: Int32(clamping: messageId))
-        return EngineMessageReplySubject(messageId: id, quote: nil, innerSubject: nil)
-    }
-
     /// Turns plugin text into entities. `parse_mode: "markdown"` runs the same
     /// converter the composer uses when pasting, so bold/italic/code/pre from a
     /// plugin land as real entities rather than literal asterisks. HTML is not
     /// supported by this runtime, so it is sent as plain text.
-    private static func messageContent(text: String, parseMode: String?) -> (text: String, attributes: [MessageAttribute]) {
+    ///
+    /// Only entities cross the module boundary: wrapping them in a
+    /// `TextEntitiesMessageAttribute` is the engine's job, because that attribute
+    /// is a Postbox type.
+    private static func messageContent(text: String, parseMode: String?) -> (text: String, entities: [MessageTextEntity]) {
         let mode = (parseMode ?? "").lowercased()
         var entities: [MessageTextEntity] = []
         var finalText = text
@@ -385,10 +336,7 @@ private final class PluginActionsImpl: PluginActions {
         } else {
             entities = generateTextEntities(text, enabledTypes: .all)
         }
-        guard !entities.isEmpty else {
-            return (finalText, [])
-        }
-        return (finalText, [TextEntitiesMessageAttribute(entities: entities)])
+        return (finalText, entities)
     }
 
     private static func mimeType(forPath path: String) -> String {
