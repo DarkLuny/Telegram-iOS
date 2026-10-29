@@ -1,4 +1,14 @@
-name: Build Telegram IPA (unsigned)
+name: Build Telegram IPA (sideload)
+
+# Produces an unsigned IPA that survives re-signing with a free Apple ID.
+#
+# A stock `make build` cannot do that: `Telegram/BUILD` stamps the binary with
+# every right the App Store Telegram has (iCloud, Siri, CarPlay, Apple Pay,
+# PushKit VoIP, communication notifications, filtering), and iOS kills the
+# process at launch when the signature asks for a right the re-signing profile
+# does not carry. `sideload_patch.py` narrows the entitlements to the set a
+# working sideload build ships, drops the app extensions, and makes the main
+# app fall back to Documents when the App Group entitlement is missing.
 
 on:
   workflow_dispatch:
@@ -71,21 +81,18 @@ jobs:
           sudo rm -rf \
             /Users/runner/Library/Developer/CoreSimulator/Caches \
             /Library/Developer/CoreSimulator/Profiles/Runtimes/* \
+            /Library/Developer/CoreSimulator/Images/* \
+            /Library/Developer/CoreSimulator/Volumes \
             /Users/runner/.cargo \
             /Users/runner/.rustup \
             /usr/local/lib/android \
             /Users/runner/Library/Android \
-            /Applications/Xcode_26*.app \
-            /Applications/Xcode_27.2*.app \
-            /Applications/Xcode_27.0*.app \
-            /Library/Developer/CoreSimulator/Volumes \
             /Users/runner/Library/Developer/Xcode/DerivedData \
             /Users/runner/.gradle \
             /Users/runner/.m2 \
-            /usr/local/share/dotnet \
-            /usr/local/Homebrew/Library/Taps || true
-          # Simulator runtime DMGs left in the image eat tens of GB and are useless here.
-          sudo rm -rf /Library/Developer/CoreSimulator/Images/* || true
+            /Applications/Xcode_26*.app \
+            /Applications/Xcode_27.2*.app \
+            /Applications/Xcode_27.0*.app || true
           df -h /
 
       - name: Restore Bazel cache
@@ -93,10 +100,20 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.BAZEL_CACHE_DIR }}
-          key: bazel-release_arm64-${{ hashFiles('versions.json') }}-${{ github.run_id }}
+          key: bazel-sideload-${{ hashFiles('versions.json') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-release_arm64-${{ hashFiles('versions.json') }}-
-            bazel-release_arm64-
+            bazel-sideload-${{ hashFiles('versions.json') }}-
+            bazel-sideload-
+
+      - name: Apply sideload patch
+        run: |
+          set -euo pipefail
+          python3 sideload_patch.py
+          git --no-pager diff --stat
+          echo "--- resulting entitlements template ---"
+          sed -n '/name = "TelegramEntitlements"/,/^)/p' Telegram/BUILD
+          echo "--- app groups fallback ---"
+          grep -n "telegram-shared" submodules/TelegramUI/Sources/AppDelegate.swift
 
       - name: Write build configuration
         env:
@@ -106,11 +123,14 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os
-          # The bundled fake-codesigning profiles are issued for exactly
-          # ph.telegra.Telegraph / C67CF9S4VU, so bundle_id and team_id must stay
-          # untouched -- any other value fails with "Could not find a valid
-          # aps-environment entitlement in the provided provisioning profiles".
+          # bundle_id/team_id must match the bundled fake-codesigning profiles
+          # (ph.telegra.Telegraph / C67CF9S4VU); the sideload patch is what
+          # keeps the resulting binary from asking for App-Store-only rights.
+          # Siri and iCloud are switched off: their entitlements are gone, and
+          # CKContainer.default() raises when the app has no iCloud container.
           cfg = json.load(open("build-system/appstore-configuration.json"))
+          cfg["enable_siri"] = False
+          cfg["enable_icloud"] = False
           api_id = os.environ.get("TELEGRAM_API_ID") or ""
           api_hash = os.environ.get("TELEGRAM_API_HASH") or ""
           if api_id and api_hash:
@@ -154,40 +174,83 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.BAZEL_CACHE_DIR }}
-          key: bazel-release_arm64-${{ hashFiles('versions.json') }}-${{ github.run_id }}
+          key: bazel-sideload-${{ hashFiles('versions.json') }}-${{ github.run_id }}
 
-      - name: Collect IPA
+      - name: Collect and verify IPA
         run: |
           set -euo pipefail
           ls -la build/artifacts || true
           SRC="$(find build/artifacts bazel-bin/Telegram -maxdepth 2 -name 'Telegram.ipa' -type f 2>/dev/null | head -1 || true)"
           [ -n "$SRC" ] || { echo "::error::Telegram.ipa not found"; exit 1; }
           mkdir -p out
-          cp -f "$SRC" "out/Telegram-${APP_VERSION}-${BUILD_NUMBER}.ipa"
+          IPA="out/Telegram-${APP_VERSION}-${BUILD_NUMBER}-sideload.ipa"
+          cp -f "$SRC" "$IPA"
           ls -lh out
-          python3 - <<'PY'
-          import glob, zipfile
-          p = glob.glob("out/*.ipa")[0]
-          with zipfile.ZipFile(p) as z:
+
+          python3 - "$IPA" <<'PY'
+          import plistlib, struct, sys, zipfile
+
+          path = sys.argv[1]
+          with zipfile.ZipFile(path) as z:
               names = z.namelist()
-          print("entries=%d embedded.mobileprovision=%s _CodeSignature=%s" % (
-              len(names),
-              any(n.endswith("embedded.mobileprovision") for n in names),
-              any("/_CodeSignature/" in n for n in names)))
+              plugins = sorted({n.split("/")[3] for n in names if n.startswith("Payload/Telegram.app/PlugIns/")})
+              exe = z.read("Payload/Telegram.app/Telegram")
+
+          def entitlements(blob):
+              ncmds = struct.unpack("<I", blob[16:20])[0]
+              off = 32
+              signature = None
+              for _ in range(ncmds):
+                  cmd, size = struct.unpack("<II", blob[off:off + 8])
+                  if cmd == 0x1D:
+                      data_off, data_size = struct.unpack("<II", blob[off + 8:off + 16])
+                      signature = blob[data_off:data_off + data_size]
+                      break
+                  off += size
+              if signature is None:
+                  return None
+              count = struct.unpack(">I", signature[8:12])[0]
+              for k in range(count):
+                  kind, offset = struct.unpack(">II", signature[12 + k * 8:20 + k * 8])
+                  if kind == 5:
+                      length = struct.unpack(">I", signature[offset + 4:offset + 8])[0]
+                      body = signature[offset + 8:offset + 8 + length]
+                      return plistlib.loads(body[body.find(b"<plist"):body.rfind(b"</plist>") + 8])
+              return None
+
+          ents = entitlements(exe) or {}
+          has_provision = any(n.endswith("embedded.mobileprovision") for n in names)
+          print("entries=%d plugins=%s" % (len(names), plugins or "none"))
+          print("embedded.mobileprovision=%s" % has_provision)
+          print("entitlements:")
+          for key in sorted(ents):
+              print("  %s = %s" % (key, ents[key]))
+
+          # These are exactly the rights a sideload certificate can back.
+          allowed = {
+              "application-identifier",
+              "aps-environment",
+              "com.apple.security.application-groups",
+              "get-task-allow",
+              "com.apple.developer.team-identifier",
+              "keychain-access-groups",
+          }
+          extra = sorted(set(ents) - allowed)
+          if extra:
+              print("::error::unexpected entitlements: %s" % extra)
+              raise SystemExit(1)
+          if not has_provision:
+              print("::error::IPA has no embedded.mobileprovision")
+              raise SystemExit(1)
+          if plugins:
+              print("::error::extensions were not stripped: %s" % plugins)
+              raise SystemExit(1)
+          print("entitlements are sideload-safe")
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Telegram-ipa-${{ env.APP_VERSION }}-${{ env.BUILD_NUMBER }}
+          name: Telegram-sideload-${{ env.APP_VERSION }}-${{ env.BUILD_NUMBER }}
           path: out/*.ipa
           retention-days: 7
           if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: build-diagnostics
-          path: |
-            build/artifacts/Telegram.DSYMs.zip
-          retention-days: 3
-          if-no-files-found: ignore
