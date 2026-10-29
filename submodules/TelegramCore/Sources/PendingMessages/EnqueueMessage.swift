@@ -734,10 +734,10 @@ public func enqueueMessages(account: Account, peerId: PeerId, messages: [Enqueue
     var messages = messages
     if let sendMessage = PluginHookPoints.shared.sendMessage {
         messages = messages.compactMap { message -> EnqueueMessage? in
-            guard case let .message(text, attributes, inlineStickers, mediaReference, threadId, replyToMessageId, replyToStoryId, localGroupingKey, correlationId, bubbleUpEmojiOrStickersets) = message else {
+            guard case let .message(messageText, attributes, inlineStickers, mediaReference, threadId, replyToMessageId, replyToStoryId, localGroupingKey, correlationId, bubbleUpEmojiOrStickersets) = message else {
                 return message
             }
-            var text = text
+            var text = messageText
             guard sendMessage(account.id.int64, peerId.toInt64(), &text) else {
                 return nil
             }
