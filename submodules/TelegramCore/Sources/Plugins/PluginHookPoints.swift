@@ -1,6 +1,9 @@
 import Foundation
 import MtProtoKit
-import TelegramApi
+// Same access level the rest of TelegramCore uses, and all that is needed here:
+// no `Api.*` type appears in this file's public surface, only TL values passed
+// as `Any` and turned into JSON.
+internal import TelegramApi
 
 /// Hook points the plugin runtime attaches to, declared inside TelegramCore so the
 /// core does not depend on the plugin module.
