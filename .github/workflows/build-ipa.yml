@@ -12,6 +12,9 @@ name: Build Telegram IPA (sideload)
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-ipa.yml
 
 concurrency:
   group: telegram-ipa-${{ github.ref }}
