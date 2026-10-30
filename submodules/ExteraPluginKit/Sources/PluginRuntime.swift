@@ -513,8 +513,11 @@ private final class PluginActionsImpl: PluginActions {
     /// One alert is tracked per plugin, so a `dismiss()` from the plugin closes
     /// the dialog the same plugin opened and nothing else.
     func showAlert(pluginId: String, json: String) {
-        Queue.mainQueue().async {
-            guard let sharedContext = self.sharedContext else {
+        // `[weak self]` on the outer closure, not just the per-button one: an
+        // inner capture list cannot weaken a `self` the enclosing closure has
+        // already captured strongly, and the compiler rejects the mismatch.
+        Queue.mainQueue().async { [weak self] in
+            guard let sharedContext = self?.sharedContext else {
                 return
             }
             let object = PluginRuntime.parseObject(json)
@@ -522,6 +525,15 @@ private final class PluginActionsImpl: PluginActions {
             let message = (object["message"] as? String) ?? ""
             let buttons = (object["buttons"] as? [[String: Any]]) ?? []
             let presentationData = sharedContext.currentPresentationData.with { $0 }
+
+            // No `self` in here at all: the alert controller outlives this
+            // closure (it is kept in `alerts`), so the button action must not
+            // hold the runtime's implementation alive through the controller it
+            // owns. `runCallback` is a one-line forward to the manager, so
+            // calling it directly is the same thing without the capture.
+            let runToken: (String) -> Void = { token in
+                PluginManager.shared.runPluginCallback(pluginId: pluginId, token: token)
+            }
 
             var actions: [TextAlertAction] = []
             for button in buttons {
@@ -541,9 +553,9 @@ private final class PluginActionsImpl: PluginActions {
                 default:
                     type = .defaultAction
                 }
-                actions.append(TextAlertAction(type: type, title: text, action: { [weak self] in
+                actions.append(TextAlertAction(type: type, title: text, action: {
                     if let token = token {
-                        self?.runCallback(token: token, pluginId: pluginId)
+                        runToken(token)
                     }
                 }))
             }
@@ -562,7 +574,7 @@ private final class PluginActionsImpl: PluginActions {
             // when the plugin shows another one. Nothing else in the app knows
             // about it, so a dialog the user swiped away simply stays referenced
             // until the plugin's next alert or its unload.
-            self.alerts[pluginId] = controller
+            self?.alerts[pluginId] = controller
             sharedContext.presentGlobalController(controller, nil)
         }
     }
@@ -577,10 +589,6 @@ private final class PluginActionsImpl: PluginActions {
     }
 
     private var alerts: [String: ViewController] = [:]
-
-    private func runCallback(token: String, pluginId: String) {
-        PluginManager.shared.runPluginCallback(pluginId: pluginId, token: token)
-    }
 
     private func reportMissingAccount() {
         guard let sharedContext = self.sharedContext else {
