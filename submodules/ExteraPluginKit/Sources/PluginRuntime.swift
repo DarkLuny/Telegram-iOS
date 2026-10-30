@@ -226,7 +226,9 @@ public final class PluginRuntime {
         return body()
     }
 
-    private static func parseObject(_ json: String) -> [String: Any] {
+    /// Shared with `PluginActionsImpl`, the other type in this file that parses
+    /// the same JSON documents; `private` would confine it to `PluginRuntime`.
+    fileprivate static func parseObject(_ json: String) -> [String: Any] {
         guard let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return [:]
