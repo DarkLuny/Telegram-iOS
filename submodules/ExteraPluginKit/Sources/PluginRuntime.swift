@@ -76,7 +76,6 @@ public final class PluginRuntime {
             for (id, context, _) in accounts {
                 contexts[id.int64] = context
             }
-            self.activeContext = primary
             self.actions.contexts = contexts
             self.actions.primaryAccountId = primary?.account.id.int64
             // JS keeps its own copy so `get_selected_account()` answers without a
