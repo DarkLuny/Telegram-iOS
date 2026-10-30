@@ -6,6 +6,13 @@
  * can drift from js/bootstrap.js, which is precisely what embedding the script
  * instead of shipping it as a resource is meant to avoid. The generator is run
  * here instead, into a temporary file.
+ *
+ * The output is *Swift*, not JSON, and the difference is not cosmetic: Swift
+ * spells a non-ASCII escape `\u{2014}` while JSON uses `\u2014`, and evaluating
+ * the literal with `JSON.parse` cannot tell the two apart. A single em dash in a
+ * comment therefore decoded fine here and failed the real build with
+ * "expected hexadecimal code in braces after unicode escape". The decoder below
+ * accepts only what Swift accepts, so that class of bug fails in a second.
  */
 const fs = require('fs');
 const os = require('os');
@@ -30,7 +37,56 @@ if (start < 0) {
     process.exit(1);
 }
 const literal = generated.slice(start + marker.length).replace(/\s+$/, '');
-const decoded = JSON.parse(literal);
+
+// Decodes a Swift string literal body, refusing anything Swift would refuse.
+function decodeSwiftLiteral(text) {
+    if (!text.startsWith('"') || !text.endsWith('"') || text.length < 2) {
+        throw new Error('literal is not a quoted string: ' + JSON.stringify(text.slice(0, 40)));
+    }
+    const body = text.slice(1, -1);
+    let out = '';
+    for (let i = 0; i < body.length; i += 1) {
+        const character = body[i];
+        if (character !== '\\') {
+            if (character === '"') throw new Error('bare quote at ' + i);
+            out += character;
+            continue;
+        }
+        const next = body[i + 1];
+        i += 1;
+        switch (next) {
+            case '\\': out += '\\'; break;
+            case '"': out += '"'; break;
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case '0': out += '\0'; break;
+            case 'u': {
+                if (body[i + 1] !== '{') {
+                    throw new Error('unicode escape without braces at ' + i);
+                }
+                const end = body.indexOf('}', i);
+                if (end < 0) throw new Error('unterminated unicode escape at ' + i);
+                const hex = body.slice(i + 2, end);
+                if (!/^[0-9a-fA-F]{1,8}$/.test(hex)) {
+                    throw new Error('bad unicode escape: ' + hex);
+                }
+                const code = parseInt(hex, 16);
+                if (code > 0x10ffff) throw new Error('code point out of range: ' + hex);
+                if (code >= 0xd800 && code <= 0xdfff) throw new Error('lone surrogate: ' + hex);
+                out += String.fromCodePoint(code);
+                i = end;
+                break;
+            }
+            default:
+                // Swift also has \( ) interpolation and \x; none may appear.
+                throw new Error('unsupported Swift escape \\' + next + ' at ' + i);
+        }
+    }
+    return out;
+}
+
+const decoded = decodeSwiftLiteral(literal);
 // Compare with normalized newlines: `core.autocrlf` turns the source into CRLF
 // on a Windows checkout while the generator writes LF, and both describe the
 // same script.
