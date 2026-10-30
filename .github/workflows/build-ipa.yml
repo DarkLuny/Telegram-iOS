@@ -108,6 +108,31 @@ jobs:
             bazel-sideload-${{ hashFiles('versions.json') }}-
             bazel-sideload-
 
+      - name: Check the fake provisioning profiles
+        run: |
+          set -euo pipefail
+          # rules_apple stamps the profile ExpirationDate into the build and
+          # refuses to continue once it has passed. The profiles are checked in
+          # with a long lease; this prints the date so an expiry that has crept
+          # up is obvious before the long compile.
+          python3 - <<'PY'
+          import datetime, glob, plistlib
+          now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+          worst = None
+          for path in sorted(glob.glob("build-system/fake-codesigning/profiles/*.mobileprovision")):
+              data = open(path, "rb").read()
+              start = data.find(b"<?xml")
+              end = data.rfind(b"</plist>")
+              profile = plistlib.loads(data[start:end + 8])
+              expire = profile["ExpirationDate"]
+              print("%-30s %s" % (path.rsplit("/", 1)[-1], expire))
+              if worst is None or expire < worst:
+                  worst = expire
+          if worst <= now:
+              raise SystemExit("fake provisioning profiles expired on %s; run build-system/fake-codesigning/refresh_profiles.py" % worst)
+          print("earliest expiry: %s" % worst)
+          PY
+
       - name: Apply sideload patch
         run: |
           set -euo pipefail
