@@ -18,9 +18,20 @@ public protocol PluginHost: AnyObject {
     func pluginAddOnSendMessageHook(pluginId: String)
     func pluginAddMenuItem(pluginId: String, item: PluginMenuItem)
     func pluginRemoveMenuItem(pluginId: String, itemId: String)
-    func pluginSendText(pluginId: String, peerId: Int64, text: String, options: PluginSendOptions)
-    func pluginSendFile(pluginId: String, kind: String, peerId: Int64, path: String, options: PluginSendOptions)
-    func pluginShowBulletin(pluginId: String, kind: String, text: String)
+    /// `account` is the exteraGram account id, or nil for "the selected one".
+    func pluginSendText(pluginId: String, account: Int64?, peerId: Int64, text: String, options: PluginSendOptions)
+    func pluginSendFile(pluginId: String, account: Int64?, kind: String, peerId: Int64, path: String, options: PluginSendOptions)
+    func pluginEditMessage(pluginId: String, account: Int64?, peerId: Int64, messageId: Int64, text: String, options: PluginSendOptions)
+    func pluginShowBulletin(pluginId: String, kind: String, json: String)
+    func pluginShowAlert(pluginId: String, json: String)
+    func pluginDismissAlert(pluginId: String)
+    /// Filesystem request: `op` names the mode, `payload` is the text or base64.
+    func pluginFileOperation(pluginId: String, op: String, path: String, payload: String?) -> String?
+    /// The account selected in the UI, so `get_selected_account()` has a value.
+    func pluginSelectedAccount(pluginId: String) -> Int64?
+    /// Puts text on the system clipboard and reports it, like
+    /// `android_utils.copy_to_clipboard`.
+    func pluginCopyToClipboard(pluginId: String, text: String)
     func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String)
 }
 
@@ -54,12 +65,33 @@ public struct PluginSendOptions {
     public let silent: Bool
     public let caption: String?
     public let parseMode: String?
+    /// Entities the plugin already produced, as JSON.
+    ///
+    /// The bootstrap parses `parse_mode` on the JavaScript side, so text arrives
+    /// with its formatting already resolved into entities. They stay encoded here
+    /// rather than as `[MessageTextEntity]` because this type lives in the module
+    /// that must not depend on TelegramCore.
+    public let entitiesJSON: String?
+    /// Same, for a media caption.
+    public let captionEntitiesJSON: String?
 
     public init(json: [String: Any]) {
         self.replyToMessageId = (json["replyToMsg"] as? NSNumber)?.int64Value
         self.silent = (json["notify"] as? Bool) == false
         self.caption = json["caption"] as? String
         self.parseMode = json["parse_mode"] as? String
+        self.entitiesJSON = PluginSendOptions.jsonString(json["entities"])
+        self.captionEntitiesJSON = PluginSendOptions.jsonString(json["caption_entities"])
+    }
+
+    private static func jsonString(_ value: Any?) -> String? {
+        guard let value = value, !(value is NSNull),
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return text
     }
 }
 
@@ -302,20 +334,53 @@ public final class PluginLoader {
         }
         hostObject.setObject(removeMenuItem as AnyObject, forKeyedSubscript: "removeMenuItem" as NSString)
 
-        let sendText: @convention(block) (String, Double, String, String) -> Void = { id, peerId, text, optionsJSON in
-            host.pluginSendText(pluginId: id, peerId: Int64(peerId), text: text, options: parseSendOptions(optionsJSON))
+        let sendText: @convention(block) (String, Double, Double, String, String) -> Void = { id, account, peerId, text, optionsJSON in
+            host.pluginSendText(pluginId: id, account: PluginLoader.accountValue(account), peerId: Int64(peerId), text: text, options: parseSendOptions(optionsJSON))
         }
         hostObject.setObject(sendText as AnyObject, forKeyedSubscript: "sendText" as NSString)
 
-        let sendFile: @convention(block) (String, String, Double, String, String) -> Void = { id, kind, peerId, path, optionsJSON in
-            host.pluginSendFile(pluginId: id, kind: kind, peerId: Int64(peerId), path: path, options: parseSendOptions(optionsJSON))
+        let sendFile: @convention(block) (String, Double, String, Double, String, String) -> Void = { id, account, kind, peerId, path, optionsJSON in
+            host.pluginSendFile(pluginId: id, account: PluginLoader.accountValue(account), kind: kind, peerId: Int64(peerId), path: path, options: parseSendOptions(optionsJSON))
         }
         hostObject.setObject(sendFile as AnyObject, forKeyedSubscript: "sendFile" as NSString)
 
-        let showBulletin: @convention(block) (String, String, String) -> Void = { id, kind, text in
-            host.pluginShowBulletin(pluginId: id, kind: kind, text: text)
+        let editMessage: @convention(block) (String, Double, Double, Double, String, String) -> Void = { id, account, peerId, messageId, text, optionsJSON in
+            host.pluginEditMessage(pluginId: id, account: PluginLoader.accountValue(account), peerId: Int64(peerId), messageId: Int64(messageId), text: text, options: parseSendOptions(optionsJSON))
+        }
+        hostObject.setObject(editMessage as AnyObject, forKeyedSubscript: "editMessage" as NSString)
+
+        // The bulletin payload is JSON: a plain message is one object, and the
+        // richer variants add a button or an undo action whose callbacks are
+        // tokens the plugin stored.
+        let showBulletin: @convention(block) (String, String, String) -> Void = { id, kind, json in
+            host.pluginShowBulletin(pluginId: id, kind: kind, json: json)
         }
         hostObject.setObject(showBulletin as AnyObject, forKeyedSubscript: "showBulletin" as NSString)
+
+        let showAlert: @convention(block) (String, String) -> Void = { id, json in
+            host.pluginShowAlert(pluginId: id, json: json)
+        }
+        hostObject.setObject(showAlert as AnyObject, forKeyedSubscript: "showAlert" as NSString)
+
+        let dismissAlert: @convention(block) (String) -> Void = { id in
+            host.pluginDismissAlert(pluginId: id)
+        }
+        hostObject.setObject(dismissAlert as AnyObject, forKeyedSubscript: "dismissAlert" as NSString)
+
+        let fileOp: @convention(block) (String, String, String, String?) -> String? = { id, op, path, payload in
+            return host.pluginFileOperation(pluginId: id, op: op, path: path, payload: payload)
+        }
+        hostObject.setObject(fileOp as AnyObject, forKeyedSubscript: "fileOp" as NSString)
+
+        let selectedAccount: @convention(block) (String) -> Double = { id in
+            return Double(host.pluginSelectedAccount(pluginId: id) ?? 0)
+        }
+        hostObject.setObject(selectedAccount as AnyObject, forKeyedSubscript: "selectedAccount" as NSString)
+
+        let copyToClipboard: @convention(block) (String, String) -> Void = { id, text in
+            host.pluginCopyToClipboard(pluginId: id, text: text)
+        }
+        hostObject.setObject(copyToClipboard as AnyObject, forKeyedSubscript: "copyToClipboard" as NSString)
 
         let pluginDirectory: @convention(block) (String) -> String = { id in
             PluginStore.shared.directory(for: id).path
@@ -328,6 +393,16 @@ public final class PluginLoader {
         hostObject.setObject(schedule as AnyObject, forKeyedSubscript: "schedulePlugin" as NSString)
 
         context.setObject(hostObject, forKeyedSubscript: "__host" as NSString)
+    }
+
+    /// The bridge carries `account` as a number; JavaScript has no integers, so
+    /// an "unset" account arrives as NaN. `Int64` would trap on that, so the
+    /// conversion is explicit and NaN means "selected account".
+    private static func accountValue(_ value: Double) -> Int64? {
+        guard value.isFinite else {
+            return nil
+        }
+        return Int64(value)
     }
 }
 

@@ -125,6 +125,15 @@ public final class PluginManager: PluginHost {
         return (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
     }
 
+    /// The exteraGram SDK level this runtime claims.
+    ///
+    /// exteraGram's own latest is 1.4.5.0; the surface here covers everything
+    /// the 1.4.4.3 docs describe except the Android-only parts (Xposed hooks,
+    /// Java class proxies, Android intents), and 1.4.5.0 only adds the
+    /// `account=` helpers plus `AccountClient`, which are implemented. So a
+    /// plugin that gates a feature on `__sdk_version__` gets the true answer.
+    static let supportedSDKVersion = "1.4.5.0"
+
     private func loadAllOnQueue() {
         guard let bootstrapSource = self.pluginSource else {
             return
@@ -159,6 +168,14 @@ public final class PluginManager: PluginHost {
                 if let requirement = manifest.appVersionRequirement,
                    !pluginVersionRequirementIsSatisfied(requirement, actual: appVersion) {
                     throw PluginError.unsupportedVersion(required: requirement, actual: appVersion)
+                }
+                // `__sdk_version__` gates the *plugin API*, not the app version.
+                // A plugin written for a newer SDK may call something this
+                // runtime does not implement, and its top-level code must not
+                // run just to find that out.
+                if let requirement = manifest.sdkVersionRequirement,
+                   !pluginVersionRequirementIsSatisfied(requirement, actual: PluginManager.supportedSDKVersion) {
+                    throw PluginError.unsupportedSDKVersion(required: requirement, actual: PluginManager.supportedSDKVersion)
                 }
                 // `__requirements__` names Python packages. They cannot be
                 // installed, but a plugin often lists one it no longer uses, so a
@@ -310,16 +327,68 @@ public final class PluginManager: PluginHost {
     /// exteraGram's `add_hook(name, match_substring=True)` exists so one
     /// registration can cover a request family (`messages.`). `*` still means
     /// everything, as it does there.
+    ///
+    /// Names are matched in both spellings. exteraGram registers hooks by TL
+    /// constructor (`TL_messages_setTyping`, `TL_updateNewMessage`) and passes
+    /// that spelling to the callback, while TelegramCore reports the dotted one
+    /// (`messages.setTyping`). A plugin ported from Android would otherwise
+    /// register a hook that never fires, which is the worst failure mode: it
+    /// looks like it works.
     private static func pluginWants(_ plugin: LoadedPlugin, hookName: String) -> Bool {
-        if plugin.registeredRequestHooks.contains(hookName) || plugin.registeredRequestHooks.contains("*") {
+        let candidates = PluginManager.hookNameCandidates(hookName)
+        for candidate in candidates where plugin.registeredRequestHooks.contains(candidate) {
+            return true
+        }
+        if plugin.registeredRequestHooks.contains("*") {
             return true
         }
         for pattern in plugin.registeredSubstringHooks {
-            if pattern == "*" || hookName.contains(pattern) {
+            if pattern == "*" {
+                return true
+            }
+            for candidate in candidates where candidate.contains(pattern) {
                 return true
             }
         }
         return false
+    }
+
+    /// The dotted name plus its `TL_` spelling, so either registration matches.
+    static func hookNameCandidates(_ name: String) -> [String] {
+        if name == "*" {
+            return ["*"]
+        }
+        var result = [name]
+        if name.hasPrefix("TL_") {
+            let stripped = String(name.dropFirst(3))
+            if !result.contains(stripped) {
+                result.append(stripped)
+            }
+            // The dotted form of a TL name is not a plain substitution — an
+            // update (`TL_updateNewMessage`) has no namespace — so the first
+            // separator is the only one that can become a dot.
+            if let separator = stripped.range(of: "_") {
+                let dotted = stripped.replacingCharacters(in: separator, with: ".")
+                if !result.contains(dotted) {
+                    result.append(dotted)
+                }
+            }
+        } else {
+            let prefixed = "TL_" + name.replacingOccurrences(of: ".", with: "_")
+            if !result.contains(prefixed) {
+                result.append(prefixed)
+            }
+        }
+        return result
+    }
+
+    /// What a plugin's hook receives: exteraGram spells these with the `TL_`
+    /// prefix (`TL_messages_setTyping`, `TL_updateNewMessage`).
+    static func tlHookName(_ name: String) -> String {
+        if name.hasPrefix("TL_") {
+            return name
+        }
+        return "TL_" + name.replacingOccurrences(of: ".", with: "_")
     }
 
     /// Whether a specific request name has a listener. `*` matches everything, as
@@ -363,7 +432,12 @@ public final class PluginManager: PluginHost {
             // Everything crosses the bridge as a JSON string: JS objects and
             // block callbacks are not marshalled, so the only failure mode is a
             // malformed document, which is caught and logged below.
-            var context: [String: Any] = ["name": hookName, "account": account, "field": field]
+            var context: [String: Any] = [
+                "name": hookName,
+                "tlName": PluginManager.tlHookName(hookName),
+                "account": account,
+                "field": field
+            ]
             if let error = error {
                 context["error"] = error
             }
@@ -520,16 +594,40 @@ public final class PluginManager: PluginHost {
         self.lock.unlock()
     }
 
-    public func pluginSendText(pluginId: String, peerId: Int64, text: String, options: PluginSendOptions) {
-        self.actions?.sendText(peerId: peerId, text: text, options: options)
+    public func pluginSendText(pluginId: String, account: Int64?, peerId: Int64, text: String, options: PluginSendOptions) {
+        self.actions?.sendText(account: account, peerId: peerId, text: text, options: options)
     }
 
-    public func pluginSendFile(pluginId: String, kind: String, peerId: Int64, path: String, options: PluginSendOptions) {
-        self.actions?.sendFile(kind: kind, peerId: peerId, path: path, options: options)
+    public func pluginSendFile(pluginId: String, account: Int64?, kind: String, peerId: Int64, path: String, options: PluginSendOptions) {
+        self.actions?.sendFile(account: account, kind: kind, peerId: peerId, path: path, options: options)
     }
 
-    public func pluginShowBulletin(pluginId: String, kind: String, text: String) {
-        self.actions?.showBulletin(kind: kind, text: text)
+    public func pluginEditMessage(pluginId: String, account: Int64?, peerId: Int64, messageId: Int64, text: String, options: PluginSendOptions) {
+        self.actions?.editMessage(account: account, peerId: peerId, messageId: messageId, text: text, options: options)
+    }
+
+    public func pluginShowBulletin(pluginId: String, kind: String, json: String) {
+        self.actions?.showBulletin(pluginId: pluginId, kind: kind, json: json)
+    }
+
+    public func pluginShowAlert(pluginId: String, json: String) {
+        self.actions?.showAlert(pluginId: pluginId, json: json)
+    }
+
+    public func pluginDismissAlert(pluginId: String) {
+        self.actions?.dismissAlert(pluginId: pluginId)
+    }
+
+    public func pluginFileOperation(pluginId: String, op: String, path: String, payload: String?) -> String? {
+        return PluginFileAccess.perform(pluginId: pluginId, op: op, path: path, payload: payload)
+    }
+
+    public func pluginSelectedAccount(pluginId: String) -> Int64? {
+        return self.actions?.selectedAccountId()
+    }
+
+    public func pluginCopyToClipboard(pluginId: String, text: String) {
+        self.actions?.copyToClipboard(pluginId: pluginId, text: text)
     }
 
     public func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String) {
@@ -552,6 +650,37 @@ public final class PluginManager: PluginHost {
             DispatchQueue.main.async(execute: run)
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: run)
+        }
+    }
+
+    // MARK: - Plugin-visible callbacks
+
+    /// Runs a callback the plugin stored under `token`.
+    ///
+    /// Bulletin buttons and alert buttons take a function, which cannot cross the
+    /// bridge; the bootstrap keeps the function and hands the host a token. This
+    /// is called from the main queue when the user taps, and synchronizes onto the
+    /// script queue to run it.
+    public func runPluginCallback(pluginId: String, token: String) {
+        guard let plugin = self.plugin(id: pluginId) else {
+            return
+        }
+        _ = self.callJS(plugin: plugin, function: "__extera.runCallback", arguments: [token, "[]"])
+    }
+
+    /// Tells every loaded plugin which account the UI has selected.
+    ///
+    /// `get_selected_account()` is a hot path — a plugin may call it on every
+    /// update — so the value lives in JS and is refreshed when it changes rather
+    /// than resolved through the bridge each time.
+    public func updateSelectedAccount(_ account: Int64) {
+        self.asyncOnJSQueue { [weak self] in
+            guard let self = self else {
+                return
+            }
+            for plugin in self.loadedPlugins {
+                _ = self.callJS(plugin: plugin, function: "__extera.setSelectedAccount", arguments: [String(account)])
+            }
         }
     }
 
@@ -763,6 +892,10 @@ public final class PluginManager: PluginHost {
            !pluginVersionRequirementIsSatisfied(requirement, actual: appVersion) {
             throw PluginError.unsupportedVersion(required: requirement, actual: appVersion)
         }
+        if let requirement = manifest.sdkVersionRequirement,
+           !pluginVersionRequirementIsSatisfied(requirement, actual: PluginManager.supportedSDKVersion) {
+            throw PluginError.unsupportedSDKVersion(required: requirement, actual: PluginManager.supportedSDKVersion)
+        }
 
         try self.store.install(data: data, pluginId: manifest.id)
         self.pluginLog(pluginId: manifest.id, text: "installed \(manifest.name) v\(manifest.version)")
@@ -802,6 +935,11 @@ public final class PluginManager: PluginHost {
         public let accent: Bool
         public let red: Bool
         public let hasCallbacks: Bool
+        /// A `Text`/`Custom` row with `on_click`, so it has to be tappable.
+        public let hasClick: Bool
+        public let hasLongClick: Bool
+        /// The row opens another settings page built by `create_sub_fragment`.
+        public let hasSubFragment: Bool
     }
 
     /// Asks the plugin for its settings list. Called on the main queue when the
@@ -816,25 +954,66 @@ public final class PluginManager: PluginHost {
             return []
         }
         return list.compactMap { object in
-            guard let type = object["type"] as? String else {
-                return nil
-            }
-            return SettingsControl(
-                type: type,
-                key: object["key"] as? String,
-                text: object["text"] as? String,
-                subtext: object["subtext"] as? String,
-                hint: object["hint"] as? String,
-                icon: object["icon"] as? String,
-                value: object["value"],
-                items: (object["items"] as? [Any])?.compactMap { $0 as? String } ?? [],
-                multiline: (object["multiline"] as? Bool) ?? false,
-                maxLength: (object["max_length"] as? NSNumber)?.intValue ?? 0,
-                accent: (object["accent"] as? Bool) ?? false,
-                red: (object["red"] as? Bool) ?? false,
-                hasCallbacks: (object["has_callbacks"] as? Bool) ?? false
-            )
+            PluginManager.settingsControl(from: object)
         }
+    }
+
+    /// The controls of a nested settings page, built by the `create_sub_fragment`
+    /// of the row whose key is `parentKey`.
+    public func subSettings(for pluginId: String, parentKey: String) -> [SettingsControl] {
+        guard let plugin = self.plugin(id: pluginId) else {
+            return []
+        }
+        guard let json = self.callJS(plugin: plugin, function: "__extera.collectSubSettings", arguments: [parentKey]),
+              let data = json.data(using: .utf8),
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return list.compactMap { object in
+            PluginManager.settingsControl(from: object)
+        }
+    }
+
+    /// One control out of the JSON the bootstrap produces. Shared by the top-level
+    /// and the nested list so a row renders identically on both.
+    private static func settingsControl(from object: [String: Any]) -> SettingsControl? {
+        guard let type = object["type"] as? String else {
+            return nil
+        }
+        return SettingsControl(
+            type: type,
+            key: object["key"] as? String,
+            text: object["text"] as? String,
+            subtext: object["subtext"] as? String,
+            hint: object["hint"] as? String,
+            icon: object["icon"] as? String,
+            value: object["value"],
+            items: (object["items"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            multiline: (object["multiline"] as? Bool) ?? false,
+            maxLength: (object["max_length"] as? NSNumber)?.intValue ?? 0,
+            accent: (object["accent"] as? Bool) ?? false,
+            red: (object["red"] as? Bool) ?? false,
+            hasCallbacks: (object["has_callbacks"] as? Bool) ?? false,
+            hasClick: (object["has_click"] as? Bool) ?? false,
+            hasLongClick: (object["has_long_click"] as? Bool) ?? false,
+            hasSubFragment: (object["has_sub_fragment"] as? Bool) ?? false
+        )
+    }
+
+    /// Runs the `on_click` (or `on_long_click`) of a settings row.
+    ///
+    /// The callback is looked up by key on the plugin side, so nothing but
+    /// strings crosses the bridge. Like `setSetting`, this is safe to call from
+    /// the main queue: it synchronizes onto the script queue once.
+    public func invokeSettingClick(pluginId: String, key: String, long: Bool) {
+        guard let plugin = self.plugin(id: pluginId) else {
+            return
+        }
+        _ = self.callJS(
+            plugin: plugin,
+            function: "__extera.invokeSettingCallback",
+            arguments: [key, long ? "long_click" : "click", "null"]
+        )
     }
 
     /// Stores a new value for a control and notifies the plugin. The callback is
@@ -866,6 +1045,21 @@ public final class PluginManager: PluginHost {
             for plugin in self.loadedPlugins {
                 self.callLifecycle(plugin, "on_app_event", context: ["event": event])
             }
+        }
+    }
+
+    /// Delivers `STOP` and unloads every plugin, synchronously.
+    ///
+    /// This is the shutdown path, not the lifecycle one: once
+    /// `applicationWillTerminate` returns the process can be reclaimed, so the
+    /// events have to run before it does. Nothing here blocks on another queue —
+    /// it already owns the script queue — so `sync` cannot deadlock.
+    public func shutdown() {
+        self.withJSQueue {
+            for plugin in self.loadedPlugins {
+                self.callLifecycle(plugin, "on_app_event", context: ["event": "STOP"])
+            }
+            self.unloadAllOnQueue()
         }
     }
 }
@@ -901,7 +1095,17 @@ public enum HookOutcome {
 /// work to the main queue asynchronously and never block on it, or a plugin that
 /// asks the UI for something would deadlock against the dispatcher.
 public protocol PluginActions: AnyObject {
-    func sendText(peerId: Int64, text: String, options: PluginSendOptions)
-    func sendFile(kind: String, peerId: Int64, path: String, options: PluginSendOptions)
-    func showBulletin(kind: String, text: String)
+    /// `account` is the exteraGram account id the plugin named, or nil when it
+    /// let the runtime choose: the account a hook is running for, else the one
+    /// selected in the UI.
+    func sendText(account: Int64?, peerId: Int64, text: String, options: PluginSendOptions)
+    func sendFile(account: Int64?, kind: String, peerId: Int64, path: String, options: PluginSendOptions)
+    func editMessage(account: Int64?, peerId: Int64, messageId: Int64, text: String, options: PluginSendOptions)
+    func showBulletin(pluginId: String, kind: String, json: String)
+    func showAlert(pluginId: String, json: String)
+    func dismissAlert(pluginId: String)
+    /// The account id a bare `account` defaults to, for `get_selected_account()`.
+    func selectedAccountId() -> Int64?
+    /// `android_utils.copy_to_clipboard`.
+    func copyToClipboard(pluginId: String, text: String)
 }

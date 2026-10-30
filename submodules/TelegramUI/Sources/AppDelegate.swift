@@ -2188,6 +2188,12 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
     
     func applicationWillTerminate(_ application: UIApplication) {
         Logger.shared.log("App \(self.episodeId)", "terminating")
+        // `on_plugin_unload` runs when the app shuts down, which is what
+        // exteraGram promises for anything a plugin registered outside the
+        // runtime's own registry (a file, a socket, a saved draft). The process
+        // may not survive long enough to finish, but a plugin's unload is
+        // normally a few synchronous statements.
+        PluginRuntime.shared.shutdown()
     }
     
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

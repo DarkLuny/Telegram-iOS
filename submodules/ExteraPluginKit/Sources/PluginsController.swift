@@ -258,6 +258,10 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
     case toggle(index: Int, key: String, title: String, subtitle: String?, value: Bool)
     case selector(index: Int, key: String, title: String, subtitle: String?, label: String)
     case input(index: Int, key: String, title: String, value: String, placeholder: String, multiline: Bool, maxLength: Int)
+    /// A `Text`/`Custom` row with an `on_click`, rendered as a button.
+    case action(index: Int, key: String, title: String, subtitle: String?, accent: Bool, red: Bool, long: Bool)
+    /// A row whose `create_sub_fragment` opens another settings page.
+    case subPage(index: Int, key: String, title: String, subtitle: String?)
     case empty
     case reload
     case remove
@@ -280,7 +284,8 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
         case .enabled:
             return 0
         case let .header(index, _), let .note(index, _), let .toggle(index, _, _, _, _),
-             let .selector(index, _, _, _, _), let .input(index, _, _, _, _, _, _):
+             let .selector(index, _, _, _, _), let .input(index, _, _, _, _, _, _),
+             let .action(index, _, _, _, _, _, _), let .subPage(index, _, _, _):
             return Int32(index) + 1
         case .empty:
             return 100000
@@ -372,6 +377,42 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
             }
         case .empty:
             return ItemListTextItem(presentationData: presentationData, text: .plain("This plugin has no settings."), sectionId: self.section)
+        case let .action(_, key, title, subtitle, accent, red, long):
+            // exteraGram's `Text(on_click=...)` and `Custom(on_click=...)` rows
+            // are buttons: the title is the label and there is nowhere else for
+            // the tap to go, so the disclosure arrow is suppressed. Both
+            // `accent` and `red` mean "this row stands out", and the list style
+            // only distinguishes primary from accent text, so they share one.
+            return ItemListDisclosureItem(
+                presentationData: presentationData,
+                systemStyle: .glass,
+                title: title,
+                titleColor: (accent || red) ? .accent : .primary,
+                label: "",
+                labelStyle: .text,
+                additionalDetailLabel: subtitle,
+                sectionId: self.section,
+                style: .blocks,
+                disclosureStyle: .none,
+                action: {
+                    arguments.clickRow(key, long)
+                }
+            )
+        case let .subPage(_, key, title, subtitle):
+            return ItemListDisclosureItem(
+                presentationData: presentationData,
+                systemStyle: .glass,
+                title: title,
+                label: "",
+                labelStyle: .text,
+                additionalDetailLabel: subtitle,
+                sectionId: self.section,
+                style: .blocks,
+                disclosureStyle: .arrow,
+                action: {
+                    arguments.openSubPage(key, title)
+                }
+            )
         case .reload:
             return ItemListActionItem(presentationData: presentationData, title: "Reload Plugin", kind: .generic, alignment: .natural, sectionId: self.section, style: .blocks, action: {
                 arguments.reload()
@@ -387,6 +428,8 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
 private final class PluginSettingsControllerArguments {
     let updateValue: (String, Any?) -> Void
     let presentSelector: (String, String) -> Void
+    let clickRow: (String, Bool) -> Void
+    let openSubPage: (String, String) -> Void
     let setEnabled: (Bool) -> Void
     let reload: () -> Void
     let remove: () -> Void
@@ -394,28 +437,30 @@ private final class PluginSettingsControllerArguments {
     init(
         updateValue: @escaping (String, Any?) -> Void,
         presentSelector: @escaping (String, String) -> Void,
+        clickRow: @escaping (String, Bool) -> Void,
+        openSubPage: @escaping (String, String) -> Void,
         setEnabled: @escaping (Bool) -> Void,
         reload: @escaping () -> Void,
         remove: @escaping () -> Void
     ) {
         self.updateValue = updateValue
         self.presentSelector = presentSelector
+        self.clickRow = clickRow
+        self.openSubPage = openSubPage
         self.setEnabled = setEnabled
         self.reload = reload
         self.remove = remove
     }
 }
 
-private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], isEnabled: Bool, loadError: String?) -> [PluginSettingsEntry] {
+/// Turns the controls a plugin returned into rows.
+///
+/// Shared by the plugin's own page and by any page opened from it, so a nested
+/// page renders exactly like the top level. `startIndex` only shifts the stable
+/// ids, which have to stay unique (and ascending) within one list.
+private func pluginControlEntries(controls: [PluginManager.SettingsControl], startIndex: Int) -> [PluginSettingsEntry] {
     var entries: [PluginSettingsEntry] = []
-    entries.append(.enabled(isEnabled))
-    if let loadError = loadError {
-        // A plugin that did not load has no settings to show, and saying only
-        // "This plugin has no settings" would hide the real reason.
-        entries.append(.note(index: 0, text: "This plugin failed to load: \(loadError)"))
-    }
-
-    var index = 0
+    var index = startIndex
     for control in controls {
         index += 1
         switch control.type {
@@ -460,15 +505,50 @@ private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], is
                 multiline: control.type == "edit_text" || control.multiline,
                 maxLength: control.maxLength
             ))
-        case "text":
-            entries.append(.note(index: index, text: control.subtext.map { "\(control.text ?? "")\n\($0)" } ?? (control.text ?? "")))
+        case "text", "custom":
+            // Three shapes reach here: a row that opens another page, a row that
+            // runs a callback, and a plain caption. `has_sub_fragment` wins,
+            // because exteraGram's builder asks for the page on tap and would
+            // otherwise have its click dropped.
+            let title = control.text ?? control.subtext ?? ""
+            if control.hasSubFragment, let key = control.key {
+                entries.append(.subPage(index: index, key: key, title: title, subtitle: control.subtext))
+            } else if let key = control.key, control.hasClick || control.hasLongClick {
+                // A list row only reports a tap, so a `on_long_click`-only row
+                // uses it for the long press; having both would mean two
+                // callbacks on one gesture, and the plain click is the one a
+                // plugin expects from a tap.
+                entries.append(.action(
+                    index: index,
+                    key: key,
+                    title: title,
+                    subtitle: control.subtext,
+                    accent: control.accent,
+                    red: control.red,
+                    long: control.hasLongClick && !control.hasClick
+                ))
+            } else if !title.isEmpty {
+                entries.append(.note(index: index, text: control.subtext.map { "\(title)\n\($0)" } ?? title))
+            }
         default:
-            // "custom" hands the host a view the plugin would have to build; a
-            // blank row would look like a bug, so it renders nothing.
             continue
         }
     }
-    if entries.count <= 1 {
+    return entries
+}
+
+private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], isEnabled: Bool, loadError: String?) -> [PluginSettingsEntry] {
+    var entries: [PluginSettingsEntry] = []
+    entries.append(.enabled(isEnabled))
+    if let loadError = loadError {
+        // A plugin that did not load has no settings to show, and saying only
+        // "This plugin has no settings" would hide the real reason.
+        entries.append(.note(index: 0, text: "This plugin failed to load: \(loadError)"))
+    }
+
+    let controlEntries = pluginControlEntries(controls: controls, startIndex: entries.count)
+    entries.append(contentsOf: controlEntries)
+    if controlEntries.isEmpty && loadError == nil {
         entries.append(.empty)
     }
     entries.append(.reload)
@@ -476,20 +556,28 @@ private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], is
     return entries
 }
 
-public func pluginSettingsController(context: AccountContext, pluginId: String) -> ViewController {
+private func pluginSubSettingsEntries(controls: [PluginManager.SettingsControl]) -> [PluginSettingsEntry] {
+    let entries = pluginControlEntries(controls: controls, startIndex: 0)
+    if entries.isEmpty {
+        return [.empty]
+    }
+    return entries
+}
+
+/// Holds the controller a settings page's rows can push onto.
+///
+/// The arguments are built before their controller (the controller's state
+/// closure captures them), so the "open a nested page" callback needs somewhere
+/// to find it afterwards; weak, because the controller owns the list that owns
+/// the arguments.
+private final class PluginSettingsHost {
+    weak var controller: ViewController?
+}
+
+private func pluginSettingsArguments(context: AccountContext, pluginId: String, bump: @escaping () -> Void, host: PluginSettingsHost) -> PluginSettingsControllerArguments {
     let manager = PluginManager.shared
     let store = PluginStore.shared
-    let statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
-    let stateValue = Atomic(value: Int32(0))
-
-    let bump: () -> Void = {
-        _ = stateValue.modify { value in
-            return value &+ 1
-        }
-        statePromise.set(stateValue.with { $0 })
-    }
-
-    let arguments = PluginSettingsControllerArguments(
+    return PluginSettingsControllerArguments(
         updateValue: { key, value in
             manager.setSetting(pluginId: pluginId, key: key, value: value)
         },
@@ -513,6 +601,14 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
             actionSheet.setItemGroups([ActionSheetItemGroup(items: items)])
             context.sharedContext.presentGlobalController(actionSheet, nil)
         },
+        clickRow: { key, long in
+            // The callback itself is looked up inside the plugin by key, so only
+            // strings cross here and the plugin decides what the row means.
+            manager.invokeSettingClick(pluginId: pluginId, key: key, long: long)
+        },
+        openSubPage: { key, title in
+            host.controller?.push(pluginSubSettingsController(context: context, pluginId: pluginId, parentKey: key, title: title))
+        },
         setEnabled: { enabled in
             store.setEnabled(enabled, pluginId: pluginId)
             manager.reloadPlugins()
@@ -528,6 +624,23 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
             bump()
         }
     )
+}
+
+public func pluginSettingsController(context: AccountContext, pluginId: String) -> ViewController {
+    let manager = PluginManager.shared
+    let store = PluginStore.shared
+    let statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
+    let stateValue = Atomic(value: Int32(0))
+
+    let bump: () -> Void = {
+        _ = stateValue.modify { value in
+            return value &+ 1
+        }
+        statePromise.set(stateValue.with { $0 })
+    }
+
+    let host = PluginSettingsHost()
+    let arguments = pluginSettingsArguments(context: context, pluginId: pluginId, bump: bump, host: host)
 
     let signal = combineLatest(
         context.sharedContext.presentationData,
@@ -559,6 +672,57 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
 
     let controller = ItemListController(context: context, state: signal)
     controller.navigationPresentation = .modal
+    host.controller = controller
+    return controller
+}
+
+/// A page opened from a plugin's settings row, built by that row's
+/// `create_sub_fragment`.
+///
+/// It uses the same rows and the same arguments as the top level, minus the
+/// enable switch and the reload/remove buttons: those belong to the plugin, not
+/// to one of its pages.
+private func pluginSubSettingsController(context: AccountContext, pluginId: String, parentKey: String, title: String) -> ViewController {
+    let manager = PluginManager.shared
+    let statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
+    let stateValue = Atomic(value: Int32(0))
+
+    let bump: () -> Void = {
+        _ = stateValue.modify { value in
+            return value &+ 1
+        }
+        statePromise.set(stateValue.with { $0 })
+    }
+
+    // A nested page may itself open a page, so it gets its own host.
+    let host = PluginSettingsHost()
+    let arguments = pluginSettingsArguments(context: context, pluginId: pluginId, bump: bump, host: host)
+
+    let signal = combineLatest(
+        context.sharedContext.presentationData,
+        statePromise.get()
+    )
+    |> deliverOnMainQueue
+    |> map { presentationData, _ -> (ItemListControllerState, (ItemListNodeState, Any)) in
+        let controllerState = ItemListControllerState(
+            presentationData: ItemListPresentationData(presentationData),
+            title: .text(title),
+            leftNavigationButton: nil,
+            rightNavigationButton: nil,
+            backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back)
+        )
+        let listState = ItemListNodeState(
+            presentationData: ItemListPresentationData(presentationData),
+            entries: pluginSubSettingsEntries(controls: manager.subSettings(for: pluginId, parentKey: parentKey)),
+            style: .blocks,
+            animateChanges: true
+        )
+        return (controllerState, (listState, arguments))
+    }
+
+    let controller = ItemListController(context: context, state: signal)
+    controller.navigationPresentation = .modal
+    host.controller = controller
     return controller
 }
 

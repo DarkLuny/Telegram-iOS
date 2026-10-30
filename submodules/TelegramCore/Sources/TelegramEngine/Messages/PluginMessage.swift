@@ -136,3 +136,50 @@ public func enqueuePluginMessage(
     return enqueueMessages(account: account, peerId: enginePeerId, messages: [message])
     |> ignoreValues
 }
+
+/// Edits an existing message's text on behalf of a plugin.
+///
+/// exteraGram's `edit_message(message_obj, text=...)` reaches into the Android
+/// `MessagesController`; on iOS the same operation is the engine's own edit
+/// request, which this wraps so `ExteraPluginKit` still never imports Postbox.
+/// Only the text changes: replacing media needs a file upload and a media kind
+/// the plugin cannot express across a string-only bridge.
+public func editPluginMessage(
+    account: Account,
+    peerId: Int64,
+    messageId: Int64,
+    text: String,
+    entities: [MessageTextEntity]
+) -> Signal<Never, NoError> {
+    let engineMessageId = EngineMessage.Id(
+        peerId: EnginePeer.Id(peerId),
+        namespace: Namespaces.Message.Cloud,
+        id: Int32(clamping: messageId)
+    )
+
+    var attributes: TextEntitiesMessageAttribute?
+    if !entities.isEmpty {
+        attributes = TextEntitiesMessageAttribute(entities: entities)
+    }
+
+    // The result (progress, then done) is not something a plugin can act on
+    // synchronously, so a failure is logged and the signal completes either way
+    // rather than surfacing an error type the plugin module would have to know.
+    return _internal_requestEditMessage(
+        account: account,
+        messageId: engineMessageId,
+        text: text,
+        media: .keep,
+        entities: attributes,
+        richText: nil,
+        inlineStickers: [:],
+        webpagePreviewAttribute: nil,
+        disableUrlPreview: false,
+        scheduleInfoAttribute: nil,
+        invertMediaAttribute: nil
+    )
+    |> ignoreValues
+    |> `catch` { _ -> Signal<Never, NoError> in
+        return .complete()
+    }
+}

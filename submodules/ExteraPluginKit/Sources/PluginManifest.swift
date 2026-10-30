@@ -44,6 +44,7 @@ public enum PluginError: Error, CustomStringConvertible {
     case missingIdentifier
     case missingName
     case unsupportedVersion(required: String, actual: String)
+    case unsupportedSDKVersion(required: String, actual: String)
     case requirementsNotSupported([String])
     case evaluationFailed(String)
     case noPluginClass
@@ -65,6 +66,8 @@ public enum PluginError: Error, CustomStringConvertible {
             return "the file is larger than 4 MB, which no plugin needs"
         case let .unsupportedVersion(required, actual):
             return "plugin requires app version \(required), this build is \(actual)"
+        case let .unsupportedSDKVersion(required, actual):
+            return "plugin requires SDK \(required), this runtime implements \(actual)"
         case let .requirementsNotSupported(packages):
             return "__requirements__ needs Python packages, which this runtime cannot install: \(packages.joined(separator: ", "))"
         case let .evaluationFailed(message):
