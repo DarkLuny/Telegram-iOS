@@ -183,6 +183,21 @@ public func calculateAvatarColors(context: AccountContext?, explicitColorIndex: 
         }
     }
     
+    // A plugin override paints every peer avatar in one colour. It is applied
+    // last, after the stock palette chose a gradient, because that is what the
+    // Android plugin achieved by rewriting the colour table the avatars read
+    // from. Functional icons — saved messages, deleted accounts, the archive —
+    // keep their own colours on purpose: they are signposts, not identities, and
+    // repainting them would make a chat with yourself look like any other chat.
+    if icon == .none, let override = context?.peerNameColors.pluginOverride, override.applyToAvatars {
+        let main = UIColor(rgb: override.main)
+        if let secondary = override.secondary {
+            colors = [main, UIColor(rgb: secondary)]
+        } else {
+            colors = [main, main]
+        }
+    }
+    
     return colors
 }
 

@@ -1067,6 +1067,13 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
     override public func animateInsertion(_ currentTimestamp: Double, duration: Double, options: ListViewItemAnimationOptions) {
         super.animateInsertion(currentTimestamp, duration: duration, options: options)
         
+        // A plugin style already animates the whole row, alpha included. Fading
+        // every subnode on top of that would stack a second, faster fade on the
+        // text and leave the bubble catching up with itself.
+        if self.pluginInsertionAnimationPlayed {
+            return
+        }
+        
         self.shadowNode.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
         
         func process(node: ASDisplayNode) {

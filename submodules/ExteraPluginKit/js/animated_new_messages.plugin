@@ -1,0 +1,624 @@
+/*
+ * Animated Messages — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original hooks `ChatMessageCell.onAttachedToWindow` and
+ * `ChatActionCell.onAttachedToWindow`, then drives `ObjectAnimator` /
+ * `AnimatorSet` with the view's own `alpha`, `translationX/Y`, `scaleX/Y` and
+ * `rotationX/Y/Z`. iOS has no such surface: a message row is a
+ * `ChatMessageItemView` and its appearance is a `ListView` insertion. So this
+ * port answers the same question at the point the row is about to appear — the
+ * host asks "how should this row come in", the plugin answers with numbers, and
+ * the host builds one Core Animation matrix from them.
+ *
+ * What that changes, and what it does not:
+ *
+ *   - Every style keeps its original numbers: the same offsets measured against
+ *     the row's own width/height, the same scales, the same angles, the same
+ *     speed table, the same intensity and preset multipliers. The maths below is
+ *     a transcription, not a redesign, so a user's chosen style looks like the
+ *     one they chose on Android.
+ *   - Android's separate `setTranslationX` + `setScaleX` + `setRotation` becomes
+ *     one matrix, because Core Animation does not compose independent animations
+ *     on the same property into a predictable result.
+ *   - `OvershootInterpolator(t)` becomes a damped spring: Core Animation's only
+ *     built-in curves are monotonic and none of them can overshoot at all.
+ *   - Three styles used to run two animations one after another (`POP` then
+ *     `settle`, fade-in then `pulse`). One matrix cannot describe two phases, so
+ *     the second phase is folded into the overshoot of the first: the value still
+ *     rises past its target and comes back, which is the whole visual point.
+ *   - `animate_when_measured` existed because `onAttachedToWindow` fires before
+ *     the cell has a size on Android, so the offsets could not be computed. The
+ *     iOS hook runs after layout and is handed the real size, so the switch has
+ *     nothing left to gate; it is kept and stored so a user's configuration
+ *     survives, and its row says so.
+ *   - `animated_ids` / `_recent_action_anim` guarded against Android re-attaching
+ *     and re-animating the same view (scrolling, re-layout, notifyItemChanged).
+ *     The iOS hook fires once per genuine insertion, so there is nothing to
+ *     de-duplicate; the caches are gone.
+ */
+
+var __id__ = "animated_new_messages";
+var __name__ = "Animated Messages";
+var __description__ = "Анимации появления сообщений и разделителей дат: 12 стилей для сообщений, 4 для дат, 4 пресета, интенсивность и стабильная случайность по чату.";
+var __author__ = "Natu";
+var __version__ = "2.6";
+var __min_version__ = "12.0.0";
+var __category__ = ["appearance"];
+
+var MESSAGE_STYLES = [
+    "Soft (Fade + Scale)",
+    "Slide from Right",
+    "Slide from Bottom",
+    "3D Flip (Y)",
+    "Spring Rise",
+    "Helicopter Spin",
+    "Tilt Pop",
+    "Punch (Impact)",
+    "Slide from Left",
+    "Bounce Flip",
+    "Zoom from Distance",
+    "Wobble (Wave)"
+];
+
+var DATE_STYLES = [
+    "POP (Rise + Overshoot)",
+    "Slide + Fade",
+    "Flip Tag",
+    "Pulse"
+];
+
+var MSG_SPEEDS = ["Slow (x0.5)", "Normal (x1.0)", "Fast (x1.5)", "Ultra (x2.0)"];
+var DATE_SIZES = ["Normal POP", "Big POP", "Huge POP", "ULTRA POP"];
+var DATE_SPEEDS = ["Relaxed", "Normal", "Snappy", "Instant"];
+var PROFILES = ["Minimal", "Balanced", "Dynamic", "Crazy"];
+var INTENSITY_LEVELS = ["Low (50%)", "Normal (100%)", "High (140%)", "Insane (180%)"];
+var RANDOM_MODES = ["Off", "Random: style only", "Random: style + speed", "Random: everything (includes dates)"];
+
+var MSG_SPEED_VALUES = [0.5, 1.0, 1.5, 2.0];
+var DATE_TENSIONS = [2.0, 4.0, 6.0, 8.0];
+var DATE_DURATIONS = [820, 600, 420, 260];
+var INTENSITY_VALUES = [0.5, 1.0, 1.4, 1.8];
+
+// The original's defaults, unchanged. `anim_style` 4 is "Spring Rise" and
+// `date_anim_style` 0 is "POP", so a fresh install gets the two the author
+// picked as the best-looking pair.
+var DEFAULTS = {
+    enabled: true,
+    dark_safe_mode: true,
+    animate_when_measured: true,
+    reduce_motion: false,
+    profile: 1,
+    follow_profile: true,
+    intensity_idx: 1,
+    anim_msgs: true,
+    anim_style: 4,
+    anim_speed: 1,
+    different_outgoing: true,
+    mirror_outgoing: true,
+    out_anim_style: 1,
+    out_anim_speed: 1,
+    anim_dates: true,
+    date_anim_style: 0,
+    date_pop_size: 1,
+    date_speed_idx: 1,
+    random_per_chat: false,
+    random_mode: 1
+};
+
+// Per-chat random choices, keyed by "dialog:direction". The Android original
+// capped it at 500 entries and cleared the whole map when it filled; a chat list
+// is small enough that the same cap is plenty, and the clear keeps a long session
+// from growing without bound.
+var _chatRandCache = {};
+var MAX_CACHE = 500;
+
+function clamp(value, low, high) {
+    if (value < low) {
+        return low;
+    }
+    if (value > high) {
+        return high;
+    }
+    return value;
+}
+
+function toInt(value, fallback) {
+    var parsed = parseInt(value, 10);
+    return isNaN(parsed) ? fallback : parsed;
+}
+
+function toBool(value, fallback) {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (value === null || value === undefined) {
+        return fallback;
+    }
+    return !!value;
+}
+
+// FNV-1a over the string's UTF-16 units, as the original's `h()` did over
+// Python code points (identical for the ASCII ids that reach it).
+function fnv(text) {
+    var value = 2166136261;
+    var source = String(text);
+    for (var i = 0; i < source.length; i += 1) {
+        value = Math.imul(value ^ source.charCodeAt(i), 16777619) >>> 0;
+    }
+    return value;
+}
+
+// The original's 31-bit LCG. `Math.imul` gives the low 32 bits of the product,
+// which is all the `& 0x7FFFFFFF` mask keeps, so this reproduces the Python
+// result exactly without arbitrary-precision arithmetic.
+function pick(seed, count) {
+    if (count <= 0) {
+        return 0;
+    }
+    var value = (Math.imul(seed >>> 0, 1103515245) + 12345) & 0x7FFFFFFF;
+    return value % count;
+}
+
+class AnimatedMessagesPlugin extends BasePlugin {
+    constructor() {
+        super();
+        AnimatedMessagesPlugin.instance = this;
+    }
+
+    on_plugin_load() {
+        AnimatedMessagesPlugin.instance = this;
+    }
+
+    on_plugin_unload() {
+        AnimatedMessagesPlugin.instance = null;
+    }
+
+    // `g` reads through the instance so a plugin that has not loaded yet still
+    // answers with the defaults instead of throwing inside a host hook.
+    static g(key, fallback) {
+        var instance = AnimatedMessagesPlugin.instance;
+        if (!instance) {
+            return fallback;
+        }
+        try {
+            return instance.get_setting(key, fallback);
+        } catch (error) {
+            return fallback;
+        }
+    }
+
+    create_settings() {
+        return [
+            Header({ text: "Quick Settings" }),
+            Switch({ key: "enabled", text: "Animations: ON / OFF", default: DEFAULTS.enabled }),
+            Divider(),
+            Header({ text: "Performance / Dark Theme Fixes" }),
+            Switch({
+                key: "dark_safe_mode",
+                text: "Dark theme safe mode (less glitches)",
+                default: DEFAULTS.dark_safe_mode,
+                subtext: "Не начинает с полной прозрачности: на тёмной теме это даёт меньше мигания."
+            }),
+            Switch({
+                key: "animate_when_measured",
+                text: "Animate only after view is measured",
+                default: DEFAULTS.animate_when_measured,
+                subtext: "На iOS не действует: хук вызывается уже после раскладки, размер известен."
+            }),
+            Switch({ key: "reduce_motion", text: "Comfort mode (less motion)", default: DEFAULTS.reduce_motion }),
+            Divider(),
+            Header({ text: "Presets" }),
+            Selector({ key: "profile", text: "Style preset", items: PROFILES, default: DEFAULTS.profile }),
+            Switch({ key: "follow_profile", text: "Preset controls style/speeds", default: DEFAULTS.follow_profile }),
+            Selector({ key: "intensity_idx", text: "Intensity", items: INTENSITY_LEVELS, default: DEFAULTS.intensity_idx }),
+            Divider(),
+            Header({ text: "Messages (Incoming)" }),
+            Switch({ key: "anim_msgs", text: "Animate new messages", default: DEFAULTS.anim_msgs }),
+            Selector({ key: "anim_style", text: "Incoming style (if preset control OFF)", items: MESSAGE_STYLES, default: DEFAULTS.anim_style }),
+            Selector({ key: "anim_speed", text: "Incoming speed (if preset control OFF)", items: MSG_SPEEDS, default: DEFAULTS.anim_speed }),
+            Divider(),
+            Header({ text: "Messages (Outgoing)" }),
+            Switch({ key: "different_outgoing", text: "Use separate settings for outgoing", default: DEFAULTS.different_outgoing }),
+            Switch({ key: "mirror_outgoing", text: "Mirror direction for outgoing", default: DEFAULTS.mirror_outgoing }),
+            Selector({ key: "out_anim_style", text: "Outgoing style", items: MESSAGE_STYLES, default: DEFAULTS.out_anim_style }),
+            Selector({ key: "out_anim_speed", text: "Outgoing speed", items: MSG_SPEEDS, default: DEFAULTS.out_anim_speed }),
+            Divider(),
+            Header({ text: "Dates / System blocks" }),
+            Switch({ key: "anim_dates", text: "Animate date separators / system blocks", default: DEFAULTS.anim_dates }),
+            Selector({ key: "date_anim_style", text: "Date animation style", items: DATE_STYLES, default: DEFAULTS.date_anim_style }),
+            Selector({ key: "date_pop_size", text: "Date POP size", items: DATE_SIZES, default: DEFAULTS.date_pop_size }),
+            Selector({ key: "date_speed_idx", text: "Date animation speed", items: DATE_SPEEDS, default: DEFAULTS.date_speed_idx }),
+            Divider(),
+            Header({ text: "Per-chat Random" }),
+            Switch({ key: "random_per_chat", text: "Stable random per chat", default: DEFAULTS.random_per_chat }),
+            Selector({ key: "random_mode", text: "Randomize", items: RANDOM_MODES, default: DEFAULTS.random_mode })
+        ];
+    }
+
+    // --- settings readers -------------------------------------------------
+
+    // The four presets, as (message style, message speed, date style, date
+    // speed, date size, overshoot factor). The last value is not a setting: it
+    // scales how hard the overshoot styles push, which is why "Crazy" pops
+    // harder than "Minimal" even at the same intensity.
+    profile() {
+        var index = toInt(AnimatedMessagesPlugin.g("profile", DEFAULTS.profile), DEFAULTS.profile);
+        if (index === 0) {
+            return [0, 1, 1, 2, 0, 1.10];
+        }
+        if (index === 1) {
+            return [4, 1, 0, 1, 1, 1.70];
+        }
+        if (index === 2) {
+            return [6, 2, 0, 1, 2, 2.10];
+        }
+        return [9, 3, 2, 3, 3, 2.70];
+    }
+
+    intensity() {
+        var index = clamp(
+            toInt(AnimatedMessagesPlugin.g("intensity_idx", DEFAULTS.intensity_idx), DEFAULTS.intensity_idx),
+            0,
+            INTENSITY_VALUES.length - 1
+        );
+        return INTENSITY_VALUES[index];
+    }
+
+    reduceMotion() {
+        return toBool(AnimatedMessagesPlugin.g("reduce_motion", DEFAULTS.reduce_motion), DEFAULTS.reduce_motion);
+    }
+
+    followProfile() {
+        return toBool(AnimatedMessagesPlugin.g("follow_profile", DEFAULTS.follow_profile), DEFAULTS.follow_profile);
+    }
+
+    darkSafe() {
+        return toBool(AnimatedMessagesPlugin.g("dark_safe_mode", DEFAULTS.dark_safe_mode), DEFAULTS.dark_safe_mode);
+    }
+
+    // The per-chat draw. Seeded from the dialog and the direction so a chat keeps
+    // its style across relaunches, which is what makes "stable random" useful
+    // instead of merely random.
+    perChat(dialog, direction) {
+        var key = dialog + ":" + direction;
+        if (Object.prototype.hasOwnProperty.call(_chatRandCache, key)) {
+            return _chatRandCache[key];
+        }
+        if (Object.keys(_chatRandCache).length > MAX_CACHE) {
+            _chatRandCache = {};
+        }
+        var seed = fnv(dialog + ":" + direction + ":" + AnimatedMessagesPlugin.g("profile", DEFAULTS.profile));
+        var result = [
+            pick(seed ^ 0xA53, MESSAGE_STYLES.length),
+            pick(seed ^ 0xB19, MSG_SPEEDS.length),
+            pick(seed ^ 0xC77, DATE_STYLES.length),
+            pick(seed ^ 0xD31, DATE_SPEEDS.length),
+            pick(seed ^ 0xE11, DATE_SIZES.length)
+        ];
+        _chatRandCache[key] = result;
+        return result;
+    }
+
+    // Resolves the settings into the five indices plus intensity and flags.
+    //
+    // `message` is `null` for a date separator, which is why the outgoing and
+    // per-chat branches are skipped there: a separator has no direction and no
+    // dialog of its own, and randomising it per chat would make the same
+    // separator animate differently in two chats it appears in.
+    effective(message) {
+        var profile = this.profile();
+        var profileStyle = profile[0];
+        var profileSpeed = profile[1];
+        var profileDateStyle = profile[2];
+        var profileDateSpeed = profile[3];
+        var profileDateSize = profile[4];
+        var profileOvershoot = profile[5];
+
+        var follow = this.followProfile();
+        var intensity = this.intensity();
+        var reduced = this.reduceMotion();
+
+        var messageStyle;
+        var messageSpeed;
+        var dateStyle;
+        var dateSpeed;
+        var dateSize;
+        if (follow) {
+            messageStyle = profileStyle;
+            messageSpeed = profileSpeed;
+            dateStyle = profileDateStyle;
+            dateSpeed = profileDateSpeed;
+            dateSize = profileDateSize;
+        } else {
+            messageStyle = toInt(AnimatedMessagesPlugin.g("anim_style", profileStyle), profileStyle);
+            messageSpeed = toInt(AnimatedMessagesPlugin.g("anim_speed", profileSpeed), profileSpeed);
+            dateStyle = toInt(AnimatedMessagesPlugin.g("date_anim_style", profileDateStyle), profileDateStyle);
+            dateSpeed = toInt(AnimatedMessagesPlugin.g("date_speed_idx", profileDateSpeed), profileDateSpeed);
+            dateSize = toInt(AnimatedMessagesPlugin.g("date_pop_size", profileDateSize), profileDateSize);
+        }
+
+        var outgoing = message ? toBool(message.is_out, false) : false;
+
+        if (message) {
+            if (outgoing && toBool(AnimatedMessagesPlugin.g("different_outgoing", DEFAULTS.different_outgoing), true)) {
+                messageStyle = toInt(AnimatedMessagesPlugin.g("out_anim_style", messageStyle), messageStyle);
+                messageSpeed = toInt(AnimatedMessagesPlugin.g("out_anim_speed", messageSpeed), messageSpeed);
+                // Outgoing rows are the user's own, so they get slightly less
+                // travel: the original's 0.85 damps every style at once.
+                intensity *= 0.85;
+            }
+
+            if (toBool(AnimatedMessagesPlugin.g("random_per_chat", DEFAULTS.random_per_chat), false)) {
+                var dialog = message.peer_id === undefined ? 0 : message.peer_id;
+                var drawn = this.perChat(dialog, outgoing ? "out" : "in");
+                var mode = toInt(AnimatedMessagesPlugin.g("random_mode", DEFAULTS.random_mode), DEFAULTS.random_mode);
+                if (mode >= 1) {
+                    messageStyle = drawn[0];
+                }
+                if (mode >= 2) {
+                    messageSpeed = drawn[1];
+                }
+                if (mode >= 3) {
+                    dateStyle = drawn[2];
+                    dateSpeed = drawn[3];
+                    dateSize = drawn[4];
+                }
+            }
+        }
+
+        messageStyle = clamp(messageStyle, 0, MESSAGE_STYLES.length - 1);
+        messageSpeed = clamp(messageSpeed, 0, MSG_SPEEDS.length - 1);
+        dateStyle = clamp(dateStyle, 0, DATE_STYLES.length - 1);
+        dateSpeed = clamp(dateSpeed, 0, DATE_SPEEDS.length - 1);
+        dateSize = clamp(dateSize, 0, DATE_SIZES.length - 1);
+
+        // Comfort mode swaps the four styles that spin or flip for something
+        // that only moves — on Android it fell back to the preset's style when
+        // the preset was in charge, and to "Spring Rise" when it was not.
+        if (reduced && [3, 5, 9, 11].indexOf(messageStyle) >= 0) {
+            messageStyle = follow ? 0 : 4;
+        }
+        if (reduced && dateStyle === 2) {
+            dateStyle = 1;
+        }
+
+        return {
+            messageStyle: messageStyle,
+            messageSpeed: messageSpeed,
+            dateStyle: dateStyle,
+            dateSpeed: dateSpeed,
+            dateSize: dateSize,
+            intensity: intensity,
+            reduced: reduced,
+            outgoing: outgoing,
+            profileOvershoot: profileOvershoot
+        };
+    }
+
+    // --- message animation ------------------------------------------------
+
+    // Milliseconds for a message, from the speed table and then shortened by
+    // intensity. The clamp keeps the fastest choice from looking like a cut.
+    messageDuration(speedIndex, intensity) {
+        var base = MSG_SPEED_VALUES[clamp(speedIndex, 0, MSG_SPEED_VALUES.length - 1)];
+        var duration = Math.floor(620 / base);
+        var bounded = clamp(intensity, 0.5, 2.0);
+        duration = Math.floor(duration * (1.0 / Math.max(0.75, Math.min(bounded, 1.6))));
+        return clamp(duration, 170, 920);
+    }
+
+    // Builds the descriptor for one incoming or outgoing row.
+    //
+    // The returns match `PluginInsertionAnimation`: degrees, points,
+    // milliseconds, and a curve name. `alpha` is the opacity the row starts at;
+    // the host fades to 1.
+    messageAnimation(message, width, height) {
+        var state = this.effective(message);
+        var style = state.messageStyle;
+        var intensity = state.intensity;
+        var reduced = state.reduced;
+        var safe = this.darkSafe();
+
+        var w = width > 2 ? width : 540;
+        var h = height > 2 ? height : 220;
+
+        // Incoming rows come from the right, outgoing from the left, unless the
+        // user asked for outgoing to be mirrored.
+        var mirrored = toBool(AnimatedMessagesPlugin.g("mirror_outgoing", DEFAULTS.mirror_outgoing), true);
+        var sign = state.outgoing && mirrored ? -1.0 : 1.0;
+
+        var animation = {
+            duration: this.messageDuration(state.messageSpeed, intensity),
+            alpha: safe ? 0.05 : 0.0,
+            curve: "decelerate"
+        };
+
+        if (style === 0) {
+            // Soft: the row settles into place from slightly smaller.
+            var scale = reduced || safe ? 0.90 : 0.86 - 0.08 * (intensity - 1.0);
+            animation.scaleX = clamp(scale, safe ? 0.78 : 0.65, 0.94);
+            animation.scaleY = animation.scaleX;
+        } else if (style === 1) {
+            var rightX = w * 0.55 * intensity * sign;
+            animation.translationX = reduced ? rightX * 0.55 : rightX;
+        } else if (style === 2) {
+            var bottomY = h * 1.05 * intensity;
+            animation.translationY = reduced ? bottomY * 0.55 : bottomY;
+        } else if (style === 3) {
+            var flipY = (safe ? 55.0 : 90.0) * intensity * sign;
+            if (reduced) {
+                flipY *= 0.55;
+            }
+            animation.rotationY = flipY;
+            animation.scaleX = safe ? 0.96 : 0.90;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "accelerateDecelerate";
+        } else if (style === 4) {
+            var riseY = h * 0.32 * intensity;
+            animation.translationY = reduced ? riseY * 0.55 : riseY;
+            animation.curve = "overshoot";
+            animation.overshoot = reduced || safe ? 1.15 : 1.8 * (0.85 + 0.22 * intensity);
+        } else if (style === 5) {
+            // Helicopter only spins when it is allowed to; comfort mode turns it
+            // into the plain scale the original substituted.
+            if (reduced || safe) {
+                animation.scaleX = 0.90;
+                animation.scaleY = 0.90;
+            } else {
+                animation.rotationZ = 200.0 * intensity * sign;
+                animation.scaleX = 0.55;
+                animation.scaleY = 0.55;
+                animation.curve = "accelerateDecelerate";
+            }
+        } else if (style === 6) {
+            var tilt = (10.0 + 8.0 * intensity) * sign;
+            animation.rotationZ = reduced ? tilt * 0.55 : tilt;
+            animation.scaleX = safe ? 0.92 : 0.86;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "overshoot";
+            animation.overshoot = reduced || safe ? 1.05 : 1.6;
+        } else if (style === 7) {
+            animation.scaleX = safe ? 0.90 : 0.78;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "overshoot";
+            animation.overshoot = reduced || safe ? 1.1 : 2.2;
+        } else if (style === 8) {
+            var leftX = -w * 0.55 * intensity * sign;
+            animation.translationX = reduced ? leftX * 0.55 : leftX;
+        } else if (style === 9) {
+            var bounce = (safe ? 35.0 : 60.0) * sign;
+            animation.rotationX = reduced ? bounce * 0.55 : bounce;
+            animation.scaleX = safe ? 0.92 : 0.72;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "overshoot";
+            animation.overshoot = reduced || safe ? 1.1 : 2.1;
+        } else if (style === 10) {
+            animation.scaleX = safe ? 0.92 : 0.70;
+            animation.scaleY = animation.scaleX;
+            var zoomY = h * 0.16 * intensity;
+            animation.translationY = reduced ? zoomY * 0.55 : zoomY;
+        } else {
+            // Wobble: the row swings past its place and back. The rotation is a
+            // keyframe path rather than a single angle, because a straight
+            // interpolation from +a1 to 0 would not swing at all.
+            var wobbleX = w * 0.20 * intensity * sign;
+            animation.translationX = reduced ? wobbleX * 0.55 : wobbleX;
+            var wobbleRotation = (safe ? 5.0 : 8.0) * sign;
+            if (reduced) {
+                wobbleRotation *= 0.55;
+            }
+            animation.rotationKeyframes = [wobbleRotation, -wobbleRotation, wobbleRotation * 0.5, 0.0];
+            animation.curve = "accelerateDecelerate";
+        }
+
+        return animation;
+    }
+
+    // --- date / system block animation ------------------------------------
+
+    dateAnimation(width, height) {
+        var state = this.effective(null);
+        var style = state.dateStyle;
+        var intensity = state.intensity;
+        var reduced = state.reduced;
+        var safe = this.darkSafe();
+
+        var w = width > 2 ? width : 520;
+        var h = height > 2 ? height : 180;
+
+        var duration = clamp(DATE_DURATIONS[state.dateSpeed], 180, 1200);
+
+        // How far past the target the POP styles go. The Android version then ran
+        // a separate "settle" animation back to 1.0; here the overshoot curve
+        // does both halves in one pass.
+        var extraScales = [0.00, 0.12, 0.25, 0.45];
+        var extra = extraScales[state.dateSize] * (0.85 + 0.25 * intensity);
+        if (reduced) {
+            extra *= 0.45;
+        }
+        var popTarget = 1.0 + extra;
+
+        var animation = {
+            duration: duration,
+            alpha: safe ? 0.05 : 0.0,
+            curve: "decelerate"
+        };
+
+        if (style === 0) {
+            animation.translationY = reduced ? 40.0 : 90.0 * (0.85 + 0.25 * intensity);
+            animation.scaleX = reduced || safe ? 0.92 : 0.65;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "overshoot";
+            var tension = DATE_TENSIONS[state.dateSize] * (0.90 + 0.18 * intensity) * (state.profileOvershoot / 1.7);
+            animation.overshoot = reduced || safe ? 1.05 : tension;
+            // The scale has to reach the POP target before settling, so the
+            // animation's own end value is the target and the curve carries it
+            // back down to 1.0.
+            animation.scaleToX = popTarget;
+            animation.scaleToY = popTarget;
+        } else if (style === 1) {
+            var slideY = h * 0.35 * (0.85 + 0.25 * intensity);
+            animation.translationY = reduced ? slideY * 0.55 : slideY;
+        } else if (style === 2) {
+            var angle = (safe ? 55.0 : 75.0) * (0.85 + 0.20 * intensity);
+            if (reduced) {
+                angle *= 0.55;
+            }
+            var offsetX = w * 0.10 * (0.85 + 0.20 * intensity);
+            if (reduced) {
+                offsetX *= 0.6;
+            }
+            animation.rotationY = angle;
+            animation.translationX = offsetX;
+            animation.scaleX = safe ? 0.96 : 0.90;
+            animation.scaleY = animation.scaleX;
+            animation.curve = "accelerateDecelerate";
+        } else {
+            // Pulse: fade in and settle, then a small bump. The bump is the
+            // overshoot of the same curve, mapped so a bigger POP size pushes
+            // further past 1.0.
+            animation.scaleX = safe ? 0.98 : 0.92;
+            animation.scaleY = animation.scaleX;
+            animation.duration = clamp(Math.floor(duration * 0.75), 140, 520);
+            animation.curve = "overshoot";
+            animation.overshoot = 1.0 + extra * 6.0;
+        }
+
+        return animation;
+    }
+
+    // --- host hook --------------------------------------------------------
+
+    // Called while a row is being inserted. `message` is the flattened message,
+    // or `null` for a date separator; `extra` carries the laid-out size and the
+    // account the row belongs to.
+    //
+    // Returning `undefined` means "use the stock appearance", which is what every
+    // switch being off has to produce.
+    on_message_inserted(account, message, extra) {
+        extra = extra || {};
+        if (!toBool(AnimatedMessagesPlugin.g("enabled", DEFAULTS.enabled), DEFAULTS.enabled)) {
+            return undefined;
+        }
+
+        var width = typeof extra.width === "number" ? extra.width : 0;
+        var height = typeof extra.height === "number" ? extra.height : 0;
+
+        if (extra.isDate) {
+            if (!toBool(AnimatedMessagesPlugin.g("anim_dates", DEFAULTS.anim_dates), DEFAULTS.anim_dates)) {
+                return undefined;
+            }
+            return this.dateAnimation(width, height);
+        }
+
+        if (!toBool(AnimatedMessagesPlugin.g("anim_msgs", DEFAULTS.anim_msgs), DEFAULTS.anim_msgs)) {
+            return undefined;
+        }
+        if (!message || typeof message !== "object") {
+            return undefined;
+        }
+        return this.messageAnimation(message, width, height);
+    }
+}
+
+var Plugin = AnimatedMessagesPlugin;

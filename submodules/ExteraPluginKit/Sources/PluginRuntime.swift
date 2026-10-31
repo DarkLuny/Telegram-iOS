@@ -169,6 +169,43 @@ public final class PluginRuntime {
         hooks.receivedUpdates = { accountId, batchJSON in
             manager.dispatchUpdateDetached(name: "updates", account: accountId, json: batchJSON, isContainer: true)
         }
+
+        // The four appearance hooks. Each is asked while a screen is being built,
+        // so each answers with a value and the UI decides how to apply it. The
+        // JSON in and out keeps the plugin from holding any Swift object.
+
+        hooks.attachMenuExclusions = { accountId, peerId, keys in
+            return manager.dispatchAttachMenuExclusions(account: accountId, peerId: peerId, keys: keys)
+        }
+
+        hooks.settingsRowExclusions = { accountId, keys in
+            return manager.dispatchSettingsRowExclusions(account: accountId, keys: keys)
+        }
+
+        hooks.insertionAnimation = { accountId, messageJSON, isDate, width, height in
+            guard manager.hasLoadedPlugins else {
+                return nil
+            }
+            return manager.dispatchInsertionAnimation(account: accountId, messageJSON: messageJSON, isDate: isDate, width: width, height: height)
+        }
+
+        hooks.nameColors = { accountId in
+            return manager.dispatchNameColors(account: accountId)
+        }
+
+        hooks.themeOverride = { accountId in
+            guard manager.hasLoadedPlugins else {
+                return nil
+            }
+            return manager.dispatchThemeOverride(account: accountId)
+        }
+
+        hooks.messageDetails = { accountId, messageJSON in
+            guard manager.hasLoadedPlugins else {
+                return []
+            }
+            return manager.dispatchMessageDetails(account: accountId, messageJSON: messageJSON)
+        }
     }
 
     /// Mirrors exteraGram's `on_app_event`: `START` at launch, then `PAUSE` and
@@ -369,6 +406,47 @@ private final class PluginActionsImpl: PluginActions {
         return self.primaryAccountId
     }
 
+    /// The colours the running theme uses, keyed by the names a plugin asked for.
+    ///
+    /// Only the handful of slots a "take the colour from the theme" picker can
+    /// offer are mapped; an unknown name is simply absent from the answer, which
+    /// the plugin reads as "no such source in this build". Everything comes off
+    /// the current `PresentationData`, so the answer is the colour on screen
+    /// right now rather than the one that was there at launch.
+    func themeColors(names: [String]) -> [String: UInt32] {
+        guard let sharedContext = self.sharedContext else {
+            return [:]
+        }
+        let presentationData = sharedContext.currentPresentationData.with { $0 }
+        let theme = presentationData.theme
+        var result: [String: UInt32] = [:]
+        for name in names {
+            switch name {
+            case "accent", "accentTextColor":
+                result[name] = theme.chat.message.outgoing.accentTextColor.rgb
+            case "button", "addButton":
+                result[name] = theme.list.itemAccentColor.rgb
+            case "header", "accentHeader":
+                result[name] = theme.rootController.navigationBar.accentTextColor.rgb
+            case "link", "linkText":
+                result[name] = theme.chat.message.incoming.linkTextColor.rgb
+            case "floatingButton", "actionControl":
+                result[name] = theme.chat.inputPanel.panelControlAccentColor.rgb
+            case "outgoing", "outBubble":
+                result[name] = theme.chat.message.outgoing.bubble.withWallpaper.fill.first?.rgb
+                    ?? theme.chat.message.outgoing.bubble.withoutWallpaper.fill.first?.rgb
+                    ?? theme.list.itemAccentColor.rgb
+            case "navigationBar":
+                result[name] = theme.rootController.navigationBar.buttonColor.rgb
+            case "actionSheet":
+                result[name] = theme.actionSheet.controlAccentColor.rgb
+            default:
+                break
+            }
+        }
+        return result
+    }
+
     /// Puts text on the pasteboard and confirms it, which is what
     /// `copy_to_clipboard` shows on Android. The confirmation is the plugin's own
     /// bulletin if it asks for one; here it is the app's standard "copied" toast,
@@ -389,6 +467,16 @@ private final class PluginActionsImpl: PluginActions {
                 ),
                 nil
             )
+        }
+    }
+
+    /// `android_utils.open_url`. `Browser.openUrl` on Android picks the in-app
+    /// browser for web pages and the system handler for other schemes; the app's
+    /// own `openUrl` binding already makes that same decision, so this is a thin
+    /// hop to the main queue.
+    func openUrl(pluginId: String, url: URL) {
+        Queue.mainQueue().async {
+            self.sharedContext?.applicationBindings.openUrl(url.absoluteString)
         }
     }
 

@@ -20,12 +20,44 @@ genrule(
     visibility = ["//visibility:public"],
 )
 
+# The ported plugins ship inside the app, embedded the same way as the bootstrap:
+# one source file, tested with node, carried as a Swift literal. Without this a
+# sideload build would install with no plugins at all, because iOS gives the app
+# no folder the user can drop a file into.
+#
+# Each file is named explicitly and `$(locations ...)` passes every staged path:
+# Bazel stages declared inputs flat, so the `js/` directory they sit in during a
+# build is not the one in the repository.
+filegroup(
+    name = "plugin_sources",
+    srcs = glob(["js/*.plugin"]),
+)
+
+genrule(
+    name = "PluginBundledSources",
+    srcs = [
+        ":plugin_sources",
+        "generate_bootstrap.py",
+        "generate_bundled_plugins.py",
+    ],
+    outs = ["PluginBundledSources.swift"],
+    cmd = """
+        python3 $(location generate_bundled_plugins.py) \\
+            $(locations :plugin_sources) \\
+            --out=$(OUTS)
+    """,
+    visibility = ["//visibility:public"],
+)
+
 swift_library(
     name = "ExteraPluginKit",
     module_name = "ExteraPluginKit",
     srcs = glob([
         "Sources/**/*.swift",
-    ]) + [":PluginBootstrap.swift"],
+    ]) + [
+        ":PluginBootstrap.swift",
+        ":PluginBundledSources.swift",
+    ],
     copts = [
         "-warnings-as-errors",
     ],

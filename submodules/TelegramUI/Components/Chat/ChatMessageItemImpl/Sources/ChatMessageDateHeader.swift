@@ -15,6 +15,7 @@ import WallpaperBackgroundNode
 import ChatControllerInteraction
 import AvatarVideoNode
 import ChatMessageItem
+import ChatMessageItemCommon
 import AvatarNode
 import ComponentFlow
 import EmojiStatusComponent
@@ -818,6 +819,17 @@ public final class ChatMessageDateHeaderNodeImpl: ListViewItemHeaderNode, ChatMe
     }
 
     override public func animateAdded(duration: Double) {
+        // A plugin may animate date separators and system blocks. Only the
+        // separator node exists for a date, so the avatar header is left alone.
+        if self.dateContentNode != nil, PluginInsertionPlayback.play(
+            layer: self.layer,
+            accountId: self.context.account.id.int64,
+            message: nil,
+            isDate: true,
+            size: self.bounds.size
+        ) {
+            return
+        }
         self.layer.animateAlpha(from: 0.0, to: self.alpha, duration: 0.2)
         if self.dateContentNode != nil {
             self.layer.animateScale(from: 0.2, to: 1.0, duration: 0.2)

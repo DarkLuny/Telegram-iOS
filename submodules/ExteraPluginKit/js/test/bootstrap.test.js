@@ -38,6 +38,7 @@ function makeHost() {
             return (host.fileResults && op in host.fileResults) ? JSON.stringify(host.fileResults[op]) : JSON.stringify(null);
         },
         selectedAccount: () => 42,
+        appVersion: () => '13.1.1',
         pluginDirectory: () => '/plugins/demo',
         schedulePlugin: (id, delay, token) => calls.push(['schedulePlugin', id, delay, token]),
         // The asynchronous bridges: the fake host records the request and keeps
@@ -1127,6 +1128,38 @@ test('send_message passes entities a plugin built itself', () => {
         { type: 'blockquote', offset: 0, length: 10, collapsed: true },
     ]);
     assert.strictEqual(ctx.__extera.instance.get_setting('missing', 1), 1);
+});
+
+test('the client version is the running build, and is asked for once', () => {
+    const host = makeHost();
+    let asked = 0;
+    const original = host.appVersion;
+    host.appVersion = () => { asked += 1; return original(); };
+    const ctx = runPlugin(`
+        class P extends BasePlugin {
+            version() { return client_utils.get_client_version(); }
+        }
+        var __plugin_instance__ = __extera.register(P);
+    `, host);
+    const instance = ctx.__extera.instance;
+    assert.strictEqual(instance.version(), '13.1.1');
+    assert.strictEqual(instance.version(), '13.1.1');
+    assert.strictEqual(asked, 1, 'the build version is asked for once per plugin');
+    assert.strictEqual(ctx.__extera.appVersion(), '13.1.1');
+});
+
+test('a host with no version bridge answers Unknown instead of throwing', () => {
+    const host = makeHost();
+    delete host.appVersion;
+    const ctx = runPlugin(`
+        class P extends BasePlugin {
+            version() { return client_utils.get_client_version(); }
+        }
+        var __plugin_instance__ = __extera.register(P);
+    `, host);
+    // The original's `get_client_version()` did the same when the Android class
+    // it read from was missing: a string its parser turns into "no version".
+    assert.strictEqual(ctx.__extera.instance.version(), 'Unknown');
 });
 
 let failed = 0;

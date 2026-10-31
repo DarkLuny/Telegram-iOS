@@ -2493,7 +2493,9 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
                 "account": context.account.id.int64,
             ]
             let pluginItems = PluginManager.shared.visibleMenuItems(menuType: "message_context_menu", context: pluginContext)
+            var hasPluginSection = false
             if !pluginItems.isEmpty {
+                hasPluginSection = true
                 actions.append(.separator)
                 for item in pluginItems {
                     actions.append(.action(ContextMenuActionItem(text: item.text, textColor: .primary, icon: { theme in
@@ -2501,6 +2503,34 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
                     }, action: { c, _ in
                         c?.dismiss(completion: {
                             PluginManager.shared.performMenuItem(pluginId: item.pluginId, itemId: item.itemId, context: pluginContext)
+                        })
+                    })))
+                }
+            }
+
+            // "Message details": the rows are computed here, not when the item is
+            // tapped, because deciding whether the item exists at all means asking
+            // the plugins, and asking them twice would run a plugin's code twice
+            // for one menu. An empty answer means no item, exactly as the SDK's
+            // own details screen only appears when there is something to show.
+            if messages.count == 1, let detailHook = PluginHookPoints.shared.messageDetails {
+                let detailItems = detailHook(context.account.id.int64, pluginMessageDetailsJSON(firstMessage))
+                if !detailItems.isEmpty {
+                    if !hasPluginSection {
+                        actions.append(.separator)
+                    }
+                    actions.append(.action(ContextMenuActionItem(text: "Message details", textColor: .primary, icon: { theme in
+                        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Info"), color: theme.actionSheet.primaryTextColor)
+                    }, action: { [weak context, weak interfaceInteraction] c, _ in
+                        c?.dismiss(completion: {
+                            guard let context = context, let interfaceInteraction = interfaceInteraction else {
+                                return
+                            }
+                            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+                            guard let actionSheet = PluginMessageDetailsSheet.make(presentationData: presentationData, items: detailItems) else {
+                                return
+                            }
+                            interfaceInteraction.presentGlobalOverlayController(actionSheet, nil)
                         })
                     })))
                 }

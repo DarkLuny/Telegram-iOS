@@ -71,6 +71,15 @@ public final class PluginStore {
         try self.fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
         try data.write(to: directory.appendingPathComponent("main.plugin"), options: .atomic)
         self.setEnabled(true, pluginId: pluginId)
+        // Installing it back clears the "user deleted this" mark, so a later
+        // launch does not skip the bundled copy for a plugin the user has again.
+        var removed = Set((UserDefaults.standard.array(forKey: self.removedKey) as? [String]) ?? [])
+        removed.remove(pluginId)
+        UserDefaults.standard.set(Array(removed), forKey: self.removedKey)
+        // And the file is the user's now, so an app update no longer rewrites it.
+        var bundled = Set((UserDefaults.standard.array(forKey: self.bundledKey) as? [String]) ?? [])
+        bundled.remove(pluginId)
+        UserDefaults.standard.set(Array(bundled), forKey: self.bundledKey)
     }
 
     /// Removes the plugin and everything the user configured for it, so a later
@@ -85,7 +94,88 @@ public final class PluginStore {
         }
         UserDefaults.standard.removeObject(forKey: self.settingsPrefix + pluginId)
         self.setEnabled(true, pluginId: pluginId)
+        // Remembered so the bundled copy is not put back on the next launch: a
+        // plugin the user removed must stay removed, even though the app ships
+        // with it.
+        var removed = Set((UserDefaults.standard.array(forKey: self.removedKey) as? [String]) ?? [])
+        removed.insert(pluginId)
+        UserDefaults.standard.set(Array(removed), forKey: self.removedKey)
+        var bundled = Set((UserDefaults.standard.array(forKey: self.bundledKey) as? [String]) ?? [])
+        bundled.remove(pluginId)
+        UserDefaults.standard.set(Array(bundled), forKey: self.bundledKey)
     }
+
+    /// Ids of bundled plugins the user deleted on purpose.
+    ///
+    /// Separate from the "disabled" list: disabling keeps the file and lets the
+    /// user turn it back on, while removing it means the app should stop offering
+    /// it. Without this a removed plugin would reappear on every launch, because
+    /// the bundle would reinstall it.
+    private var removedKey: String { "extera.plugin.removed" }
+
+    public func isRemoved(_ pluginId: String) -> Bool {
+        let removed = (UserDefaults.standard.array(forKey: self.removedKey) as? [String]) ?? []
+        return removed.contains(pluginId)
+    }
+
+    /// Installs a plugin that ships with the app.
+    ///
+    /// Answers whether anything was written. Three cases:
+    ///
+    ///   - The user removed it: left removed, so the app does not put back a
+    ///     plugin somebody deleted on purpose.
+    ///   - The user installed their own copy (or a newer one) with the file
+    ///     picker: left alone. The bundle is a starting point, not an update
+    ///     channel for third-party code.
+    ///   - The copy on disk is the one this app wrote: rewritten. A port fix then
+    ///     reaches the device with the IPA instead of needing a reinstall of the
+    ///     plugin by hand.
+    @discardableResult
+    public func installBundled(pluginId: String, source: String) -> Bool {
+        guard !self.isRemoved(pluginId) else {
+            return false
+        }
+        let directory = self.directory(for: pluginId)
+        let file = directory.appendingPathComponent("main.plugin")
+        let bundled = Set((UserDefaults.standard.array(forKey: self.bundledKey) as? [String]) ?? [])
+        if self.fileManager.fileExists(atPath: file.path) && !bundled.contains(pluginId) {
+            return false
+        }
+        // A flat `<id>.plugin` or a bundle with `main.js` is something the user
+        // put there; `pluginSources()` reads either, so writing `main.plugin`
+        // next to it would install the plugin twice.
+        if !bundled.contains(pluginId) {
+            for candidate in [directory.appendingPathComponent("main.js"),
+                              self.pluginsDirectory.appendingPathComponent("\(pluginId).plugin"),
+                              self.pluginsDirectory.appendingPathComponent("\(pluginId).js")] {
+                if self.fileManager.fileExists(atPath: candidate.path) {
+                    return false
+                }
+            }
+        }
+        do {
+            try self.fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            // `String(contentsOf:encoding:)` is deprecated in the current SDK and
+            // the build treats warnings as errors, so the bytes are compared
+            // instead: an unchanged file is not rewritten on every launch.
+            if let existing = try? Data(contentsOf: file), existing == Data(source.utf8) {
+                return false
+            }
+            try source.write(to: file, atomically: true, encoding: .utf8)
+            var updated = bundled
+            updated.insert(pluginId)
+            UserDefaults.standard.set(Array(updated), forKey: self.bundledKey)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Ids whose file on disk came from the app bundle.
+    ///
+    /// Lets a later launch tell "this is our copy, keep it current" from "the
+    /// user installed this themselves, do not touch it" without comparing bytes.
+    private var bundledKey: String { "extera.plugin.bundled" }
 
     // MARK: - Settings
 

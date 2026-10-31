@@ -1,0 +1,203 @@
+/*
+ * Hide Attach Buttons — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original hooks `ChatAttachAlert$ButtonsAdapter`, `AttachButton` and
+ * `AttachBotButton`, hides the views of the buttons the user switched off, and
+ * re-flows the remaining ones. None of those classes exist on iOS; the attach
+ * menu here is `AttachmentUI.AttachmentController`, built from a
+ * `[AttachmentButtonType]` list. So this port answers the same question one step
+ * earlier: the host asks which keys to drop, the plugin answers, and the host
+ * never offers them. The visible result is identical, and the setting keys are
+ * unchanged so an Android user finds their switches where they left them.
+ *
+ * Two things the original did that are not ported, because they only made sense
+ * against the Android views:
+ *
+ *   - `md3_style` repainted the button row with Material Design 3 colours by
+ *     poking theme keys and per-view drawables. iOS draws its own segmented
+ *     control, so the key is still accepted and stored (a user's configuration is
+ *     not silently discarded) and the switch says what it does — nothing.
+ *   - The stretch/re-flow passes measured the RecyclerView to centre the remaining
+ *     buttons. With the list filtered before it is built, there is nothing to
+ *     re-flow.
+ */
+
+var __id__ = "hide_attach_buttons";
+var __name__ = "Hide Attach Buttons";
+var __description__ = "Скрывает выбранные кнопки и ботов из меню вложений. Все переключатели как в Android-версии; кнопки убираются до построения панели, поэтому список остаётся ровным.";
+var __author__ = "Natu";
+var __version__ = "1.2";
+var __min_version__ = "11.0.0";
+var __category__ = ["interface"];
+
+// Android button id -> the name the setting keys use. Kept so the two
+// vocabularies stay lined up with the original.
+var BUTTON_IDS = {
+    1: "gallery",
+    3: "music",
+    4: "document",
+    5: "contact",
+    6: "location",
+    9: "poll",
+    11: "quick_replies",
+    16: "article"
+};
+
+// Setting key per button name, in the order the original declared them.
+var SWITCH_KEYS = {
+    gallery: "hide_gallery",
+    music: "hide_music",
+    document: "hide_document",
+    contact: "hide_contact",
+    location: "hide_location",
+    poll: "hide_poll",
+    quick_replies: "hide_quick_replies",
+    article: "hide_article",
+    list: "hide_list"
+};
+
+// iOS attach-menu keys, as `AttachmentButtonType.key` spells them. `audio` is the
+// music entry, `file` the document one and `richText` the article editor.
+//
+// The two label-matched switches the original had (`hide_list`, `hide_article`)
+// are kept apart on purpose: on Android each matched its own label markers
+// (`"список"/"list"` and `"стать"/"article"`), and a button matched at most one
+// of them. `richText` is the article composer and `todo` the list screen, so
+// mapping the article switch onto both would make it hide the list as well.
+var IOS_KEYS = {
+    gallery: ["gallery"],
+    music: ["audio"],
+    document: ["file"],
+    contact: ["contact"],
+    location: ["location"],
+    poll: ["poll"],
+    quick_replies: ["quickReply"],
+    article: ["richText"],
+    list: ["todo"]
+};
+
+function hiddenByName() {
+    return SWITCH_KEYS;
+}
+
+function keyIsHidden(key, hidden) {
+    for (var name in hidden) {
+        if (!Object.prototype.hasOwnProperty.call(hidden, name)) {
+            continue;
+        }
+        var candidates = IOS_KEYS[name] || [];
+        for (var i = 0; i < candidates.length; i++) {
+            if (key === candidates[i]) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+class HideAttachButtonsPlugin extends BasePlugin {
+    constructor() {
+        super();
+        HideAttachButtonsPlugin.instance = this;
+    }
+
+    on_plugin_load() {
+        HideAttachButtonsPlugin.instance = this;
+    }
+
+    on_plugin_unload() {
+        HideAttachButtonsPlugin.instance = null;
+    }
+
+    // `g` reads through the instance, so a plugin that never loaded still answers
+    // with the defaults instead of throwing.
+    static g(key, fallback) {
+        var instance = HideAttachButtonsPlugin.instance;
+        if (!instance) {
+            return fallback;
+        }
+        try {
+            return instance.get_setting(key, fallback);
+        } catch (error) {
+            return fallback;
+        }
+    }
+
+    // The keys the user switched off, expanded to iOS button keys.
+    hiddenKeys() {
+        var hidden = {};
+        var names = hiddenByName();
+        for (var name in names) {
+            if (Object.prototype.hasOwnProperty.call(names, name) &&
+                HideAttachButtonsPlugin.g(names[name], false) === true) {
+                hidden[name] = true;
+            }
+        }
+        return hidden;
+    }
+
+    // `keys` is what the host was about to show. The answer is the subset to
+    // keep, so a key the plugin does not know about is left alone.
+    filterKeys(keys) {
+        if (!keys || typeof keys.length !== "number") {
+            return null;
+        }
+        var hidden = this.hiddenKeys();
+        var hideBots = HideAttachButtonsPlugin.g("hide_all_bots", false) === true;
+        var result = [];
+        for (var i = 0; i < keys.length; i++) {
+            var key = String(keys[i]);
+            // A bot or mini app is spelled `app_<shortName>`.
+            if (hideBots && key.indexOf("app_") === 0) {
+                continue;
+            }
+            if (keyIsHidden(key, hidden)) {
+                continue;
+            }
+            result.push(key);
+        }
+        return result;
+    }
+
+    // Called by the host while the attach menu is being built. The payload is
+    // `{keys: [...]}`; returning null means "nothing to filter".
+    on_attach_menu_hook(account, buttons, extra) {
+        var keys = buttons && buttons.keys ? buttons.keys : buttons;
+        return this.filterKeys(keys);
+    }
+
+    create_settings() {
+        return [
+            Header({ text: "Стандартные кнопки" }),
+            Switch({ key: "hide_gallery", text: "Скрыть «Галерея»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_music", text: "Скрыть «Музыка»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_document", text: "Скрыть «Файл»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_contact", text: "Скрыть «Контакт»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_location", text: "Скрыть «Геопозиция»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_poll", text: "Скрыть «Опрос»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_quick_replies", text: "Скрыть «Быстрые ответы»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_article", text: "Скрыть «Статья»", default: false, icon: "msg_hide" }),
+            Switch({ key: "hide_list", text: "Скрыть «Список»", default: false, icon: "msg_hide" }),
+            Divider({}),
+            Header({ text: "Боты и мини-приложения" }),
+            Switch({
+                key: "hide_all_bots",
+                text: "Скрыть ВСЕ боты",
+                default: false,
+                subtext: "Скрывает все кнопки ботов в панели",
+                icon: "msg_bots"
+            }),
+            Divider({}),
+            Header({ text: "Стиль" }),
+            Switch({
+                key: "md3_style",
+                text: "Material Design 3 (на iOS не действует)",
+                default: false,
+                subtext: "На Android перекрашивал кнопки под MD3. iOS рисует панель вложений своим контролом, поэтому переключатель только сохраняет значение.",
+                icon: "msg_settings"
+            })
+        ];
+    }
+}
+
+var Plugin = HideAttachButtonsPlugin;

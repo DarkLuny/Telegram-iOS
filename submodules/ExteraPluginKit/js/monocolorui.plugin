@@ -1,0 +1,402 @@
+/*
+ * MonoColor UI — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original is a thin Python shell around an embedded DEX: the Python half
+ * draws a settings screen and the DEX (`ni.shikatu...`-style entry class) walks
+ * the Android theme, overwrites `Theme.getColor(...)` results and repaints
+ * `GradientDrawable`s on attached views. There is no Dalvik on iOS, so the DEX is
+ * not ported; what it achieved is reproduced through the hooks this runtime has:
+ *
+ *   on_theme_colors -> the accent the whole interface is repainted with
+ *   on_name_colors  -> the palette peer names, avatars and rings are painted with
+ *
+ * The user-visible promise is the same one the plugin makes: the interface ends
+ * up in a single tone, taken either from a colour the theme already uses or from
+ * a colour the user typed in.
+ *
+ * What is preserved from the original:
+ *
+ *   - The seven colour sources, in the same order: the add-button colour, the
+ *     theme accent, the header colour, the link colour, the floating-button
+ *     colour, the outgoing bubble colour, and a custom colour.
+ *   - `color_source` as the setting key, with the same indices 0..6 and
+ *     `CUSTOM_SOURCE = 6`, so a user who had a source selected keeps it.
+ *   - `custom_color` as `#RRGGBB`, parsed the same way: 3-, 6- and 8-digit hex,
+ *     with `#` optional and the alpha byte dropped. An unparsable value falls back
+ *     to `DEFAULT_COLOR` instead of throwing.
+ *   - The six "what to repaint" switches, with the same keys and defaults:
+ *     `gradient`, `avatars`, `stories`, `names`, `dialogs`, `profiles`.
+ *   - `DEFAULT_COLOR = 0xFF4FAEDE`, which is what the original used whenever a
+ *     theme key could not be read.
+ *
+ * What changed, and why:
+ *
+ *   - The colour picker was `ColorPickerBottomSheet` with a pipette delegate.
+ *     iOS has no such control to borrow, so the custom colour is a text field
+ *     that accepts the same `#RRGGBB` the picker produced. The value written back
+ *     is byte-identical to what the original stored, so a settings export from
+ *     one client still loads in the other.
+ *   - The source list was an `AlertDialog` of hand-built rows. Here it is a
+ *     `Selector`, which is the settings row iOS already has for "pick one of N";
+ *     the labels are the original's ("Кнопка", "Акцент", ...) with the colour
+ *     they currently resolve to, so the choice still shows what it will paint.
+ *   - `Theme.getColor(Theme.key_*)` became `__extera.themeColors([...])`, which
+ *     answers with `0xRRGGBB` numbers from the live `PresentationTheme`. The
+ *     mapping of the six Android keys to iOS slots is written out in `SOURCES`
+ *     rather than hidden in reflection.
+ *   - `Dex.apply()` was a full re-walk of the attached view tree. Here the host
+ *     rebuilds the theme and the palettes when the plugin says its appearance
+ *     changed, which happens automatically after a setting is saved.
+ */
+
+var __id__ = "monocolorui";
+var __name__ = "MonoColor UI";
+var __description__ = "Полностью перекрашивает интерфейс в один цвет: аватарки, истории и списки чатов становятся одного тона. Источник цвета выбирается из темы или задаётся вручную.";
+var __author__ = "@limeplug";
+var __version__ = "1.7";
+var __min_version__ = "12.5.1";
+var __category__ = ["appearance"];
+
+// The alpha byte the original or-ed in. Kept so a stored value round-trips.
+var CUSTOM_SOURCE = 6;
+var DEFAULT_COLOR = 0x4faede;
+
+// The seven sources, in the order the original declared them. `name` is the
+// colour the host is asked for; `null` means "the theme's accent", which the
+// host resolves through the accent key. The custom source is not asked for.
+var SOURCES = [
+    { title: "Кнопка", name: "button" },
+    { title: "Акцент", name: "accent" },
+    { title: "Шапка", name: "header" },
+    { title: "Ссылки", name: "link" },
+    { title: "Плавающая кнопка", name: "floatingButton" },
+    { title: "Исходящие", name: "outgoing" },
+    { title: "Свой", name: null }
+];
+
+var SWITCH_DEFAULTS = {
+    gradient: false,
+    avatars: true,
+    stories: true,
+    names: true,
+    dialogs: true,
+    profiles: true
+};
+
+function toBool(value, fallback) {
+    if (value === undefined || value === null) {
+        return !!fallback;
+    }
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (typeof value === "number") {
+        return value !== 0;
+    }
+    var text = String(value).trim().toLowerCase();
+    if (text === "true" || text === "1") {
+        return true;
+    }
+    if (text === "false" || text === "0" || text === "") {
+        return false;
+    }
+    return !!fallback;
+}
+
+// `#abc`, `#aabbcc` and `#ffaabbcc` all become `0xRRGGBB`, which is the shape
+// the host's colour fields take. Anything else is `DEFAULT_COLOR`, matching the
+// original's `except: return DEFAULT_COLOR`.
+function parseColor(text) {
+    var value = String(text === undefined || text === null ? "" : text).trim();
+    if (value.charAt(0) === "#") {
+        value = value.slice(1);
+    }
+    if (value.length === 3) {
+        value = value.charAt(0) + value.charAt(0) +
+            value.charAt(1) + value.charAt(1) +
+            value.charAt(2) + value.charAt(2);
+    } else if (value.length === 8) {
+        value = value.slice(2);
+    }
+    if (value.length !== 6) {
+        return DEFAULT_COLOR;
+    }
+    if (!/^[0-9a-fA-F]{6}$/.test(value)) {
+        return DEFAULT_COLOR;
+    }
+    return parseInt(value, 16) & 0xffffff;
+}
+
+function formatColor(color) {
+    var value = (typeof color === "number" ? color : DEFAULT_COLOR) & 0xffffff;
+    var hex = value.toString(16).toUpperCase();
+    while (hex.length < 6) {
+        hex = "0" + hex;
+    }
+    return "#" + hex;
+}
+
+// The source index the user last chose, clamped the way `_source_index` does it.
+function sourceIndex(instance) {
+    var raw = instance.get_setting("color_source", 0);
+    var index = parseInt(raw, 10);
+    if (isNaN(index) || index < 0 || index > CUSTOM_SOURCE) {
+        return 0;
+    }
+    return index;
+}
+
+function switchValue(instance, key) {
+    return toBool(instance.get_setting(key, SWITCH_DEFAULTS[key]), SWITCH_DEFAULTS[key]);
+}
+
+// The colours every source currently resolves to, keyed by the source name. The
+// host answers `{}` when nothing is loaded yet, so a missing entry falls back to
+// the default just like a failed `Theme.getColor` did.
+function readSourceColors(instance) {
+    var names = [];
+    for (var i = 0; i < SOURCES.length; i++) {
+        if (SOURCES[i].name) {
+            names.push(SOURCES[i].name);
+        }
+    }
+    var resolved = null;
+    if (typeof __extera.themeColors === "function") {
+        resolved = __extera.themeColors(names);
+    }
+    var colors = {};
+    for (var j = 0; j < names.length; j++) {
+        var name = names[j];
+        var value = resolved && typeof resolved[name] === "number" ? resolved[name] : null;
+        colors[name] = value === null ? DEFAULT_COLOR : (value & 0xffffff);
+    }
+    return colors;
+}
+
+// The colour the current source means. `custom` is the only one that does not
+// come from the theme.
+function resolveColor(instance, colors) {
+    var index = sourceIndex(instance);
+    if (index === CUSTOM_SOURCE) {
+        return parseColor(instance.get_setting("custom_color", "#4FAEDE"));
+    }
+    var name = SOURCES[index].name;
+    if (!name) {
+        return DEFAULT_COLOR;
+    }
+    return colors[name] === undefined ? DEFAULT_COLOR : colors[name];
+}
+
+// How far the second stop of the gradient is from the first. A fixed small
+// distance rather than a fixed second colour: the point of the switch is "two
+// shades of this tone", and a hard-coded partner would be wrong for half the
+// palette. It lightens on dark tones and darkens on light ones so the result is
+// visible either way, which is what the DEX's own gradient ended up doing.
+function gradientPartner(color) {
+    var r = (color >> 16) & 0xff;
+    var g = (color >> 8) & 0xff;
+    var b = color & 0xff;
+    var lightness = (Math.max(r, g, b) + Math.min(r, g, b)) / 510.0;
+    var factor = lightness > 0.5 ? 0.82 : 1.22;
+    r = Math.max(0, Math.min(255, Math.round(r * factor)));
+    g = Math.max(0, Math.min(255, Math.round(g * factor)));
+    b = Math.max(0, Math.min(255, Math.round(b * factor)));
+    return (r << 16) | (g << 8) | b;
+}
+
+class MonoColorUiPlugin extends BasePlugin {
+    constructor() {
+        super();
+        MonoColorUiPlugin.instance = this;
+    }
+
+    on_plugin_load() {
+        MonoColorUiPlugin.instance = this;
+    }
+
+    on_plugin_unload() {
+        MonoColorUiPlugin.instance = null;
+    }
+
+    // Static accessors so a hook that fires before `on_plugin_load` still reads
+    // the stored settings instead of throwing.
+    static state() {
+        var instance = MonoColorUiPlugin.instance;
+        if (!instance) {
+            return null;
+        }
+        try {
+            var colors = readSourceColors(instance);
+            return {
+                color: resolveColor(instance, colors),
+                colors: colors,
+                gradient: switchValue(instance, "gradient"),
+                avatars: switchValue(instance, "avatars"),
+                stories: switchValue(instance, "stories"),
+                names: switchValue(instance, "names"),
+                dialogs: switchValue(instance, "dialogs"),
+                profiles: switchValue(instance, "profiles")
+            };
+        } catch (error) {
+            return null;
+        }
+    }
+
+    // The accent for the whole interface: buttons, links, selections, badges,
+    // the input panel and the navigation bar.
+    //
+    // The sent-message bubble is recoloured too. Unlike a plugin that only wants
+    // a coloured accent, this one promises one tone everywhere, so leaving the
+    // outgoing bubbles in their theme colour would be the visible exception that
+    // gives it away.
+    //
+    // `undefined` (not `null`) is returned when every switch is off: the host
+    // reads that as "no answer" and keeps the stock theme.
+    on_theme_colors(account, payload, extra) {
+        var state = MonoColorUiPlugin.state();
+        if (!state) {
+            return undefined;
+        }
+        if (!state.names && !state.avatars && !state.stories &&
+            !state.dialogs && !state.profiles) {
+            return undefined;
+        }
+        var result = {
+            main: state.color,
+            outgoing: state.color,
+            names: state.names,
+            avatars: state.avatars,
+            stories: state.stories,
+            dialogs: state.dialogs,
+            profiles: state.profiles
+        };
+        if (state.gradient) {
+            result.secondary = gradientPartner(state.color);
+        }
+        return result;
+    }
+
+    // The palette peer names, avatars and story rings are painted with. Answers
+    // only when one of those three is actually on, so the stock palette is left
+    // alone otherwise.
+    on_name_colors(account, payload, extra) {
+        var state = MonoColorUiPlugin.state();
+        if (!state) {
+            return undefined;
+        }
+        if (!state.names && !state.avatars && !state.stories) {
+            return undefined;
+        }
+        var result = {
+            main: state.color,
+            names: state.names,
+            avatars: state.avatars,
+            stories: state.stories,
+            dialogs: state.dialogs,
+            profiles: state.profiles
+        };
+        if (state.gradient) {
+            result.secondary = gradientPartner(state.color);
+        }
+        return result;
+    }
+
+    // --- settings ---------------------------------------------------------
+
+    sourceItems() {
+        var instance = MonoColorUiPlugin.instance;
+        var colors = instance ? readSourceColors(instance) : {};
+        var index = instance ? sourceIndex(instance) : 0;
+        var custom = instance ? parseColor(instance.get_setting("custom_color", "#4FAEDE")) : DEFAULT_COLOR;
+        var items = [];
+        for (var i = 0; i < SOURCES.length; i++) {
+            var source = SOURCES[i];
+            var color = i === CUSTOM_SOURCE
+                ? custom
+                : (colors[source.name] === undefined ? DEFAULT_COLOR : colors[source.name]);
+            var label = source.title + "  " + formatColor(color);
+            if (i === index) {
+                label += "  ✓";
+            }
+            items.push(label);
+        }
+        return items;
+    }
+
+    create_settings() {
+        var instance = MonoColorUiPlugin.instance;
+        var index = instance ? sourceIndex(instance) : 0;
+        var colors = instance ? readSourceColors(instance) : {};
+        var color = instance ? resolveColor(instance, colors) : DEFAULT_COLOR;
+
+        var rows = [
+            Header({ text: "Цвет" }),
+            Selector({
+                key: "color_source",
+                text: "Из темы",
+                default: 0,
+                items: this.sourceItems(),
+                on_change: function () {
+                    // Nothing to push: the host rebuilds the theme and the
+                    // palettes after a setting is stored, which re-reads
+                    // `on_theme_colors` and `on_name_colors`.
+                }
+            })
+        ];
+
+        if (index === CUSTOM_SOURCE) {
+            rows.push(Input({
+                key: "custom_color",
+                text: "Свой цвет",
+                default: "#4FAEDE",
+                subtext: "Формат #RRGGBB. Сейчас: " + formatColor(color)
+            }));
+        }
+
+        rows.push(Switch({
+            key: "gradient",
+            text: "Градиент",
+            default: false,
+            subtext: "Второй оттенок на аватарках, именах и кольцах"
+        }));
+        rows.push(Header({ text: "Что перекрашивать" }));
+        rows.push(Switch({
+            key: "avatars",
+            text: "Аватарки",
+            default: true,
+            subtext: "Заглушки и фото в цвет темы"
+        }));
+        rows.push(Switch({
+            key: "stories",
+            text: "Истории",
+            default: true,
+            subtext: "Кольца непрочитанных, близких друзей и эфиров"
+        }));
+        rows.push(Switch({
+            key: "names",
+            text: "Имена",
+            default: true,
+            subtext: "Стандартные цветные имена в чатах"
+        }));
+        rows.push(Switch({
+            key: "dialogs",
+            text: "Список чатов",
+            default: true,
+            subtext: "Названия чатов и последние сообщения"
+        }));
+        rows.push(Switch({
+            key: "profiles",
+            text: "Цвета профилей",
+            default: true,
+            subtext: "Свой цвет имени, шапки, аватарки и кольца истории"
+        }));
+        rows.push(Divider());
+        rows.push(Text({
+            text: "Источник: " + SOURCES[index].title + "  " + formatColor(color),
+            subtext: "Итоговый цвет интерфейса. Меняется сразу после выбора источника."
+        }));
+        return rows;
+    }
+}
+
+var Plugin = MonoColorUiPlugin;

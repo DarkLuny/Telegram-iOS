@@ -1271,6 +1271,11 @@ public class ChatMessageInstantVideoItemNode: ChatMessageItemView, ASGestureReco
     override public func animateInsertion(_ currentTimestamp: Double, duration: Double, options: ListViewItemAnimationOptions) {
         super.animateInsertion(currentTimestamp, duration: duration, options: options)
         
+        // A plugin style animates the row as a whole; its own fade wins.
+        if self.pluginInsertionAnimationPlayed {
+            return
+        }
+        
         self.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
     }
     

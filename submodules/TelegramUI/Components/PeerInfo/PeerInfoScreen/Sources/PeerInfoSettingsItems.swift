@@ -38,6 +38,21 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
     for section in SettingsSection.allCases {
         items[section] = []
     }
+
+    // Rows a plugin may hide (exteraGram's "LiteGram" switch list). The keys are
+    // asked for once, before anything is built, so a hidden row is never created
+    // and no section is left holding an empty placeholder. The offered list is
+    // fixed rather than collected from what was appended, because the payment
+    // rows depend on server state: a plugin must be able to hide "stars" even
+    // when this account has no balance and the row would not appear anyway.
+    var settingsRowKeys: [String] = ["premium", "stars", "ton", "wallet", "business", "sendGift", "support", "faq", "tips"]
+    if let settingsRowExclusions = PluginHookPoints.shared.settingsRowExclusions {
+        let kept = Set(settingsRowExclusions(context.account.id.int64, settingsRowKeys))
+        settingsRowKeys = settingsRowKeys.filter { kept.contains($0) }
+    }
+    func showsSettingsRow(_ key: String) -> Bool {
+        return settingsRowKeys.contains(key)
+    }
     
     let setPhotoTitle: String
     if let peer = data.peer, !peer.profileImageRepresentations.isEmpty {
@@ -153,7 +168,7 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
             interaction.openSettings(.profile)
         }))
         
-        if WalletConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 }).isAvailable {
+        if showsSettingsRow("wallet"), WalletConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 }).isAvailable {
             let balanceText: NSAttributedString
             if let balance = settings.walletBalance, balance > 10_000_000 {
                 var formattedLabel = formatTonAmountText(balance, dateTimeFormat: presentationData.dateTimeFormat)
@@ -277,12 +292,12 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
     
     let premiumConfiguration = PremiumConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 })
     let isPremiumDisabled = premiumConfiguration.isPremiumDisabled
-    if !isPremiumDisabled || context.isPremium {
+    if showsSettingsRow("premium"), !isPremiumDisabled || context.isPremium {
         items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100, label: .text(""), text: presentationData.strings.Settings_Premium, icon: PresentationResourcesSettings.premium, action: {
             interaction.openSettings(.premium)
         }))
     }
-    if let starsState = data.starsState {
+    if showsSettingsRow("stars"), let starsState = data.starsState {
         if !isPremiumDisabled || abs(starsState.balance.value) > 0 {
             let balanceText: NSAttributedString
             if abs(starsState.balance.value) > 0 {
@@ -299,7 +314,7 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
             }))
         }
     }
-    if let tonState = data.tonState {
+    if showsSettingsRow("ton"), let tonState = data.tonState {
         if abs(tonState.balance.value) > 0 {
             let balanceText: NSAttributedString
             if abs(tonState.balance.value) > 0 {
@@ -316,12 +331,12 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
             }))
         }
     }
-    if !isPremiumDisabled || context.isPremium {
+    if showsSettingsRow("business"), !isPremiumDisabled || context.isPremium {
         items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104, label: .text(""), additionalBadgeLabel: nil, text: presentationData.strings.Settings_Business, icon: PresentationResourcesSettings.business, action: {
             interaction.openSettings(.businessSetup)
         }))
     }
-    if let starsState = data.starsState {
+    if showsSettingsRow("sendGift"), let starsState = data.starsState {
         if !isPremiumDisabled || starsState.balance > StarsAmount.zero {
             items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 105, label: .text(""), text: presentationData.strings.Settings_SendGift, icon: PresentationResourcesSettings.premiumGift, action: {
                 interaction.openSettings(.premiumGift)
@@ -348,15 +363,21 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
         interaction.openSettings(.plugins)
     }))
     
-    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_Support, icon: PresentationResourcesSettings.support, action: {
-        interaction.openSettings(.support)
-    }))
-    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 1, text: presentationData.strings.Settings_FAQ, icon: PresentationResourcesSettings.faq, action: {
-        interaction.openSettings(.faq)
-    }))
-    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 2, text: presentationData.strings.Settings_Tips, icon: PresentationResourcesSettings.tips, action: {
-        interaction.openSettings(.tips)
-    }))
+    if showsSettingsRow("support") {
+        items[.support]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_Support, icon: PresentationResourcesSettings.support, action: {
+            interaction.openSettings(.support)
+        }))
+    }
+    if showsSettingsRow("faq") {
+        items[.support]!.append(PeerInfoScreenDisclosureItem(id: 1, text: presentationData.strings.Settings_FAQ, icon: PresentationResourcesSettings.faq, action: {
+            interaction.openSettings(.faq)
+        }))
+    }
+    if showsSettingsRow("tips") {
+        items[.support]!.append(PeerInfoScreenDisclosureItem(id: 2, text: presentationData.strings.Settings_Tips, icon: PresentationResourcesSettings.tips, action: {
+            interaction.openSettings(.tips)
+        }))
+    }
     
     var result: [(AnyHashable, [PeerInfoScreenItem])] = []
     for section in SettingsSection.allCases {

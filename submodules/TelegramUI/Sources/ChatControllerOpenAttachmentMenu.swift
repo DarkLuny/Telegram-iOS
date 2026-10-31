@@ -425,6 +425,41 @@ extension ChatControllerImpl {
                     buttons.insert(.richText, at: firstBotIndex)
                 }
                 
+                // Plugins may hide attach-menu entries (exteraGram's "Hide Attach
+                // Buttons" works this way). The filter runs on the finished list,
+                // right before the controller is built, so it sees exactly the
+                // buttons the user would have seen and nothing has to be re-laid
+                // out afterwards: a hidden button is never created in the first
+                // place, which is why the panel stays centred instead of leaving a
+                // gap the Android version had to measure and close.
+                if let attachMenuExclusions = PluginHookPoints.shared.attachMenuExclusions {
+                    let offeredKeys = buttons.map { $0.key }
+                    let keptKeys = Set(attachMenuExclusions(
+                        strongSelf.context.account.id.int64,
+                        strongSelf.presentationInterfaceState.renderedPeer?.peer.id.toInt64(),
+                        offeredKeys
+                    ))
+                    if keptKeys != Set(offeredKeys) {
+                        buttons = buttons.filter { keptKeys.contains($0.key) }
+                        // `allButtons` keeps what the subject asked for even when
+                        // the menu does not show it; drop the same keys so a
+                        // bot-install confirmation cannot resurrect a hidden one.
+                        allButtons = allButtons.filter { button in
+                            let key = button.key
+                            if offeredKeys.contains(key) {
+                                return keptKeys.contains(key)
+                            }
+                            return true
+                        }
+                        if let initial = initialButton, !buttons.contains(initial) {
+                            initialButton = buttons.first
+                        }
+                    }
+                    if buttons.isEmpty {
+                        return
+                    }
+                }
+                
                 guard let initialButton = initialButton else {
                     if case let .bot(botId, botPayload, botJustInstalled) = subject {
                         if let button = allButtons.first(where: { button in

@@ -111,6 +111,77 @@ public class PeerNameColors: Equatable {
     public let nameColorsChannelMinRequiredBoostLevel: [Int32: Int32]
     public let profileColorsChannelMinRequiredBoostLevel: [Int32: Int32]
     public let profileColorsGroupMinRequiredBoostLevel: [Int32: Int32]
+
+    /// The palette a plugin asked for, or `nil` when no plugin overrides colours.
+    ///
+    /// Kept on the palette rather than in a separate store because everything that
+    /// needs it — name labels, chat list rows, the avatar node — already reads
+    /// `peerNameColors` off the account. One place to look, and one place to keep
+    /// up to date when a plugin's settings change.
+    public private(set) var pluginOverride: PluginNameColorsOverride?
+
+    /// The same palette with `override`'s colours substituted.
+    ///
+    /// Which keys stay untouched is the plugin's call, expressed by its five
+    /// flags: an override with `applyToNames` off leaves every name colour alone
+    /// but may still repaint profile headers. Keys are preserved, including their
+    /// display order, so a themed account keeps the palette entries Telegram sent
+    /// and only the colours inside them change.
+    public func withPluginOverride(_ override: PluginNameColorsOverride?) -> PeerNameColors {
+        guard let override = override else {
+            if self.pluginOverride == nil {
+                return self
+            }
+            return PeerNameColors(
+                colors: self.colors,
+                darkColors: self.darkColors,
+                displayOrder: self.displayOrder,
+                chatFolderTagDisplayOrder: self.chatFolderTagDisplayOrder,
+                profileColors: self.profileColors,
+                profileDarkColors: self.profileDarkColors,
+                profilePaletteColors: self.profilePaletteColors,
+                profilePaletteDarkColors: self.profilePaletteDarkColors,
+                profileStoryColors: self.profileStoryColors,
+                profileStoryDarkColors: self.profileStoryDarkColors,
+                profileDisplayOrder: self.profileDisplayOrder,
+                nameColorsChannelMinRequiredBoostLevel: self.nameColorsChannelMinRequiredBoostLevel,
+                profileColorsChannelMinRequiredBoostLevel: self.profileColorsChannelMinRequiredBoostLevel,
+                profileColorsGroupMinRequiredBoostLevel: self.profileColorsGroupMinRequiredBoostLevel,
+                pluginOverride: nil
+            )
+        }
+
+        let main = UIColor(rgb: override.main)
+        let secondary = override.secondary.map { UIColor(rgb: $0) }
+        let replacement = PeerNameColors.Colors(main: main, secondary: secondary, tertiary: secondary)
+
+        func repaint(_ source: [Int32: Colors]) -> [Int32: Colors] {
+            var result: [Int32: Colors] = [:]
+            for (key, _) in source {
+                result[key] = replacement
+            }
+            return result
+        }
+
+        let repaintNames = override.applyToNames || override.applyToDialogs
+        return PeerNameColors(
+            colors: repaintNames ? repaint(self.colors) : self.colors,
+            darkColors: repaintNames ? repaint(self.darkColors) : self.darkColors,
+            displayOrder: self.displayOrder,
+            chatFolderTagDisplayOrder: self.chatFolderTagDisplayOrder,
+            profileColors: override.applyToProfiles ? repaint(self.profileColors) : self.profileColors,
+            profileDarkColors: override.applyToProfiles ? repaint(self.profileDarkColors) : self.profileDarkColors,
+            profilePaletteColors: override.applyToProfiles ? repaint(self.profilePaletteColors) : self.profilePaletteColors,
+            profilePaletteDarkColors: override.applyToProfiles ? repaint(self.profilePaletteDarkColors) : self.profilePaletteDarkColors,
+            profileStoryColors: override.applyToStories ? repaint(self.profileStoryColors) : self.profileStoryColors,
+            profileStoryDarkColors: override.applyToStories ? repaint(self.profileStoryDarkColors) : self.profileStoryDarkColors,
+            profileDisplayOrder: self.profileDisplayOrder,
+            nameColorsChannelMinRequiredBoostLevel: self.nameColorsChannelMinRequiredBoostLevel,
+            profileColorsChannelMinRequiredBoostLevel: self.profileColorsChannelMinRequiredBoostLevel,
+            profileColorsGroupMinRequiredBoostLevel: self.profileColorsGroupMinRequiredBoostLevel,
+            pluginOverride: override
+        )
+    }
     
     public func get(_ color: PeerNameColor, dark: Bool = false) -> Colors {
         if dark, let colors = self.darkColors[color.rawValue] {
@@ -175,7 +246,8 @@ public class PeerNameColors: Equatable {
         profileDisplayOrder: [Int32],
         nameColorsChannelMinRequiredBoostLevel: [Int32: Int32],
         profileColorsChannelMinRequiredBoostLevel: [Int32: Int32],
-        profileColorsGroupMinRequiredBoostLevel: [Int32: Int32]
+        profileColorsGroupMinRequiredBoostLevel: [Int32: Int32],
+        pluginOverride: PluginNameColorsOverride? = nil
     ) {
         self.colors = colors
         self.darkColors = darkColors
@@ -191,6 +263,7 @@ public class PeerNameColors: Equatable {
         self.nameColorsChannelMinRequiredBoostLevel = nameColorsChannelMinRequiredBoostLevel
         self.profileColorsChannelMinRequiredBoostLevel = profileColorsChannelMinRequiredBoostLevel
         self.profileColorsGroupMinRequiredBoostLevel = profileColorsGroupMinRequiredBoostLevel
+        self.pluginOverride = pluginOverride
     }
     
     public static func with(availableReplyColors: EngineAvailableColorOptions, availableProfileColors: EngineAvailableColorOptions) -> PeerNameColors {

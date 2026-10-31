@@ -29,9 +29,29 @@ public protocol PluginHost: AnyObject {
     func pluginFileOperation(pluginId: String, op: String, path: String, payload: String?) -> String?
     /// The account selected in the UI, so `get_selected_account()` has a value.
     func pluginSelectedAccount(pluginId: String) -> Int64?
+    /// The colours the running theme uses, as a JSON object of `0xRRGGBB`
+    /// numbers keyed by the names the plugin asked for.
+    ///
+    /// A plugin that offers "take the colour from the theme" has to show the
+    /// user what each source currently is; on Android it read
+    /// `Theme.getColor(Theme.key_*)` directly. Synchronous because it reads an
+    /// already-built value and never waits on anything.
+    func pluginThemeColors(pluginId: String, namesJSON: String) -> String?
     /// Puts text on the system clipboard and reports it, like
     /// `android_utils.copy_to_clipboard`.
     func pluginCopyToClipboard(pluginId: String, text: String)
+    /// Opens a URL with the app's own rules: `https`/`http` in the in-app browser,
+    /// everything else through the system handler.
+    ///
+    /// Returns whether the URL was accepted, so `open_url` can answer the plugin
+    /// the way `Browser.openUrl` answers a boolean on Android.
+    func pluginOpenUrl(pluginId: String, url: String) -> Bool
+    /// The running app's version, e.g. `"13.1.1"`.
+    ///
+    /// On Android a plugin reads `BuildVars.BUILD_VERSION_STRING` to gate a
+    /// feature on the client build; there is no such class here, so the same
+    /// string comes from the bundle. Synchronous because it is a constant.
+    func pluginAppVersion(pluginId: String) -> String
     func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String)
 
     // Network and proxy. All five are asynchronous: the answer is delivered by
@@ -172,6 +192,19 @@ public final class PluginLoader {
         let plugin = LoadedPlugin(manifest: manifest, directory: directory, context: context, instance: instance)
         plugin.settings = self.host.pluginSettings(pluginId: manifest.id)
         return plugin
+    }
+
+    /// The id a plugin declares, or nil when it declares none.
+    ///
+    /// Reads only `__id__`, from the text, without touching the rest of the
+    /// manifest: installing a bundled plugin has to know where to write the file
+    /// before anything is evaluated, and a plugin whose `__id__` is missing is
+    /// still worth writing out so the loader can report the precise failure.
+    public func manifestIdentifier(in source: String) -> String? {
+        guard let value = self.literalString(in: source, named: "__id__"), !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 
     /// Reads the `__id__`, `__name__`, ... constants a plugin declares.
@@ -458,10 +491,25 @@ public final class PluginLoader {
         }
         hostObject.setObject(selectedAccount as AnyObject, forKeyedSubscript: "selectedAccount" as NSString)
 
+        let themeColors: @convention(block) (String, String) -> String? = { id, namesJSON in
+            return host.pluginThemeColors(pluginId: id, namesJSON: namesJSON)
+        }
+        hostObject.setObject(themeColors as AnyObject, forKeyedSubscript: "themeColors" as NSString)
+
         let copyToClipboard: @convention(block) (String, String) -> Void = { id, text in
             host.pluginCopyToClipboard(pluginId: id, text: text)
         }
         hostObject.setObject(copyToClipboard as AnyObject, forKeyedSubscript: "copyToClipboard" as NSString)
+
+        let openUrl: @convention(block) (String, String) -> Bool = { id, url in
+            return host.pluginOpenUrl(pluginId: id, url: url)
+        }
+        hostObject.setObject(openUrl as AnyObject, forKeyedSubscript: "openUrl" as NSString)
+
+        let appVersion: @convention(block) (String) -> String = { id in
+            return host.pluginAppVersion(pluginId: id)
+        }
+        hostObject.setObject(appVersion as AnyObject, forKeyedSubscript: "appVersion" as NSString)
 
         let pluginDirectory: @convention(block) (String) -> String = { id in
             PluginStore.shared.directory(for: id).path

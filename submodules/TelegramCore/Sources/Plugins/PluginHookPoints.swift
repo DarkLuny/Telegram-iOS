@@ -1,4 +1,5 @@
 import Foundation
+import SwiftSignalKit
 import MtProtoKit
 // Same access level the rest of TelegramCore uses, and all that is needed here:
 // no `Api.*` type appears in this file's public surface, only TL values passed
@@ -69,7 +70,378 @@ public final class PluginHookPoints {
     /// than comparing a name, and app with no plugins should pay neither.
     public var wantsUpdate: ((_ name: String) -> Bool)?
 
+    // MARK: - Appearance
+    //
+    // The four hooks below are not network interception: they answer "what should
+    // this look like" while the app builds a screen. A plugin on Android reached
+    // the same effect by hooking an obfuscated cell and driving an `ObjectAnimator`
+    // or rewriting a colour table; iOS has neither surface, so the questions are
+    // asked directly and answered with values. Every one of them returns `nil`
+    // for "leave the stock appearance alone", which is what an app with no
+    // plugins does.
+
+    /// Keys the attachment menu must not offer, e.g. `["gallery", "app_shortcut"]`.
+    ///
+    /// The argument is the list the app was about to show, so the plugin answers
+    /// with the same identifiers it was given instead of translating Android button
+    /// ids. The answer is the subset to keep; a key that was not offered is
+    /// ignored by the caller, so a plugin cannot hide something it never saw.
+    public var attachMenuExclusions: ((_ accountId: Int64, _ peerId: Int64?, _ keys: [String]) -> [String])?
+
+    /// Rows of the settings tab the plugin wants hidden, e.g. `["premium", "stars"]`.
+    ///
+    /// Same shape as the attach menu: the caller passes the identifiers it was
+    /// about to show, and the answer is the subset to keep. On Android this was a
+    /// hook on the settings list adapter; here the screen asks once while it is
+    /// being built, so a hidden row is never created and the section is not left
+    /// with a gap. A key that was not offered is ignored, so a plugin cannot hide
+    /// something it never saw.
+    public var settingsRowExclusions: ((_ accountId: Int64, _ keys: [String]) -> [String])?
+
+    /// How a row should appear: descriptors for its transform, opacity and timing.
+    ///
+    /// `messageJSON` is `pluginMessageDetailsJSON` output for a message row, and
+    /// an empty object for a date separator. The plugin computes the numbers
+    /// because the style, speed and per-chat randomness all come from its settings;
+    /// the app only plays the animation.
+    public var insertionAnimation: ((_ accountId: Int64, _ messageJSON: String, _ isDate: Bool, _ width: Double, _ height: Double) -> PluginInsertionAnimation?)?
+
+    /// The colour a plugin wants every peer name painted with.
+    ///
+    /// The palette is built once per account and then reused by every name, avatar
+    /// and ring in the app, so replacing it here reaches all of them at once.
+    public var nameColors: ((_ accountId: Int64?) -> PluginNameColorsOverride?)?
+
+    /// Rows of a "message details" screen for `messageJSON`.
+    ///
+    /// Empty means the plugin has nothing to add, and no menu item appears.
+    public var messageDetails: ((_ accountId: Int64, _ messageJSON: String) -> [PluginDetailItem])?
+
+    /// The accent colour a plugin wants the whole interface painted with.
+    ///
+    /// Separate from `nameColors` because it changes a different thing: name
+    /// colours are a per-peer palette, while the accent drives buttons, links,
+    /// selections, badges and the outgoing bubble. A plugin that recolours the
+    /// interface speaks here; one that only recolours names does not.
+    public var themeOverride: ((_ accountId: Int64?) -> PluginThemeOverride?)?
+
+    /// Fires when a plugin changed something the UI has already drawn.
+    ///
+    /// A colour override is read once per account, when the palette is built; a
+    /// plugin that changes its colour later has no way to reach the palette it
+    /// already produced. This signal is how it asks for a rebuild. The palette
+    /// lives in `AccountContext`, which already depends on this module, so the
+    /// notification belongs here too rather than in a new import on the UI side.
+    private let appearanceChangedPipe = ValuePipe<Void>()
+
+    public var appearanceChanged: Signal<Void, NoError> {
+        return self.appearanceChangedPipe.signal()
+    }
+
+    /// Called by the plugin runtime after a setting that affects appearance
+    /// changed. Cheaper than rebuilding on every setting: a plugin that only
+    /// touched a toggle nobody draws is not worth a palette rebuild.
+    public func notifyAppearanceChanged() {
+        self.appearanceChangedPipe.putNext(Void())
+    }
+
     private init() {
+    }
+}
+
+/// One row of a plugin-provided details screen.
+public struct PluginDetailItem {
+    public let title: String
+    public let value: String
+
+    public init(title: String, value: String) {
+        self.title = title
+        self.value = value
+    }
+}
+
+/// A row-appearance animation, already resolved to numbers.
+///
+/// The plugin decides the style; this type carries the result so the UI layer
+/// needs no knowledge of the plugin's settings. Distances are points, angles are
+/// degrees, `duration` and `delay` are milliseconds.
+public struct PluginInsertionAnimation {
+    /// Curve to apply. `overshoot` needs `overshoot` to be non-zero, `spring`
+    /// uses the layer's own spring timing.
+    public enum Curve: String {
+        case linear
+        case decelerate
+        case accelerate
+        case accelerateDecelerate
+        case overshoot
+        case spring
+    }
+
+    public var duration: Double
+    public var delay: Double
+    public var alphaFrom: Double
+    public var scaleFromX: Double
+    public var scaleFromY: Double
+    public var scaleToX: Double
+    public var scaleToY: Double
+    public var translationX: Double
+    public var translationY: Double
+    public var rotationZ: Double
+    public var rotationX: Double
+    public var rotationY: Double
+    public var curve: Curve
+    public var overshoot: Double
+    /// Extra rotation steps for styles that wobble. When present these replace
+    /// `rotationZ` as a keyframe path that starts and ends at zero.
+    public var rotationKeyframes: [Double]?
+
+    public init(
+        duration: Double,
+        delay: Double = 0.0,
+        alphaFrom: Double = 0.0,
+        scaleFromX: Double = 1.0,
+        scaleFromY: Double = 1.0,
+        scaleToX: Double = 1.0,
+        scaleToY: Double = 1.0,
+        translationX: Double = 0.0,
+        translationY: Double = 0.0,
+        rotationZ: Double = 0.0,
+        rotationX: Double = 0.0,
+        rotationY: Double = 0.0,
+        curve: Curve = .decelerate,
+        overshoot: Double = 0.0,
+        rotationKeyframes: [Double]? = nil
+    ) {
+        self.duration = duration
+        self.delay = delay
+        self.alphaFrom = alphaFrom
+        self.scaleFromX = scaleFromX
+        self.scaleFromY = scaleFromY
+        self.scaleToX = scaleToX
+        self.scaleToY = scaleToY
+        self.translationX = translationX
+        self.translationY = translationY
+        self.rotationZ = rotationZ
+        self.rotationX = rotationX
+        self.rotationY = rotationY
+        self.curve = curve
+        self.overshoot = overshoot
+        self.rotationKeyframes = rotationKeyframes
+    }
+
+    /// Builds the animation from the JSON a plugin returned.
+    ///
+    /// Every field is optional, so a style can describe only what it changes:
+    /// a plain fade sends `{"alpha": 0, "duration": 400}` and gets the stock
+    /// scale. The curve is a string name; an unknown one falls back to
+    /// `decelerate` rather than failing the whole animation.
+    public init?(json: [String: Any]) {
+        guard let duration = (json["duration"] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        func number(_ key: String, _ fallback: Double) -> Double {
+            return (json[key] as? NSNumber)?.doubleValue ?? fallback
+        }
+        var keyframes: [Double]?
+        if let list = json["rotationKeyframes"] as? [Any] {
+            keyframes = list.compactMap { ($0 as? NSNumber)?.doubleValue }
+        }
+        self.init(
+            duration: duration,
+            delay: number("delay", 0.0),
+            alphaFrom: number("alpha", 1.0),
+            scaleFromX: number("scaleX", 1.0),
+            scaleFromY: number("scaleY", 1.0),
+            scaleToX: number("scaleToX", 1.0),
+            scaleToY: number("scaleToY", 1.0),
+            translationX: number("translationX", 0.0),
+            translationY: number("translationY", 0.0),
+            rotationZ: number("rotationZ", 0.0),
+            rotationX: number("rotationX", 0.0),
+            rotationY: number("rotationY", 0.0),
+            curve: Curve(rawValue: (json["curve"] as? String) ?? "decelerate") ?? .decelerate,
+            overshoot: number("overshoot", 0.0),
+            rotationKeyframes: keyframes
+        )
+    }
+}
+
+/// A replacement palette, in `0xRRGGBB` form.
+///
+/// `secondary` is the gradient partner: a plugin with the gradient switch off
+/// leaves it `nil`, and the app then paints a single flat colour.
+public struct PluginNameColorsOverride {
+    public var main: UInt32
+    public var secondary: UInt32?
+    public var applyToNames: Bool
+    public var applyToAvatars: Bool
+    public var applyToStories: Bool
+    public var applyToDialogs: Bool
+    public var applyToProfiles: Bool
+
+    public init(
+        main: UInt32,
+        secondary: UInt32? = nil,
+        applyToNames: Bool = true,
+        applyToAvatars: Bool = true,
+        applyToStories: Bool = true,
+        applyToDialogs: Bool = true,
+        applyToProfiles: Bool = true
+    ) {
+        self.main = main
+        self.secondary = secondary
+        self.applyToNames = applyToNames
+        self.applyToAvatars = applyToAvatars
+        self.applyToStories = applyToStories
+        self.applyToDialogs = applyToDialogs
+        self.applyToProfiles = applyToProfiles
+    }
+
+    /// The palette with every entry replaced, keeping its keys and order.
+    ///
+    /// A gradient pair is what `PeerNameColors.Colors` can express; a plugin that
+    /// turned the gradient off gets one colour and `nil` for the other two.
+    public func replacing(_ source: [Int32: [UInt32]]) -> [Int32: [UInt32]] {
+        var result: [Int32: [UInt32]] = [:]
+        for (key, _) in source {
+            if let secondary = self.secondary {
+                result[key] = [self.main, secondary, self.main]
+            } else {
+                result[key] = [self.main]
+            }
+        }
+        return result
+    }
+
+    /// Builds the override from the JSON a plugin returned.
+    ///
+    /// `main` is required and in `0xRRGGBB`; the alpha byte is dropped because a
+    /// name colour is always opaque. A missing `secondary` means "no gradient",
+    /// which is exactly what the plugin's own gradient switch turns off.
+    public init?(json: [String: Any]) {
+        guard let mainNumber = json["main"] as? NSNumber else {
+            return nil
+        }
+        func flag(_ key: String) -> Bool {
+            // An absent switch means "on": the plugin only sends the flags it
+            // found in its settings, and leaving one out must not disable it.
+            return (json[key] as? NSNumber)?.boolValue ?? true
+        }
+        var secondary: UInt32?
+        if let secondaryNumber = json["secondary"] as? NSNumber {
+            secondary = UInt32(truncatingIfNeeded: secondaryNumber.int64Value) & 0xFFFFFF
+        }
+        self.init(
+            main: UInt32(truncatingIfNeeded: mainNumber.int64Value) & 0xFFFFFF,
+            secondary: secondary,
+            applyToNames: flag("names"),
+            applyToAvatars: flag("avatars"),
+            applyToStories: flag("stories"),
+            applyToDialogs: flag("dialogs"),
+            applyToProfiles: flag("profiles")
+        )
+    }
+}
+
+/// A replacement accent and background, in `0xRRGGBB` form.
+///
+/// This is the whole-interface counterpart of `PluginNameColorsOverride`: the
+/// five switches a plugin exposes ("avatars", "names", ...) decide which pieces
+/// of the palette it repaints, and this decides the colour they are repainted
+/// with and how the theme itself is tinted.
+///
+/// `outgoingBubble` is optional on purpose. With it set, sent messages are
+/// painted in the plugin's colour; without it the account keeps the bubble
+/// colours its theme already had, which is what a user who only asked for a
+/// coloured interface expects to keep.
+public struct PluginThemeOverride {
+    public var main: UInt32
+    public var secondary: UInt32?
+    public var outgoingBubble: UInt32?
+    public var applyToNames: Bool
+    public var applyToAvatars: Bool
+    public var applyToStories: Bool
+    public var applyToDialogs: Bool
+    public var applyToProfiles: Bool
+
+    public init(
+        main: UInt32,
+        secondary: UInt32? = nil,
+        outgoingBubble: UInt32? = nil,
+        applyToNames: Bool = true,
+        applyToAvatars: Bool = true,
+        applyToStories: Bool = true,
+        applyToDialogs: Bool = true,
+        applyToProfiles: Bool = true
+    ) {
+        self.main = main
+        self.secondary = secondary
+        self.outgoingBubble = outgoingBubble
+        self.applyToNames = applyToNames
+        self.applyToAvatars = applyToAvatars
+        self.applyToStories = applyToStories
+        self.applyToDialogs = applyToDialogs
+        self.applyToProfiles = applyToProfiles
+    }
+
+    /// The accent's two bubble endpoints, or `nil` to keep the theme's own.
+    ///
+    /// Two entries is what a theme's bubble gradient uses: the first is the
+    /// lighter end Telegram derives its own tints from, so both ends are the
+    /// plugin's colour and only the derived tints differ. The conversion to
+    /// `UIColor` happens where the colours are used, so this module stays free
+    /// of a UI dependency for a value type.
+    public var bubbleColors: [UInt32]? {
+        guard let outgoingBubble = self.outgoingBubble else {
+            return nil
+        }
+        return [outgoingBubble, outgoingBubble]
+    }
+
+    /// Builds the override from the JSON a plugin returned.
+    ///
+    /// `main` is required and in `0xRRGGBB`. A missing `secondary` means "no
+    /// gradient", matching `PluginNameColorsOverride`; a missing `outgoing`
+    /// means "keep the bubble colours the theme already uses".
+    public init?(json: [String: Any]) {
+        guard let mainNumber = json["main"] as? NSNumber else {
+            return nil
+        }
+        func flag(_ key: String) -> Bool {
+            return (json[key] as? NSNumber)?.boolValue ?? true
+        }
+        var secondary: UInt32?
+        if let number = json["secondary"] as? NSNumber {
+            secondary = UInt32(truncatingIfNeeded: number.int64Value) & 0xFFFFFF
+        }
+        var outgoing: UInt32?
+        if let number = json["outgoing"] as? NSNumber {
+            outgoing = UInt32(truncatingIfNeeded: number.int64Value) & 0xFFFFFF
+        }
+        self.init(
+            main: UInt32(truncatingIfNeeded: mainNumber.int64Value) & 0xFFFFFF,
+            secondary: secondary,
+            outgoingBubble: outgoing,
+            applyToNames: flag("names"),
+            applyToAvatars: flag("avatars"),
+            applyToStories: flag("stories"),
+            applyToDialogs: flag("dialogs"),
+            applyToProfiles: flag("profiles")
+        )
+    }
+
+    /// The same flags as a name-colour override, so one plugin answer can drive
+    /// both hooks without repeating itself.
+    public var nameColors: PluginNameColorsOverride {
+        return PluginNameColorsOverride(
+            main: self.main,
+            secondary: self.secondary,
+            applyToNames: self.applyToNames,
+            applyToAvatars: self.applyToAvatars,
+            applyToStories: self.applyToStories,
+            applyToDialogs: self.applyToDialogs,
+            applyToProfiles: self.applyToProfiles
+        )
     }
 }
 

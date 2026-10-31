@@ -438,6 +438,34 @@ public extension CALayer {
         self.animate(from: NSValue(cgPoint: from), to: NSValue(cgPoint: to), keyPath: "anchorPoint", timingFunction: timingFunction, duration: duration, delay: delay, mediaTimingFunction: mediaTimingFunction, removeOnCompletion: removeOnCompletion, additive: additive, completion: completion)
     }
     
+    /// Animates a layer's whole `transform` from one matrix to another.
+    ///
+    /// The message-appearance animations rotate around all three axes and scale
+    /// at the same time, and doing that with separate `transform.rotation.*` and
+    /// `transform.scale` animations is not the same thing: Core Animation applies
+    /// those keys in an order that makes the result depend on which one started
+    /// first. One matrix animation has a single, predictable result.
+    ///
+    /// `perspective` is the `m34` term: without it a rotation about X or Y is a
+    /// flat squash instead of the 3D flip the Android animation performed.
+    func animateTransform(from: CATransform3D, to: CATransform3D, duration: Double, delay: Double = 0.0, timingFunction: String = CAMediaTimingFunctionName.easeInEaseOut.rawValue, removeOnCompletion: Bool = true, completion: ((Bool) -> Void)? = nil) {
+        // Built through `makeAnimation` so a spring-shaped `timingFunction` is
+        // honoured: `CAMediaTimingFunction(name:)` only understands the five
+        // system curve names, and the plugin animation asks for a custom spring
+        // when its style overshoots.
+        let animation = self.makeAnimation(
+            from: NSValue(caTransform3D: from),
+            to: NSValue(caTransform3D: to),
+            keyPath: "transform",
+            timingFunction: timingFunction,
+            duration: duration,
+            delay: delay,
+            removeOnCompletion: removeOnCompletion,
+            completion: completion
+        )
+        self.add(animation, forKey: "transform")
+    }
+
     func animateBounds(from: CGRect, to: CGRect, duration: Double, delay: Double = 0.0, timingFunction: String, mediaTimingFunction: CAMediaTimingFunction? = nil, removeOnCompletion: Bool = true, additive: Bool = false, force: Bool = false, completion: ((Bool) -> Void)? = nil) {
         if from == to && !force {
             if let completion = completion {

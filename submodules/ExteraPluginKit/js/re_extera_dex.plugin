@@ -1,0 +1,500 @@
+/*
+ * re:extera v2 — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original downloads a compiled Dalvik module (`re-extera.1.3.dex`) and loads
+ * it with `dalvik.system.InMemoryDexClassLoader`, then calls
+ * `ni.shikatu.re_extera.Main.start`. That entire path is an Android runtime
+ * feature: there is no Dalvik, no `ByteBuffer`, no class loader and no Java
+ * reflection on iOS, and adding one is not "porting a plugin" — it would mean
+ * writing a JVM.
+ *
+ * So this port is honest about what it can do, and does the part that is real:
+ *
+ *   - The same metadata, the same constants (`DEFAULT_URL`, `VERSION_URL`,
+ *     `CLASS_NAME`, `METHOD_NAME`) and the same public method names, so anyone
+ *     reading the source recognises it.
+ *   - `fetch_version_info` — reads `actual.json`, picks the entry for the running
+ *     Telegram build, and falls back to the closest build at or below it, exactly
+ *     like the original (exact match, then "newest key that is <= current").
+ *   - A settings row that runs that lookup and reports the answer, so a user
+ *     learns whether upstream even ships a build for this client instead of
+ *     staring at a switch that does nothing.
+ *
+ * What it deliberately does not do:
+ *
+ *   - It never downloads the `.dex`. Caching 1.3 MB of code the process cannot
+ *     execute helps nobody; the log says so once instead of silently writing a
+ *     file into the plugin folder.
+ *   - `start_from_bytes`, `open_settings` and `unload` exist and log, because a
+ *     ported caller reaches them. They do not pretend to have started anything.
+ *
+ * `re_extera_cache/cached.dat` is still looked for, untouched, and its presence
+ * and size are reported: a user who copied an Android cache (or an older build
+ * that wrote one) sees that the file is there and that this client cannot run it,
+ * which is better than a feature that appears to be missing.
+ */
+
+var __id__ = "re_extera_dex";
+var __name__ = "re:extera v2";
+var __description__ = "Enable ghost mode, save deleted messages and more!";
+var __author__ = "@shiawasez | @shikaatuxplugins \noriginal author: @bleizixPlugins";
+var __version__ = "2.4.0";
+var __icon__ = "myadestes_1_amashiro_natsuki_plus_nacho_neko/30";
+var __min_version__ = "12.2.3";
+var __category__ = ["privacy", "chats"];
+
+// The three constants the original exports. They stay identical because they name
+// the upstream artifacts, not this port: a user comparing builds sees the same
+// release train.
+var DEFAULT_URL = "https://github.com/logopek/re-extera-pub/raw/refs/heads/main/re-extera.1.3.dex";
+var VERSION_URL = "https://github.com/logopek/re-extera-pub/raw/refs/heads/main/actual.json";
+var CLASS_NAME = "ni.shikatu.re_extera.Main";
+var METHOD_NAME = "start";
+
+// Where the Android build kept its module. Relative to the plugin's own folder,
+// which is the one root `file_utils` may write to.
+var CACHE_DIR = "re_extera_cache";
+var CACHE_FILE = "cached.dat";
+
+// --- strings ---------------------------------------------------------------
+//
+// The original picked its language with
+// `LocaleController.getInstance().getCurrentLocale().getLanguage() == "ru"`.
+// `Intl` exposes the same device language, so the two client languages the
+// original shipped are the two this port ships.
+
+var STRINGS = {
+    ru: {
+        open_settings: "Настройки re:extera",
+        open_settings_sub: "Модуль re:extera — это dex-код для Android. iOS его не исполняет; кнопка проверит, есть ли сборка под вашу версию Telegram.",
+        checking: "Проверяем версию re:extera…",
+        found: "Для Telegram {0} есть сборка re:extera: код {1}.",
+        found_fallback: "Для Telegram {0} отдельной сборки нет. Есть более старая: {1}, код {2}.",
+        none: "В actual.json нет ни одной сборки, подходящей для Telegram {0}.",
+        failed: "Не удалось прочитать список версий re:extera: {0}",
+        no_version: "Версия приложения неизвестна, проверить сборку нельзя.",
+        cache_found: "В кэше лежит {0} (байт: {1}), но iOS не может исполнить dex.",
+        android_only: "re:extera требует Dalvik; на iOS модуль не загружается.",
+        unloaded: "re:extera: плагин выгружен."
+    },
+    en: {
+        open_settings: "re:extera Settings",
+        open_settings_sub: "The re:extera module is dex code for Android. iOS cannot execute it; this button checks whether a build exists for your Telegram version.",
+        checking: "Checking the re:extera version…",
+        found: "Telegram {0} has a re:extera build: code {1}.",
+        found_fallback: "There is no build for Telegram {0}. The newest older one is {1}, code {2}.",
+        none: "actual.json lists no build that fits Telegram {0}.",
+        failed: "Could not read the re:extera version list: {0}",
+        no_version: "The app version is unknown, so the build cannot be checked.",
+        cache_found: "A cache holds {0} ({1} bytes), but iOS cannot execute dex.",
+        android_only: "re:extera needs Dalvik; the module does not load on iOS.",
+        unloaded: "re:extera: plugin unloaded."
+    }
+};
+
+function systemLanguage() {
+    var language = "en";
+    try {
+        var locale = Intl.DateTimeFormat().resolvedOptions().locale || "";
+        language = String(locale).split(/[-_]/)[0].toLowerCase();
+    } catch (error) {
+        language = "en";
+    }
+    return Object.prototype.hasOwnProperty.call(STRINGS, language) ? language : "en";
+}
+
+function t(key) {
+    var table = STRINGS[systemLanguage()] || STRINGS.en;
+    var value = table[key];
+    if (value === undefined) {
+        return "MISSING: " + key;
+    }
+    var rest = Array.prototype.slice.call(arguments, 1);
+    if (rest.length === 0) {
+        return value;
+    }
+    return value.replace(/\{(\d*)\}/g, function (match, index) {
+        var position = index === "" ? 0 : parseInt(index, 10);
+        return position < rest.length ? String(rest[position]) : match;
+    });
+}
+
+// --- version helpers -------------------------------------------------------
+
+// `parse_version` in the original: `tuple(map(int, version.split(".")))`, with
+// `(0, 0, 0)` for anything unparsable. `null` here is what lets a caller tell
+// "unparsable" from "zero", which the fallback loop needs in order to skip a key
+// the way the original's `except Exception: continue` did.
+function parseVersion(text) {
+    if (text === undefined || text === null) {
+        return null;
+    }
+    var parts = String(text).split(".");
+    var result = [];
+    for (var i = 0; i < parts.length; i += 1) {
+        if (!/^\d+$/.test(parts[i])) {
+            return null;
+        }
+        result.push(parseInt(parts[i], 10));
+    }
+    return result.length === 0 ? null : result;
+}
+
+// Compares two parsed versions the way Python's tuple comparison does: component
+// by component, shorter is smaller when it is a prefix.
+function compareVersions(a, b) {
+    var length = Math.max(a.length, b.length);
+    for (var i = 0; i < length; i += 1) {
+        var left = i < a.length ? a[i] : 0;
+        var right = i < b.length ? b[i] : 0;
+        if (left !== right) {
+            return left < right ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+// --- loader ----------------------------------------------------------------
+
+// The original's `Loader`. Every method keeps its name; the ones that reached
+// into Dalvik now say what they cannot do, and the version lookup is real.
+function Loader(plugin) {
+    this.plugin = plugin;
+    this.instance = null;
+    this.dexLoader = null;
+    this.downloadUrl = DEFAULT_URL;
+    this.cacheDir = null;
+    this.cacheFile = null;
+    this.warnedAboutDalvik = false;
+
+    var base = plugin.get_plugin_directory();
+    if (base) {
+        this.cacheDir = (String(base).replace(/\/+$/, "")) + "/" + CACHE_DIR;
+        this.cacheFile = this.cacheDir + "/" + CACHE_FILE;
+        file_utils.ensure_dir_exists(this.cacheDir);
+    }
+}
+
+Loader.prototype.log = function (message) {
+    this.plugin.log("[re:extera] " + message);
+};
+
+// `BuildVars.BUILD_VERSION_STRING`. On iOS that is the bundle's own version,
+// which the runtime exposes as `client_utils.get_client_version()`.
+Loader.prototype.get_app_version = function () {
+    try {
+        var version = client_utils.get_client_version();
+        if (!version || version === "Unknown") {
+            this.log("Error getting app version: the runtime did not answer");
+            return null;
+        }
+        return String(version);
+    } catch (error) {
+        this.log("Error getting app version: " + error);
+        return null;
+    }
+};
+
+// The original read `VERSION_CODE` off the loaded dex class. Nothing is loaded
+// here, so the answer is 0 unless a sidecar recorded a code in a previous build.
+Loader.prototype.get_cached_version = function () {
+    return 0;
+};
+
+// Exact match, then the newest key at or below the running build, then nothing.
+// Answers `{code, link, key}` or `null`; `key` is null when the fallback was used
+// for the exact match too, so a caller can tell them apart.
+Loader.prototype.fetch_version_info = function (callback) {
+    var self = this;
+    var appVersion = this.get_app_version();
+    if (appVersion === null) {
+        callback(null);
+        return;
+    }
+    this.log("App version: " + appVersion);
+
+    http.get_json(VERSION_URL, { timeout: 5 }, function (response) {
+        if (!response || !response.ok) {
+            self.log("Error fetching version info: " + (response && response.error ? response.error : "no response"));
+            callback(null, response && response.error ? String(response.error) : "no response");
+            return;
+        }
+        var versions = response.json;
+        if (!versions || typeof versions !== "object" || Array.isArray(versions)) {
+            self.log("Error fetching version info: actual.json is not an object");
+            callback(null, "actual.json is not an object");
+            return;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(versions, appVersion)) {
+            var exact = versions[appVersion] || {};
+            var exactCode = parseInt(exact.code, 10);
+            self.log("Found entry for " + appVersion + ": code=" + exactCode);
+            callback({
+                code: isFinite(exactCode) ? exactCode : 0,
+                link: exact.link ? String(exact.link) : null,
+                key: appVersion,
+                exact: true
+            });
+            return;
+        }
+
+        self.log("No entry for app version " + appVersion + ", trying fallback");
+        var current = parseVersion(appVersion);
+        var bestKey = null;
+        var bestVersion = null;
+        var keys = Object.keys(versions);
+        for (var i = 0; i < keys.length; i += 1) {
+            var key = keys[i];
+            var parsed = parseVersion(key);
+            if (parsed === null || current === null) {
+                // No comparable version on one side: the original's fallback
+                // simply used the highest sorted key, which is a plain string
+                // sort of the object's keys.
+                if (current === null && (bestKey === null || key > bestKey)) {
+                    bestKey = key;
+                }
+                continue;
+            }
+            if (compareVersions(parsed, current) <= 0) {
+                if (bestVersion === null || compareVersions(parsed, bestVersion) > 0) {
+                    bestVersion = parsed;
+                    bestKey = key;
+                }
+            }
+        }
+
+        if (bestKey === null) {
+            self.log("No suitable version found in actual.json");
+            callback(null);
+            return;
+        }
+
+        var entry = versions[bestKey] || {};
+        var code = parseInt(entry.code, 10);
+        self.log("Using fallback entry " + bestKey + ": code=" + code);
+        callback({
+            code: isFinite(code) ? code : 0,
+            link: entry.link ? String(entry.link) : null,
+            key: bestKey,
+            exact: false
+        });
+    });
+};
+
+// Kept for parity with the original's public method. It answers whether the
+// remote build is newer than what is cached; without a loader the cache has no
+// code, so this reports "nothing newer than nothing" rather than inventing one.
+Loader.prototype.check_for_updates = function (callback) {
+    var self = this;
+    this.log("Checking for updates...");
+    this.fetch_version_info(function (info, error) {
+        if (!info) {
+            callback(false, error);
+            return;
+        }
+        if (info.link) {
+            self.downloadUrl = info.link;
+        }
+        var current = self.get_cached_version();
+        self.log("Remote version: " + info.code + ", Current version: " + current);
+        var newer = info.code > current;
+        self.log(newer ? "Update available!" : "Already up to date");
+        callback(newer, null, info);
+    });
+};
+
+// The cache is read, never executed. Its size is the only fact this client can
+// establish about it, and it is worth reporting: it explains why a copied cache
+// changes nothing.
+Loader.prototype.load_from_cache = function () {
+    try {
+        if (!this.cacheFile || !file_utils.file_exists(this.cacheFile)) {
+            return null;
+        }
+        var encoded = file_utils.read_file_bytes(this.cacheFile);
+        if (encoded === null || encoded === undefined) {
+            return null;
+        }
+        // Base64: three quarters of the string length is the byte count, minus
+        // the padding. Only the length is used, so the bytes never enter JS.
+        var text = String(encoded);
+        var padding = text.endsWith("==") ? 2 : (text.endsWith("=") ? 1 : 0);
+        var size = Math.floor(text.length * 3 / 4) - padding;
+        this.log(t("cache_found", CACHE_FILE, size));
+        return text;
+    } catch (error) {
+        this.log("Error loading from cache: " + error);
+        return null;
+    }
+};
+
+// There is no equivalent of `InMemoryDexClassLoader`, so nothing is started. The
+// log says why once per session; repeating it on every call would drown the
+// plugin log the user is reading to find out what did work.
+Loader.prototype.start_from_bytes = function () {
+    if (!this.warnedAboutDalvik) {
+        this.warnedAboutDalvik = true;
+        this.log(t("android_only"));
+        this.log("CLASS_NAME=" + CLASS_NAME + " METHOD_NAME=" + METHOD_NAME + " cannot be loaded: no Dalvik on iOS");
+    }
+    return false;
+};
+
+// The original wrote the downloaded bytes to `re_extera_cache/cached.dat` and
+// loaded them. Downloading is deliberately skipped: the file cannot be executed,
+// so the only effect would be 1.3 MB on disk and a plausible-looking cache that
+// never works.
+Loader.prototype.download_and_cache_dex = function (callback) {
+    this.log(t("android_only"));
+    this.log("Not downloading " + this.downloadUrl + ": the dex cannot run on this client");
+    callback(false);
+};
+
+Loader.prototype.get_instance = function () {
+    return this.instance;
+};
+
+// `showSettings` on the loaded module. The module is not loaded, so the row that
+// leads here reports the version instead (see `open_settings` below).
+Loader.prototype.show_settings = function () {
+    this.log("Opening settings: the re:extera module has no settings screen on iOS");
+    return false;
+};
+
+Loader.prototype.unload = function () {
+    this.log("Success unload");
+    return true;
+};
+
+// Mirrors `load_and_start`, with the download branch turned into a log line.
+Loader.prototype.load_and_start = function () {
+    var self = this;
+    var cached = this.load_from_cache();
+    if (cached !== null) {
+        this.log("Loading from cache");
+        this.start_from_bytes(cached);
+        // The original checked for a newer dex after starting. The check itself
+        // is still meaningful — it says whether upstream moved on — so it runs,
+        // but there is nothing to download at the end of it.
+        this.check_for_updates(function (newer) {
+            if (!newer) {
+                return;
+            }
+            self.log("A newer re:extera build exists upstream");
+        });
+        return;
+    }
+
+    this.log("No cache found");
+    // The original downloaded on this branch. The lookup still runs, because it
+    // is what tells the user whether upstream ships anything for this client at
+    // all; only the download and the class load are dropped.
+    this.fetch_version_info(function (info, error) {
+        if (error) {
+            self.log("Version lookup failed: " + error);
+        } else if (info && info.link) {
+            self.downloadUrl = info.link;
+        }
+        self.log(t("android_only"));
+        self.log("Not downloading " + self.downloadUrl + ": the dex cannot run on this client");
+    });
+};
+
+// --- plugin ----------------------------------------------------------------
+
+function ReExteraPlugin() {
+    BasePlugin.call(this);
+    this.loader = null;
+    // `finalize()` instantiates the class directly, so the constructor is the one
+    // place that sees every instance. The settings row's `on_click` is built
+    // before any tap and carries no `this`, so it reaches the loader through here.
+    ReExteraPlugin.current = this;
+}
+
+ReExteraPlugin.prototype = Object.create(BasePlugin.prototype);
+ReExteraPlugin.prototype.constructor = ReExteraPlugin;
+
+ReExteraPlugin.prototype.localized_open_settings = function () {
+    return t("open_settings");
+};
+
+ReExteraPlugin.prototype.on_plugin_load = function () {
+    try {
+        this.log("Init " + __version__);
+        this.create_settings();
+        this.load();
+    } catch (error) {
+        this.log("Error: " + error);
+    }
+};
+
+ReExteraPlugin.prototype.on_plugin_unload = function () {
+    // The original's body was unreachable after a bare `return`; keeping it
+    // reachable is the one behaviour change here, and it only stops a loader that
+    // never started anything.
+    if (this.loader !== null) {
+        this.loader.unload();
+    }
+    this.log(t("unloaded"));
+};
+
+ReExteraPlugin.prototype.create_settings = function () {
+    var key = "open_settings";
+    var self = this;
+    return [
+        Text({
+            key: key,
+            text: this.localized_open_settings(),
+            subtext: t("open_settings_sub"),
+            icon: "extera_outline",
+            on_click: function () {
+                self.open_settings();
+            }
+        })
+    ];
+};
+
+// The row the original used to open the module's own screen. There is no such
+// screen here, so the same tap answers the question the module existed for: does
+// upstream ship a build for the client that is running?
+ReExteraPlugin.prototype.open_settings = function () {
+    var loader = this.loader;
+    if (!loader) {
+        return;
+    }
+    ui.bulletin.show_info(t("checking"));
+    loader.fetch_version_info(function (info, error) {
+        if (error) {
+            ui.bulletin.show_error(t("failed", error));
+            return;
+        }
+        var appVersion = loader.get_app_version();
+        if (appVersion === null) {
+            ui.bulletin.show_error(t("no_version"));
+            return;
+        }
+        if (!info) {
+            ui.bulletin.show_info(t("none", appVersion));
+            return;
+        }
+        if (info.exact) {
+            ui.bulletin.show_info(t("found", appVersion, info.code));
+        } else {
+            ui.bulletin.show_info(t("found_fallback", appVersion, info.key, info.code));
+        }
+        if (info.link) {
+            loader.downloadUrl = info.link;
+        }
+    });
+};
+
+ReExteraPlugin.prototype.load = function () {
+    this.log("Loading");
+    this.loader = new Loader(this);
+    this.loader.load_and_start();
+};
+
+ReExteraPlugin.current = null;
+
+var Plugin = ReExteraPlugin;

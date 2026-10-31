@@ -1,0 +1,694 @@
+/*
+ * Extended Message Details — JavaScript port of the exteraGram plugin of the
+ * same name.
+ *
+ * The original hooks `ChatMessageCell.fillMessageText`-adjacent internals, reads
+ * `msg_obj.messageOwner` and the TL document attributes through Java reflection,
+ * then builds a custom `AlertDialog` with three hand-laid-out sections plus a
+ * "datacenter" footer. On iOS the menu is an `ActionSheetController` and a row is
+ * an `ActionSheetTextItem`, so this port answers the one question that matters —
+ * "which title/value rows describe this message" — and the host draws them.
+ *
+ * The section order is the original's, which is not the order the Android TL
+ * object prints in:
+ *
+ *   views, shares
+ *   id, sticker set id, date, delete date, read date, forwarded date, edit date
+ *   file size
+ *   …then whatever the media kind adds…
+ *   datacenter
+ *
+ * What is preserved:
+ *
+ *   - Every localisation string, in both languages the original shipped, so the
+ *     rows read the same in an English and in a Russian client.
+ *   - Which rows appear for which media kind, and the conditions under which a
+ *     row is omitted rather than shown empty: no views when there are none, no
+ *     edit date when the edit is hidden, no forwarded date when it equals the
+ *     message's own date.
+ *   - `format_time_exteragram`'s shape, including the "When Online" special case
+ *     for 2147483646 — the timestamp Telegram uses for a scheduled message.
+ *   - `format_short_duration`, with the same `mm:ss` / `hh:mm:ss` split.
+ *   - The audio/video/sticker/poll/service rows, including the bitrate
+ *     arithmetic (bits over duration, in Kbps) and the lossless check by MIME.
+ *
+ * What changed, and why:
+ *
+ *   - `mutagen` and `MediaFormatExtractor` read the downloaded file to learn a
+ *     track's bit depth, codec and FPS. iOS has no such extraction available at
+ *     details-screen time, so those three rows come from what the message itself
+ *     carries instead: they are shown when the TL media has them and omitted
+ *     otherwise. Everything derived from a size and a duration is still computed
+ *     the same way, because that needs no file.
+ *   - The "File Path" row that opened the downloaded file is gone: an
+ *     `ActionSheetTextItem` is a label, not a button, and the app already has a
+ *     way to open a message's media. The size, MIME type and datacenter rows
+ *     cover the same ground.
+ *   - `AyuGram`'s deleted-message and read-receipt tables do not exist here. The
+ *     rows are still produced from what a message does carry: `autoremove_expires`
+ *     stands in for the delete date, and the read date simply does not appear.
+ *   - Long-press-to-copy-JSON was a global gesture on the Android dialog. Here the
+ *     details screen has a "Copy" button for the whole list, which is the same
+ *     affordance without hijacking a long press.
+ */
+
+var __id__ = "extended_message_details";
+var __name__ = "Extended Message Details";
+var __description__ = "Расширяет меню сведений о сообщении техническими данными: просмотры, репосты, ID, стикерсет, даты, размер, MIME-тип, разрешение и датацентр. Скопировать всё списком можно кнопкой.";
+var __author__ = "@thrzxd • @kotilnya";
+var __version__ = "1.0.1";
+var __min_version__ = "12.5.1";
+var __category__ = ["chats", "tools"];
+
+// The original's table, unchanged. Kept as data rather than inlined so the two
+// languages stay side by side and a missing key is obvious.
+var LOCALIZATION = {
+    en: {
+        id: "ID",
+        date: "Date",
+        fwd_date: "Forwarded Date",
+        delete_date: "Delete Date",
+        read_date: "Read Date",
+        edited_date: "Edited Date",
+        file_size: "File Size",
+        views: "Views",
+        shares: "Shares",
+        audio_type: "Audio Type",
+        voice_note: "Voice Note",
+        music_track: "Music Track",
+        mime_type: "Mime Type",
+        file_path: "File Path",
+        open: "Open",
+        track_title: "Title",
+        artists: "Artists",
+        duration: "Duration",
+        bitrate: "Bitrate",
+        sample_rate: "Sample Rate",
+        bit_depth: "Bit Depth",
+        channels: "Channels",
+        waveform_len: "Waveform Length",
+        mono: "Mono",
+        stereo: "Stereo",
+        video_type: "Video Type",
+        video_standard: "Video",
+        video_round: "Video Note",
+        video_gif: "Animated GIF",
+        platform: "Platform",
+        resolution: "Resolution",
+        audio_bitrate: "Audio Bitrate",
+        fps: "FPS",
+        video_codec: "Video Codec",
+        supports_streaming: "Streaming Support",
+        sticker_static: "Static Sticker",
+        sticker_animated: "Animated Sticker",
+        sticker_video: "Video Sticker",
+        custom_emoji: "Custom Emoji",
+        file_name: "File Name",
+        stickerpack_owner: "Owner",
+        stickerset_id: "Sticker Set ID",
+        sticker_pack: "Sticker Pack",
+        associated_emoji: "Associated Emoji",
+        adapt_text_color: "Adaptive Text Color",
+        poll_question: "Poll Question",
+        poll_description: "Poll Description",
+        voter_names: "Show Who Voted",
+        multiple_choice: "Allow Multiple Answers",
+        add_options: "Allow Adding Options",
+        allow_revoting: "Allow Revoting",
+        shuffle_options: "Shuffle Options",
+        quiz_mode: "Quiz Mode",
+        duration_limit: "Limit Duration",
+        auto_close_date: "Auto-Close Date",
+        hide_results: "Hide Results",
+        poll_status: "Poll Status",
+        poll_open: "Open",
+        poll_closed: "Closed",
+        total_voters: "Total Voters",
+        service_action: "Service Action",
+        new_chat_title: "New Chat Title",
+        target_users: "Target Users",
+        compression_mode: "Compression Mode",
+        stream_size: "Stream Size",
+        datacenter: "Datacenter",
+        yes: "Yes",
+        no: "No"
+    },
+    ru: {
+        id: "ID",
+        date: "Дата",
+        fwd_date: "Дата пересылки",
+        delete_date: "Дата удаления",
+        read_date: "Дата прочтения",
+        edited_date: "Дата изменения",
+        file_size: "Размер файла",
+        views: "Просмотры",
+        shares: "Репосты",
+        audio_type: "Тип аудио",
+        voice_note: "Голосовое сообщение",
+        music_track: "Музыкальный трек",
+        mime_type: "MIME-тип",
+        file_path: "Путь к файлу",
+        open: "Открыть",
+        track_title: "Название",
+        artists: "Исполнители",
+        duration: "Длительность",
+        bitrate: "Битрейт",
+        sample_rate: "Частота дискретизации",
+        bit_depth: "Глубина звука",
+        channels: "Каналы",
+        waveform_len: "Длина огибающей",
+        mono: "Моно",
+        stereo: "Стерео",
+        video_type: "Тип видео",
+        video_standard: "Видеозапись",
+        video_round: "Видеосообщение",
+        video_gif: "GIF-анимация",
+        platform: "Платформа",
+        resolution: "Разрешение",
+        audio_bitrate: "Битрейт аудио",
+        fps: "FPS",
+        video_codec: "Видеокодек",
+        supports_streaming: "Поддержка стриминга",
+        sticker_static: "Обычный стикер",
+        sticker_animated: "Анимированный стикер",
+        sticker_video: "Видеостикер",
+        custom_emoji: "Кастомный эмодзи",
+        file_name: "Имя файла",
+        stickerpack_owner: "Владелец",
+        stickerset_id: "ID стикерсета",
+        sticker_pack: "Стикерпак",
+        associated_emoji: "Связанный эмодзи",
+        adapt_text_color: "Адаптивный цвет текста",
+        poll_question: "Вопрос опроса",
+        poll_description: "Описание опроса",
+        voter_names: "Показывать, кто голосовал",
+        multiple_choice: "Несколько ответов",
+        add_options: "Добавление вариантов",
+        allow_revoting: "Переголосование",
+        shuffle_options: "Перемешивать варианты",
+        quiz_mode: "Режим викторины",
+        duration_limit: "Ограничение по времени",
+        auto_close_date: "Дата автозакрытия",
+        hide_results: "Скрывать результаты",
+        poll_status: "Статус опроса",
+        poll_open: "Открыт",
+        poll_closed: "Закрыт",
+        total_voters: "Всего голосов",
+        service_action: "Служебное действие",
+        new_chat_title: "Новое название чата",
+        target_users: "Пользователи",
+        compression_mode: "Режим сжатия",
+        stream_size: "Размер потока",
+        datacenter: "Датацентр",
+        yes: "Да",
+        no: "Нет"
+    }
+};
+
+// Timestamps Telegram reserves for "send when online".
+var SEND_WHEN_ONLINE = 2147483646;
+
+function currentLanguage() {
+    // The original asked `LocaleController` for the active language. iOS exposes
+    // the same fact through the process locale, and the plugin only needs the
+    // two languages it ships, so anything else falls back to English.
+    var code = "";
+    try {
+        code = String((new Intl.DateTimeFormat()).resolvedOptions().locale || "");
+    } catch (error) {
+        code = "";
+    }
+    return code.toLowerCase().indexOf("ru") === 0 ? "ru" : "en";
+}
+
+function loc(key, fallback) {
+    var language = currentLanguage();
+    var table = LOCALIZATION[language] || LOCALIZATION.en;
+    var value = table[key];
+    if (value === undefined || value === null) {
+        value = LOCALIZATION.en[key];
+    }
+    if (value === undefined || value === null) {
+        value = fallback || key;
+    }
+    return value;
+}
+
+function pad2(value) {
+    var text = String(value);
+    return text.length < 2 ? "0" + text : text;
+}
+
+// `dd.mm.yyyy hh:mm:ss`, which is what `formatDateAtTime` produced with the
+// day-with-seconds formatter. The original fell back to exactly this format when
+// the locale machinery threw, so it is a faithful default rather than a guess.
+function formatTime(ts) {
+    var value = Number(ts);
+    if (!isFinite(value) || value <= 0) {
+        return null;
+    }
+    if (value === SEND_WHEN_ONLINE) {
+        return loc("when_online", "When Online");
+    }
+    var date = new Date(value * 1000);
+    if (isNaN(date.getTime())) {
+        return null;
+    }
+    return pad2(date.getDate()) + "." + pad2(date.getMonth() + 1) + "." +
+        date.getFullYear() + " " + pad2(date.getHours()) + ":" +
+        pad2(date.getMinutes()) + ":" + pad2(date.getSeconds());
+}
+
+function formatShortDuration(seconds) {
+    var value = Math.floor(Number(seconds));
+    if (!isFinite(value) || value <= 0) {
+        return null;
+    }
+    var h = Math.floor(value / 3600);
+    var m = Math.floor((value % 3600) / 60);
+    var s = value % 60;
+    if (h > 0) {
+        return pad2(h) + ":" + pad2(m) + ":" + pad2(s);
+    }
+    return pad2(m) + ":" + pad2(s);
+}
+
+// The same binary stepping Android's `formatFileSize` used, which is what the
+// original displayed: below 1024 bytes it is an exact byte count, above it one
+// decimal until ten, then whole units. "1.0 KB" for 1024 bytes, not "1 KB".
+function formatFileSize(bytes) {
+    var value = Number(bytes);
+    if (!isFinite(value) || value <= 0) {
+        return null;
+    }
+    if (value < 1024) {
+        return Math.round(value) + " B";
+    }
+    var units = ["KB", "MB", "GB", "TB"];
+    var index = -1;
+    while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index += 1;
+    }
+    // Android's `formatFileSize(size)` is the `removeZero: false` overload, so a
+// size always keeps one decimal above a kilobyte: "1.0 KB", "3.8 MB". Matching
+// that is what makes the numbers read the same as on the original.
+    return value.toFixed(1) + " " + units[index];
+}
+
+// Bits over duration, in Kbps. Both the audio and the video section use it, and
+// both round the same way.
+function bitrateKbps(size, duration) {
+    var bytes = Number(size);
+    var seconds = Number(duration);
+    if (!isFinite(bytes) || !isFinite(seconds) || bytes <= 0 || seconds <= 0) {
+        return 0;
+    }
+    return Math.round(((bytes * 8.0) / seconds) / 1000.0);
+}
+
+function isLossless(mime) {
+    var text = String(mime || "").toLowerCase();
+    var lossless = ["flac", "wav", "alac", "ape", "pcm", "aiff"];
+    for (var i = 0; i < lossless.length; i++) {
+        if (text.indexOf(lossless[i]) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function yesNo(flag) {
+    return flag ? loc("yes") : loc("no");
+}
+
+function item(title, value) {
+    if (value === undefined || value === null || value === "") {
+        return null;
+    }
+    return { title: String(title), value: String(value) };
+}
+
+function push(list, entry) {
+    if (entry) {
+        list.push(entry);
+    }
+}
+
+// The sticker set carried by a document, in the shape the host flattens.
+function stickerPackOf(media) {
+    var pack = media && media.sticker_pack;
+    return pack && typeof pack === "object" ? pack : null;
+}
+
+function stickerSetId(pack) {
+    if (!pack) {
+        return 0;
+    }
+    var id = Number(pack.id);
+    return isFinite(id) && id > 0 ? id : 0;
+}
+
+function buildHeaderItems(message, list) {
+    var views = Number(message.views || 0);
+    if (views > 0) {
+        push(list, item(loc("views"), String(views)));
+    }
+    var forwards = Number(message.forwards || 0);
+    if (forwards > 0) {
+        push(list, item(loc("shares"), String(forwards)));
+    }
+}
+
+function buildDateItems(message, list) {
+    var media = message.media || {};
+    var pack = stickerPackOf(media);
+
+    push(list, item(loc("id"), String(message.id)));
+
+    var setId = stickerSetId(pack);
+    if (setId > 0) {
+        push(list, item(loc("stickerset_id"), String(setId)));
+    }
+
+    var date = Number(message.date || 0);
+    if (date > 0) {
+        push(list, item(loc("date"), formatTime(date)));
+    }
+
+    // The original's delete date came from `destroyTime`, `destroyTimeMillis`
+    // or a TTL. On iOS the same information arrives as the expiration the host
+    // computed, so that is what is shown.
+    var expires = Number(message.autoremove_expires || 0);
+    if (expires > 0) {
+        push(list, item(loc("delete_date"), formatTime(expires)));
+    }
+
+    var forwarded = message.forwarded;
+    if (forwarded && typeof forwarded === "object") {
+        var forwardedDate = Number(forwarded.date || 0);
+        if (forwardedDate > 0 && forwardedDate !== date) {
+            push(list, item(loc("fwd_date"), formatTime(forwardedDate)));
+        }
+    }
+
+    var editDate = Number(message.edit_date || 0);
+    if (editDate > 0 && editDate !== date) {
+        push(list, item(loc("edited_date"), formatTime(editDate)));
+    }
+}
+
+function buildAudioItems(message, media, list) {
+    var isVoice = media.is_voice === true;
+    push(list, item(loc("audio_type"), isVoice ? loc("voice_note") : loc("music_track")));
+
+    if (media.mime) {
+        push(list, item(loc("mime_type"), media.mime));
+    }
+    if (media.performer) {
+        push(list, item(loc("artists"), media.performer));
+    }
+    if (media.title) {
+        push(list, item(loc("track_title"), media.title));
+    }
+
+    var duration = Number(media.duration || 0);
+    if (duration > 0) {
+        push(list, item(loc("duration"), formatShortDuration(duration)));
+    }
+
+    var size = Number(media.size || 0);
+    var bitrate = bitrateKbps(size, duration);
+    if (bitrate > 0) {
+        push(list, item(loc("bitrate"), bitrate + " Kbps"));
+    }
+
+    var sampleRate = Number(media.sample_rate || 0);
+    if (sampleRate > 0) {
+        var rateText = sampleRate % 1000 === 0
+            ? Math.floor(sampleRate / 1000) + " kHz"
+            : (sampleRate / 1000).toFixed(1) + " kHz";
+        push(list, item(loc("sample_rate"), rateText));
+    }
+
+    var bitDepth = Number(media.bit_depth || 0);
+    if (bitDepth > 0) {
+        push(list, item(loc("bit_depth"), bitDepth + " bit"));
+    }
+
+    push(list, item(loc("compression_mode"), isLossless(media.mime) ? "Lossless" : "Lossy"));
+
+    var channels = Number(media.channels || 0);
+    if (channels > 0) {
+        var channelText = channels === 1
+            ? loc("mono")
+            : (channels === 2 ? loc("stereo") : channels + " ch");
+        push(list, item(loc("channels"), channelText));
+    }
+
+    var waveform = Number(media.waveform_length || 0);
+    if (waveform > 0) {
+        push(list, item(loc("waveform_len"), String(waveform)));
+    }
+
+    if (size > 0) {
+        push(list, item(loc("stream_size"), formatFileSize(size)));
+    }
+}
+
+function buildVideoItems(message, media, list) {
+    var kind = message.media_kind;
+    var typeText = kind === "round_video"
+        ? loc("video_round")
+        : (kind === "gif" ? loc("video_gif") : loc("video_standard"));
+    push(list, item(loc("video_type"), typeText));
+
+    if (media.mime) {
+        push(list, item(loc("mime_type"), media.mime));
+    }
+
+    if (media.width > 0 && media.height > 0) {
+        push(list, item(loc("resolution"), media.width + "x" + media.height));
+    }
+
+    var duration = Number(media.duration || 0);
+    if (duration > 0) {
+        push(list, item(loc("duration"), formatShortDuration(duration)));
+    }
+
+    var bitrate = bitrateKbps(media.size, duration);
+    if (bitrate > 0) {
+        push(list, item(loc("bitrate"), bitrate + " Kbps"));
+    }
+
+    if (media.codec) {
+        push(list, item(loc("video_codec"), media.codec));
+    }
+    if (media.fps > 0) {
+        push(list, item(loc("fps"), media.fps + " FPS"));
+    }
+    if (media.supports_streaming === true) {
+        push(list, item(loc("supports_streaming"), loc("yes")));
+    }
+}
+
+function stickerTypeText(message, media) {
+    if (message.media_kind === "custom_emoji") {
+        return loc("custom_emoji");
+    }
+    if (message.media_kind === "sticker_video") {
+        return loc("sticker_video");
+    }
+    if (media.animated === true || String(media.mime || "").toLowerCase().indexOf("tgs") >= 0) {
+        return loc("sticker_animated");
+    }
+    return loc("sticker_static");
+}
+
+function buildStickerItems(message, media, list) {
+    push(list, item(loc("video_type"), stickerTypeText(message, media)));
+
+    if (media.mime) {
+        push(list, item(loc("mime_type"), media.mime));
+    }
+    if (media.file_name) {
+        push(list, item(loc("file_name"), media.file_name));
+    }
+
+    var pack = stickerPackOf(media);
+    var setId = stickerSetId(pack);
+    var shortName = pack && pack.short_name ? String(pack.short_name) : "";
+
+    if (setId > 0 || shortName) {
+        var packValue = shortName || String(setId);
+        if (pack && typeof pack.index === "number" && pack.index >= 0) {
+            packValue = shortName ? shortName + "/" + pack.index : String(pack.index);
+        }
+        push(list, item(loc("sticker_pack"), packValue));
+    }
+
+    if (media.emoji) {
+        push(list, item(loc("associated_emoji"), media.emoji));
+    }
+    if (message.media_kind === "custom_emoji" && media.adaptive_text_color === true) {
+        push(list, item(loc("adapt_text_color"), loc("yes")));
+    }
+
+    if (media.width > 0 && media.height > 0) {
+        push(list, item(loc("resolution"), media.width + "x" + media.height));
+    }
+
+    var duration = Number(media.duration || 0);
+    if (duration > 0) {
+        push(list, item(loc("duration"), formatShortDuration(duration)));
+    }
+
+    var bitrate = bitrateKbps(media.size, duration);
+    if (bitrate > 0) {
+        push(list, item(loc("bitrate"), bitrate + " Kbps"));
+    }
+}
+
+function buildPhotoItems(message, media, list) {
+    if (media.mime) {
+        push(list, item(loc("mime_type"), media.mime));
+    }
+    if (media.width > 0 && media.height > 0) {
+        push(list, item(loc("resolution"), media.width + "x" + media.height));
+    }
+    if (media.file_name) {
+        push(list, item(loc("file_name"), media.file_name));
+    }
+}
+
+function buildPollItems(message, media, list) {
+    var poll = media.poll;
+    if (!poll || typeof poll !== "object") {
+        return;
+    }
+    push(list, item(loc("poll_question"), poll.question));
+    push(list, item(loc("poll_description"), poll.solution));
+    push(list, item(loc("voter_names"), yesNo(poll.public_voters)));
+    push(list, item(loc("multiple_choice"), yesNo(poll.multiple_choice)));
+    push(list, item(loc("add_options"), yesNo(poll.add_options)));
+    push(list, item(loc("allow_revoting"), yesNo(poll.allow_revoting)));
+    push(list, item(loc("shuffle_options"), yesNo(poll.shuffle_options)));
+    push(list, item(loc("quiz_mode"), yesNo(poll.quiz)));
+    if (poll.duration_limit > 0) {
+        push(list, item(loc("duration_limit"), formatShortDuration(poll.duration_limit)));
+    }
+    if (poll.close_date > 0) {
+        push(list, item(loc("auto_close_date"), formatTime(poll.close_date)));
+    }
+    if (poll.hide_results === true) {
+        push(list, item(loc("hide_results"), loc("yes")));
+    }
+    push(list, item(loc("poll_status"), poll.is_closed ? loc("poll_closed") : loc("poll_open")));
+    if (poll.total_voters > 0) {
+        push(list, item(loc("total_voters"), String(poll.total_voters)));
+    }
+}
+
+function buildServiceItems(message, media, list) {
+    push(list, item(loc("service_action"), media.action));
+    if (media.title) {
+        push(list, item(loc("new_chat_title"), media.title));
+    }
+}
+
+function buildMiddleItems(message, list) {
+    var media = message.media || {};
+
+    var size = Number(media.size || 0);
+    if (size > 0) {
+        push(list, item(loc("file_size"), formatFileSize(size)));
+    }
+
+    var kind = message.media_kind;
+    if (kind === "voice" || kind === "music") {
+        buildAudioItems(message, media, list);
+    } else if (kind === "video" || kind === "round_video" || kind === "gif") {
+        buildVideoItems(message, media, list);
+    } else if (kind === "sticker" || kind === "sticker_video" ||
+               kind === "sticker_animated" || kind === "custom_emoji" ||
+               kind === "photo_file") {
+        buildStickerItems(message, media, list);
+    } else if (kind === "photo") {
+        buildPhotoItems(message, media, list);
+    } else if (kind === "poll") {
+        buildPollItems(message, media, list);
+    } else if (kind === "service") {
+        buildServiceItems(message, media, list);
+    } else if (kind === "contact") {
+        push(list, item(loc("file_name"), [media.first_name, media.last_name].filter(Boolean).join(" ")));
+        push(list, item(loc("mime_type"), media.phone_number));
+    } else if (kind === "location") {
+        push(list, item(loc("resolution"), media.latitude + ", " + media.longitude));
+    }
+}
+
+function buildDatacenterItem(message, list) {
+    var media = message.media || {};
+    var dc = Number(media.dc_id || 0);
+    if (dc > 0) {
+        push(list, item(loc("datacenter"), "DC" + dc));
+    }
+}
+
+// The whole list, in the original's order. One function so the test drives the
+// same path the host does.
+function buildOrderedDetailItems(message) {
+    if (!message || typeof message !== "object") {
+        return [];
+    }
+    var list = [];
+    try {
+        buildHeaderItems(message, list);
+        buildDateItems(message, list);
+        buildMiddleItems(message, list);
+        buildDatacenterItem(message, list);
+    } catch (error) {
+        // A malformed message must not take the details menu down with it; what
+        // was built before the failure is still useful.
+        return list;
+    }
+    return list;
+}
+
+class ExtendedMessageDetailsPlugin extends BasePlugin {
+    constructor() {
+        super();
+        ExtendedMessageDetailsPlugin.instance = this;
+    }
+
+    on_plugin_load() {
+        ExtendedMessageDetailsPlugin.instance = this;
+    }
+
+    on_plugin_unload() {
+        ExtendedMessageDetailsPlugin.instance = null;
+    }
+
+    // Called by the host while a message's context menu is being built. Rows the
+    // plugin returns are appended to the stock details screen, in this order.
+    on_message_details(account, message, extra) {
+        return buildOrderedDetailItems(message);
+    }
+
+    create_settings() {
+        return [
+            Header({ text: "Сведения о сообщении" }),
+            Text({
+                text: "Пункт «Сведения» в меню сообщения",
+                subtext: "Добавляет технические данные: просмотры, репосты, ID, стикерсет, даты, размер, MIME-тип, разрешение и датацентр."
+            }),
+            Divider(),
+            Text({
+                text: "Копирование",
+                subtext: "Кнопка «Копировать» на экране сведений сохраняет весь список в буфер обмена."
+            })
+        ];
+    }
+}
+
+var Plugin = ExtendedMessageDetailsPlugin;

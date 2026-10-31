@@ -22,6 +22,7 @@
  *   __host.showAlert(pluginId, json)
  *   __host.fileOp(pluginId, op, path, payload) -> json
  *   __host.selectedAccount(pluginId)
+ *   __host.appVersion(pluginId)
  *   __host.copyToClipboard(pluginId, text)
  *   __host.pluginDirectory(pluginId)
  *   __host.schedulePlugin(pluginId, delayMs, token)
@@ -70,6 +71,8 @@ var __extera = (function () {
     // there the accounts are indices. The host resolves them, so a plugin that
     // hardcodes `account=0` still works; these helpers only pass them through.
     var selectedAccount = 0;
+    // `__extera.appVersion()` resolves once: the running build cannot change.
+    var appVersionValue = null;
 
     function host() {
         return __host;
@@ -1745,6 +1748,44 @@ var __extera = (function () {
     // Calls a control callback by key, used when the user edits a setting. The
     // function object never crosses the bridge; the key does. `valueJSON` is the
     // new value, encoded so it can arrive through a string-only bridge.
+    // Finds a control by the key the host reports for it.
+    //
+    // The host can only name a row by key, and rows of a nested page are named
+    // with their index inside that page (see `collectSubSettings`), so a lookup
+    // that only walked the top level would never reach the rows a user actually
+    // taps: every settings page except the first one is nested. Top level is
+    // searched first so a plugin that repeats a key keeps the outer meaning.
+    function findSettingControl(raw, key) {
+        function matches(list, wanted) {
+            for (var i = 0; i < list.length; i++) {
+                var control = list[i];
+                if (control && typeof control === 'object' && settingKey(control, i) === wanted) {
+                    return control;
+                }
+            }
+            return null;
+        }
+        var found = matches(raw, key);
+        if (found) {
+            return found;
+        }
+        for (var i = 0; i < raw.length; i++) {
+            var parent = raw[i];
+            if (!parent || typeof parent.create_sub_fragment !== 'function') {
+                continue;
+            }
+            var nested = parent.create_sub_fragment();
+            if (!nested || typeof nested.length !== 'number') {
+                continue;
+            }
+            found = matches(nested, key);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+
     function invokeSettingCallback(key, kind, valueJSON) {
         var instance = __extera.instance;
         if (!instance || typeof instance.create_settings !== 'function') {
@@ -1755,14 +1796,8 @@ var __extera = (function () {
             value = value.value;
         }
         var raw = instance.create_settings() || [];
-        for (var i = 0; i < raw.length; i++) {
-            var control = raw[i];
-            if (!control) {
-                continue;
-            }
-            if (settingKey(control, i) !== key) {
-                continue;
-            }
+        var control = findSettingControl(raw, key);
+        if (control) {
             var fn;
             switch (kind) {
             case 'click':
@@ -1785,7 +1820,6 @@ var __extera = (function () {
                     fn.call(instance, value === undefined ? null : value);
                 }
             }
-            return;
         }
     }
 
@@ -1878,6 +1912,46 @@ var __extera = (function () {
         return JSON.stringify(out);
     }
 
+    // --- appearance and UI queries ----------------------------------------
+    //
+    // Some of what an exteraGram plugin does on Android is not a network hook at
+    // all: it animates a view, recolours a palette, or hides a button. Those live
+    // behind obfuscated classes there, and iOS has no equivalent surface to hook,
+    // so the host asks the plugin for a value instead and applies it with its own
+    // animation and palette code.
+    //
+    // These callbacks are additions to the SDK, not part of it, so they are
+    // documented here: a plugin implements the method, the host calls it through
+    // `query` when the matching screen is built, and the return value is a plain
+    // JSON-able value. Returning `undefined` means "nothing to say", which is how
+    // a plugin opts out when all its switches are off.
+    //
+    //   on_attach_menu_hook(account, buttons, extra)  -> [key, ...] to keep
+    //   on_settings_rows_hook(account, rows, extra)   -> [key, ...] to keep
+    //   on_message_inserted(account, message, extra)  -> animation object
+    //   on_name_colors(account, subject, extra)       -> {main, secondary}
+    //   on_message_details(account, message, extra)   -> [{title, value}, ...]
+
+    function query(event, payloadJSON, contextJSON) {
+        var instance = __extera.instance;
+        if (!instance) {
+            return JSON.stringify({ value: null });
+        }
+        var fn = instance[event];
+        if (typeof fn !== 'function') {
+            return JSON.stringify({ value: null });
+        }
+        var payload = payloadJSON ? JSON.parse(payloadJSON) : null;
+        var extra = contextJSON ? JSON.parse(contextJSON) : {};
+        var raw = withHookAccount(extra.account, function () {
+            return fn.call(instance, extra.account, payload, extra);
+        });
+        if (raw === undefined) {
+            return JSON.stringify({ value: null });
+        }
+        return JSON.stringify({ value: raw === undefined ? null : raw });
+    }
+
     return {
         setIdentity: function (id, name) {
             pluginId = id;
@@ -1937,7 +2011,65 @@ var __extera = (function () {
                 host().copyToClipboard(pluginId, String(text));
             }
         },
+        // `Browser.openUrl` / `open_url`. Answered by the host because only the app
+        // knows which URLs stay in-app and which scheme belongs to the system.
+        // Returns whether the host accepted it, which is what a plugin's own
+        // `if not open_url(...)` guard reads.
+        openUrl: function (url) {
+            if (!hasBridge('openUrl')) {
+                __extera.log('open_url is not available on this build');
+                return false;
+            }
+            return !!host().openUrl(pluginId, String(url));
+        },
+        // The app's own version, e.g. `"13.1.1"`.
+        //
+        // Android plugins read `BuildVars.BUILD_VERSION_STRING`; there is no such
+        // class here, so the bundle answers. Cached because it cannot change
+        // while the app runs and plugins ask once per settings rebuild; a host
+        // that does not provide the bridge answers `"Unknown"` for the same
+        // reason `get_client_version()` on Android does.
+        appVersion: function () {
+            if (appVersionValue === null) {
+                if (hasBridge('appVersion')) {
+                    var value = host().appVersion(pluginId);
+                    appVersionValue = (value === undefined || value === null || value === '')
+                        ? 'Unknown'
+                        : String(value);
+                } else {
+                    appVersionValue = 'Unknown';
+                }
+            }
+            return appVersionValue;
+        },
         setSelectedAccount: function (account) { selectedAccount = account; },
+        // The colours the running theme uses, for a plugin that offers "take the
+        // colour from the theme" as one of its sources. Android reads these from
+        // `Theme.getColor(Theme.key_*)`; the names here are the same idea with
+        // the theme's own vocabulary, and the host answers with `0xRRGGBB`
+        // numbers so a plugin composes with them arithmetically.
+        //
+        // A name the host does not know answers `null` rather than throwing: a
+        // plugin asking for a colour this build has no equivalent for should
+        // fall back to its default, not fail to load.
+        themeColors: function (names) {
+            var list = [];
+            for (var i = 0; i < (names || []).length; i += 1) {
+                list.push(String(names[i]));
+            }
+            if (!hasBridge('themeColors')) {
+                return null;
+            }
+            var json = host().themeColors(pluginId, JSON.stringify(list));
+            if (json === undefined || json === null) {
+                return null;
+            }
+            try {
+                return JSON.parse(json);
+            } catch (error) {
+                return null;
+            }
+        },
         hookAccount: function () { return hookAccount; },
         resolveAccount: currentAccount,
         TLEntityType: TLEntityType,
@@ -1955,6 +2087,7 @@ var __extera = (function () {
         callLifecycleJSON: callLifecycleJSON,
         normalizeResult: normalizeResult,
         runHook: runHook,
+        query: query,
         runScheduled: runScheduled,
         collectSettings: collectSettings,
         collectSubSettings: collectSubSettings,
@@ -2126,6 +2259,17 @@ var android_utils = {
     copy_to_clipboard: function (text) {
         return __extera.copyToClipboard(text === undefined || text === null ? '' : String(text));
     },
+
+    // On Android this is `Browser.openUrl(activity, url)`, which hands the address
+    // to the in-app browser or to the system depending on the scheme. Here the
+    // app decides with the same rules, so `https://` opens in-app and anything
+    // else goes to the system.
+    open_url: function (url) {
+        if (url === undefined || url === null) {
+            return false;
+        }
+        return __extera.openUrl(String(url));
+    },
 };
 
 var hook_utils = {
@@ -2211,6 +2355,13 @@ var client_utils = {
     },
     parse_text: function (text, parseMode, isCaption) {
         return __extera.parseText(text, parseMode, isCaption);
+    },
+    // `BuildVars.BUILD_VERSION_STRING`. A plugin compares it against a minimum
+    // build to decide whether a Telegram feature exists yet; `"Unknown"` is what
+    // the original answered when the class could not be read, and a plugin's
+    // parser treats it as "no version", which is the safe branch.
+    get_client_version: function () {
+        return __extera.appVersion();
     },
 };
 

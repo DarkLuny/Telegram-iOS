@@ -303,6 +303,13 @@ public final class AccountContextImpl: AccountContext {
     
     private var peerNameColorsConfigurationDisposable: Disposable?
     public private(set) var peerNameColors: PeerNameColors
+    /// The palette Telegram itself provided, before any plugin override.
+    ///
+    /// Kept apart so a plugin turning its colour off restores the real palette
+    /// instead of the last colour it painted — applying an override to an
+    /// already-overridden palette cannot be undone.
+    private var basePeerNameColors: PeerNameColors
+    private var peerNameColorsAppearanceDisposable: Disposable?
     
     private var audioTranscriptionTrialDisposable: Disposable?
     public private(set) var audioTranscriptionTrial: AudioTranscription.TrialState
@@ -323,7 +330,9 @@ public final class AccountContextImpl: AccountContext {
         self.imageCache = DirectMediaImageCache(account: account)
         
         self.userLimits = EngineConfiguration.UserLimits(UserLimitsConfiguration.defaultValue)
-        self.peerNameColors = PeerNameColors.with(availableReplyColors: availableReplyColors, availableProfileColors: availableProfileColors)
+        let basePeerNameColors = PeerNameColors.with(availableReplyColors: availableReplyColors, availableProfileColors: availableProfileColors)
+        self.basePeerNameColors = basePeerNameColors
+        self.peerNameColors = basePeerNameColors.withPluginOverride(PluginHookPoints.shared.nameColors?(account.id.int64))
         self.audioTranscriptionTrial = AudioTranscription.TrialState.defaultValue
         self.isPremium = false
         self.isFrozen = false
@@ -597,7 +606,24 @@ public final class AccountContextImpl: AccountContext {
             guard let self = self else {
                 return
             }
-            self.peerNameColors = PeerNameColors.with(availableReplyColors: availableReplyColors, availableProfileColors: availableProfileColors)
+            let base = PeerNameColors.with(availableReplyColors: availableReplyColors, availableProfileColors: availableProfileColors)
+            self.basePeerNameColors = base
+            self.peerNameColors = base.withPluginOverride(PluginHookPoints.shared.nameColors?(self.account.id.int64))
+        })
+
+        // A plugin that changes its colour has nothing to push to: the palette
+        // above is built from network data it cannot touch. Asking it again when
+        // it says its appearance changed is enough, and the account only pays for
+        // this when a plugin actually overrides something.
+        self.peerNameColorsAppearanceDisposable = (PluginHookPoints.shared.appearanceChanged
+        |> deliverOnMainQueue).startStrict(next: { [weak self] in
+            guard let self = self else {
+                return
+            }
+            let overridden = self.basePeerNameColors.withPluginOverride(PluginHookPoints.shared.nameColors?(self.account.id.int64))
+            if overridden != self.peerNameColors {
+                self.peerNameColors = overridden
+            }
         })
         
         self.audioTranscriptionTrialDisposable = (self.engine.data.subscribe(TelegramEngine.EngineData.Item.Peer.Peer(id: account.peerId))
@@ -706,6 +732,7 @@ public final class AccountContextImpl: AccountContext {
         self.tonGiftStickersDisposable?.dispose()
         self.userLimitsConfigurationDisposable?.dispose()
         self.peerNameColorsConfigurationDisposable?.dispose()
+        self.peerNameColorsAppearanceDisposable?.dispose()
         self.isFrozenDisposable?.dispose()
     }
     

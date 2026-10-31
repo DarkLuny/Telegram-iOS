@@ -1,0 +1,755 @@
+/*
+ * LiteGram — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original is 2300 lines of Python that hook obfuscated Android classes
+ * (`ActionBarMenuItem`, `ChatMessageCell`, `SharedMediaLayout`, ...) and edit the
+ * views they build: it hides menu rows, drops premium emoji from adapter lists,
+ * clears gifts out of `TLObject` responses and repaints badges.
+ *
+ * There is no Dalvik and no view tree to hook on iOS, so what survives is the
+ * half that the runtime can actually answer:
+ *
+ *   on_settings_rows_hook -> which rows of the settings tab exist
+ *
+ * That hook is not an approximation: it is asked while the settings screen is
+ * being built, before a row is created, which is exactly the effect the original
+ * got by hooking `SettingsActivity.fillItems` and removing entries from the
+ * adapter. The seven `SETTINGS_OPTION_ROWS` switches drive it, with the same
+ * keys and the same default (off, meaning "show the row").
+ *
+ * Everything else in the original falls into two groups:
+ *
+ *   - Rows that decide what a *menu* offers (the three-dot menu, profile action
+ *     buttons, reply elements, the drawer). iOS builds those in Swift from the
+ *     account state, not from a list a plugin can filter, so the switches keep
+ *     their place in the settings screen and are reported once at load as
+ *     having no surface on this build. They are not silently accepted: the log
+ *     names them.
+ *   - Filtering premium stickers, custom emoji and gifts. Those are TL responses
+ *     and update payloads. The runtime delivers them to plugins as read-only
+ *     JSON: `post_request_hook` observes a finished request, it cannot re-encode
+ *     a `TLObject` back into the wire format, so a plugin cannot remove items
+ *     from a response the way the Python original did by calling `.remove()` on
+ *     the adapter's list.
+ *
+ * What is preserved exactly:
+ *
+ *   - All 58 setting keys, spelled as the original spells them, so an exported
+ *     settings file from one client loads in the other.
+ *   - The 81 translated strings, Russian and English, with English as the
+ *     fallback for any other system language, matching `get_system_language`.
+ *   - The four top-level sections (Chat, Profile, Interface, About) and every
+ *     row inside them, in the original order.
+ *   - `switch_all` and the per-group "Switch All" links, whose behaviour is the
+ *     original's: turn every row in the group to the same value, and only the
+ *     last write reloads the settings screen.
+ *   - The premium-badge switch, which also drives the collectible-status switch,
+ *     and the restart bulletin the original shows when a switch needs one.
+ */
+
+var __id__ = "litegram";
+var __name__ = "LiteGram";
+var __description__ = "A highly customizable plugin to **remove paid and bloated features** from Telegram.";
+var __author__ = "fork: @nonPlugins, origin author: @wepinek";
+var __version__ = "1.6.2";
+var __min_version__ = "12.1.1";
+var __category__ = ["appearance"];
+
+var GITHUB_URL = "https://github.com/nonFeature/LiteGram";
+
+// --- strings ---------------------------------------------------------------
+//
+// `get_system_language` in the original reads `Locale.getDefault().getLanguage()`
+// and falls back to English for anything that is not in `STRINGS`. The locale is
+// taken from `Intl`, which the JS engine derives from the device settings, so the
+// same rule applies without a Java locale.
+
+var STRINGS = {
+    ru: {
+        category_chat: "Чат",
+        category_profile: "Профиль",
+        category_interface: "Интерфейс",
+        category_about: "О плагине",
+        settings_options: "Меню настроек",
+        switch_all: "Переключить все",
+        hide_premium_row: "Скрыть «Telegram Premium»",
+        hide_stars_row: "Скрыть «Мои Звёзды»",
+        hide_ton_row: "Скрыть «Мои TON»",
+        hide_wallet_row: "Скрыть «Wallet»",
+        hide_business_row: "Скрыть «Telegram для бизнеса»",
+        hide_send_a_gift_row: "Скрыть «Отправить подарок»",
+        hide_help_section: "Скрыть раздел «Помощь»",
+        drawer_options: "Боковое меню",
+        manage_drawer_options: "Настройка бокового меню",
+        premium_features_header: "Премиум-Функции",
+        hide_premium_features: "Скрыть премиум-функции",
+        hide_premium_features_sub: "Скрывает некоторые настройки конфиденциальности, теги папок, и перевод чатов",
+        hide_articles_editor: "Скрыть редактор статей",
+        chat_list: "Список чатов",
+        hide_stories: "Скрыть Истории",
+        hide_action_bar_status: "Скрыть статус",
+        hide_greeting_button: "Скрыть промо Telegram Business в новых чатах",
+        hide_greeting_button_sub: "Убирает кнопку с текстом «имя установил(а) это сообщение для всех новых чатов»",
+        action_bar: "Три точки",
+        hide_action_bar_live_stream: "Скрыть «Начать трансляцию» и «Видеочат»",
+        hide_action_bar_archived_stories: "Скрыть «Архив историй»",
+        hide_action_bar_send_gift: "Скрыть «Отправить подарок»",
+        hide_action_bar_boost_group: "Скрыть «Голоса»",
+        hide_action_bar_add_shortcut: "Скрыть «Создать ярлык»",
+        hide_action_bar_report: "Скрыть «Пожаловаться»",
+        hide_action_bar_clear_history: "Скрыть «Очистить историю»",
+        gifts: "Элементы чата",
+        hide_bottom_gift_button: "Скрыть кнопку подарка в поле ввода",
+        hide_gift_cards: "Скрыть карточки подарков в чате",
+        hide_giveaway_cards: "Скрыть розыгрыши в чатах",
+        hide_star_reaction: "Скрыть реакции за звёзды",
+        hide_group_stickers: "Скрыть стикерпак группы",
+        hide_emoji_search: "Скрыть эмодзи в поле поиска",
+        premium_emoji_settings_header: "Скрытие кастомных эмодзи",
+        hide_premium_emoji_keyboard: "Скрыть в клавиатуре",
+        hide_premium_emoji_reactions: "Скрыть в реакциях",
+        hide_premium_search: "Скрыть в поиске",
+        hide_premium_suggestions: "Скрыть в подсказках",
+        premium_stickers_settings_header: "Скрытие премиум-стикеров",
+        hide_premium_stickers_recent: "Скрыть из недавних",
+        hide_premium_stickers_search: "Скрыть в поиске",
+        hide_premium_stickers_grid: "Скрыть на панели выбора",
+        profile_buttons: "Кнопки в профиле",
+        hide_profile_actions_stories_button: "Скрыть кнопку новой истории",
+        hide_profile_actions_gift_button: "Скрыть кнопку отправки подарка",
+        hide_profile_actions_stream_button: "Скрыть кнопки трансляции и видеочата",
+        profile_tabs: "Вкладки в профиле",
+        hide_stories_tab: "Скрыть Истории",
+        hide_gifts_tab: "Скрыть Подарки",
+        profile_appearance: "Оформление профиля",
+        manage_reply_elements: "Настройка оформления ответов",
+        reply_elements: "Элементы ответа",
+        hide_profile_background_emoji: "Скрыть фоновый эмодзи",
+        hide_profile_background_emoji_sub: "Те, что вокруг аватара",
+        hide_profile_pinned_gifts: "Скрыть подарки вокруг аватара",
+        hide_profile_colorful_background: "Скрыть цветной фон",
+        hide_boost_badge: "Скрыть значок буста",
+        hide_premium_badge: "Скрыть премиум значок",
+        hide_premium_badge_sub: "Также отключает видеоаватары в списке чатов и чате",
+        hide_collectible_status: "Скрыть collectible-статус",
+        hide_collectible_status_sub: "Если в статусе стоит подарок",
+        hide_stars_rating: "Скрыть рейтинг звёзд",
+        hide_bot_verification: "Скрыть значок верификации от организации",
+        hide_profile_music: "Скрыть музыкальный трек",
+        hide_profile_business: "Скрыть бизнес-информацию",
+        hide_profile_business_sub: "Гео/часы работы",
+        ai_features_header: "ИИ-Функции",
+        hide_ai_button: "Скрыть кнопку «AI» в поле ввода",
+        hide_ai_summarize: "Скрыть кнопку саммари",
+        about_plugin: "О Плагине",
+        github_repository: "Репозиторий на Github (Поставьте ⭐!)",
+        github_sub: "Никакой телеметрии, модульная архитектура на Python, кастомный скрипт для сборки, Ruff-линтинг и типизация для java, xposed и android модулей",
+        restart_required: "Перезапустите приложение, чтобы изменения вступили в силу.",
+        restart: "ПЕРЕЗАПУСТИТЬ",
+        plugin_description: "Гибко настраиваемый плагин для удаления платных и лишних функций из Telegram"
+    },
+    en: {
+        category_chat: "Chat",
+        category_profile: "Profile",
+        category_interface: "Interface",
+        category_about: "About",
+        settings_options: "Settings Options",
+        switch_all: "Switch All",
+        hide_premium_row: "Hide «Telegram Premium»",
+        hide_stars_row: "Hide «My Stars»",
+        hide_ton_row: "Hide «My TON»",
+        hide_wallet_row: "Hide «Wallet»",
+        hide_business_row: "Hide «Telegram Business»",
+        hide_send_a_gift_row: "Hide «Send a Gift»",
+        hide_help_section: "Hide «Help» Section",
+        drawer_options: "Drawer Options",
+        manage_drawer_options: "Manage Drawer Options",
+        premium_features_header: "Premium Features",
+        hide_premium_features: "Hide premium features",
+        hide_premium_features_sub: "Hides some privacy settings, folder tags, and chat translation",
+        hide_articles_editor: "Hide articles editor",
+        chat_list: "Chat List",
+        hide_stories: "Hide Stories",
+        hide_action_bar_status: "Hide Status",
+        hide_greeting_button: "Hide Telegram Business Promo in Empty Chats",
+        hide_greeting_button_sub: "Removes button with text «name added the message above for all empty chats»",
+        action_bar: "Three dots",
+        hide_action_bar_live_stream: "Hide «Start Live Stream» & «Start Voice Chat»",
+        hide_action_bar_archived_stories: "Hide «Archived Stories»",
+        hide_action_bar_send_gift: "Hide «Send Gift»",
+        hide_action_bar_boost_group: "Hide «Boost Group»",
+        hide_action_bar_add_shortcut: "Hide «Add to Home Screen»",
+        hide_action_bar_report: "Hide «Report»",
+        hide_action_bar_clear_history: "Hide «Clear History»",
+        gifts: "Chat Elements",
+        hide_bottom_gift_button: "Hide Gift Button from Input Field",
+        hide_gift_cards: "Hide Gift Cards in Chat",
+        hide_giveaway_cards: "Hide Giveaways",
+        hide_star_reaction: "Hide Star Reaction",
+        hide_group_stickers: "Hide Group Sticker Pack",
+        hide_emoji_search: "Hide emoji in search field",
+        premium_emoji_settings_header: "Hide Custom Emoji",
+        hide_premium_emoji_keyboard: "Hide in Keyboard",
+        hide_premium_emoji_reactions: "Hide in Reactions",
+        hide_premium_search: "Hide in Search",
+        hide_premium_suggestions: "Hide in Suggestions",
+        premium_stickers_settings_header: "Hide Premium Stickers",
+        hide_premium_stickers_recent: "Hide from Recents",
+        hide_premium_stickers_search: "Hide in Search",
+        hide_premium_stickers_grid: "Hide in Picker Grid",
+        profile_buttons: "Profile Buttons",
+        hide_profile_actions_stories_button: "Hide Stories Button",
+        hide_profile_actions_gift_button: "Hide Gift Button",
+        hide_profile_actions_stream_button: "Hide Live Stream & Video Chat Button",
+        profile_tabs: "Profile Tabs",
+        hide_stories_tab: "Hide Stories Tab",
+        hide_gifts_tab: "Hide Gifts Tab",
+        profile_appearance: "Profile Appearance",
+        manage_reply_elements: "Manage Reply Elements",
+        reply_elements: "Reply Elements",
+        hide_profile_background_emoji: "Hide Profile Icons",
+        hide_profile_background_emoji_sub: "Those around the avatar",
+        hide_profile_pinned_gifts: "Hide Gifts Around Avatar",
+        hide_profile_colorful_background: "Hide Colorful Background",
+        hide_boost_badge: "Hide Boost Badge",
+        hide_premium_badge: "Hide Premium Badge",
+        hide_premium_badge_sub: "Also disables video avatars in chat lists and chats",
+        hide_collectible_status: "Hide Collectible Status",
+        hide_collectible_status_sub: "If there is a gift in the status",
+        hide_stars_rating: "Hide Stars Rating",
+        hide_bot_verification: "Hide organization verification badge",
+        hide_profile_music: "Hide music track",
+        hide_profile_business: "Hide business info",
+        hide_profile_business_sub: "Geo/working hours",
+        ai_features_header: "AI Features",
+        hide_ai_button: "Hide «AI» Button in Message Input",
+        hide_ai_summarize: "Hide Summarize Button",
+        about_plugin: "About Plugin",
+        github_repository: "Github Repository (Leave a ⭐!)",
+        github_sub: "Zero Telemetry, Python modular architecture with custom build script, Ruff linting, and typing stubs for java, Xposed and android modules",
+        restart_required: "Restart the app for changes to take effect.",
+        restart: "RESTART",
+        plugin_description: "A highly customizable plugin to remove paid and bloated features from Telegram"
+    }
+};
+
+// The lookup the original's `t()` performs: the system language if it has a
+// table, English otherwise, and a marker instead of an empty string when a key
+// is missing, because a missing translation must be visible rather than blank.
+function systemLanguage() {
+    var language = "en";
+    try {
+        var locale = Intl.DateTimeFormat().resolvedOptions().locale || "";
+        language = String(locale).split(/[-_]/)[0].toLowerCase();
+    } catch (error) {
+        language = "en";
+    }
+    return Object.prototype.hasOwnProperty.call(STRINGS, language) ? language : "en";
+}
+
+function t(key) {
+    var table = STRINGS[systemLanguage()] || STRINGS.en;
+    var value = table[key];
+    if (value === undefined) {
+        return "MISSING: " + key;
+    }
+    // The original formats with `str.format(*args)`. No message carries a
+    // placeholder, but keeping the arguments accepted means a plugin exported
+    // from an older build with a different string still loads.
+    var rest = Array.prototype.slice.call(arguments, 1);
+    if (rest.length === 0) {
+        return value;
+    }
+    return value.replace(/\{(\d*)\}/g, function (match, index) {
+        var position = index === "" ? 0 : parseInt(index, 10);
+        return rest[position] === undefined ? match : String(rest[position]);
+    });
+}
+
+// --- keys ------------------------------------------------------------------
+//
+// Every key the original declared, in the original order. `SETTINGS_OPTION_ROWS`
+// and the two premium groups also keep their key/label pairs, because the
+// settings screen iterates over them and the "Switch All" links need the list.
+
+var Keys = {
+    switch_all: "switchAll",
+    hide_premium_row: "hidePremiumRow",
+    hide_stars_row: "hideStarsRow",
+    hide_ton_row: "hideTonRow",
+    hide_wallet_row: "hideWalletRow",
+    hide_business_row: "hideBusinessRow",
+    hide_send_a_gift_row: "hideSendAGiftRow",
+    hide_help_section: "hideHelpSection",
+    chatSettings: "chatSettings",
+    profileSettings: "profileSettings",
+    interfaceSettings: "interfaceSettings",
+    aboutSettings: "aboutSettings",
+    drawer_options: "drawerSettings",
+    hide_profile_actions_stream_button: "hideProfileActionsStreamButton",
+    hide_stories: "hideStories",
+    hide_action_bar_status: "hideActionBarStatus",
+    hide_greeting_button: "hideGreetingButton",
+    hide_group_stickers: "hideGroupStickers",
+    hide_profile_actions_stories_button: "hideProfileActionsStoriesButton",
+    hide_profile_actions_gift_button: "hideProfileActionsGiftButton",
+    hide_stories_tab: "hideStoriesTab",
+    hide_gifts_tab: "hideGiftsTab",
+    reply_elements: "replyElements",
+    hide_profile_background_emoji: "hideProfileBackgroundEmoji",
+    hide_profile_pinned_gifts: "hideProfilePinnedGifts",
+    hide_profile_colorful_background: "hideProfileColorfulBackground",
+    hide_boost_badge: "hideBoostBadge",
+    hide_profile_music: "hideProfileMusic",
+    hide_profile_business: "hideProfileBusiness",
+    hide_premium_emoji_keyboard: "hidePremiumEmojiKeyboard",
+    hide_premium_emoji_reactions: "hidePremiumEmojiReactions",
+    hide_premium_search: "hidePremiumSearch",
+    hide_premium_suggestions: "hidePremiumSuggestions",
+    switch_all_premium_emoji: "switchAllPremiumEmoji",
+    hide_premium_stickers_recent: "hidePremiumStickersRecent",
+    hide_premium_stickers_search: "hidePremiumStickersSearch",
+    hide_premium_stickers_grid: "hidePremiumStickersGrid",
+    switch_all_premium_stickers: "switchAllPremiumStickers",
+    hide_premium_badge: "hidePremiumBadge",
+    hide_bot_verification: "hideBotVerification",
+    hide_premium_features: "hidePremiumFeatures",
+    hide_articles_editor: "hideArticlesEditor",
+    hide_ai_button: "hideAiButton",
+    hide_ai_summarize: "hideAiSummarize",
+    hide_action_bar_live_stream: "hideActionBarLiveStream",
+    hide_action_bar_archived_stories: "hideActionBarArchivedStories",
+    hide_action_bar_send_gift: "hideActionBarSendGift",
+    hide_action_bar_boost_group: "hideActionBarBoostGroup",
+    hide_action_bar_add_shortcut: "hideActionBarAddShortcut",
+    hide_action_bar_report: "hideActionBarReport",
+    hide_action_bar_clear_history: "hideActionBarClearHistory",
+    hide_bottom_gift_button: "hideBottomGiftButton",
+    hide_gift_cards: "hideGiftCards",
+    hide_giveaway_cards: "hideGiveawayCards",
+    hide_collectible_status: "hideCollectibleStatus",
+    hide_stars_rating: "hideStarsRating",
+    hide_star_reaction: "hideStarReaction",
+    hide_emoji_search: "hideEmojiSearch"
+};
+
+var PREMIUM_EMOJI_ROWS = [
+    [Keys.hide_premium_emoji_keyboard, "hide_premium_emoji_keyboard"],
+    [Keys.hide_premium_emoji_reactions, "hide_premium_emoji_reactions"],
+    [Keys.hide_premium_search, "hide_premium_search"],
+    [Keys.hide_premium_suggestions, "hide_premium_suggestions"]
+];
+
+var PREMIUM_STICKERS_ROWS = [
+    [Keys.hide_premium_stickers_recent, "hide_premium_stickers_recent"],
+    [Keys.hide_premium_stickers_search, "hide_premium_stickers_search"],
+    [Keys.hide_premium_stickers_grid, "hide_premium_stickers_grid"]
+];
+
+// The rows of the settings tab, keyed by the name the host asks about. The
+// mapping is explicit because the Android ids the original matched
+// (`SettingsRegistry` aliases) do not exist here; the host's identifiers are
+// what `PeerInfoSettingsItems` calls the rows it builds.
+var SETTINGS_OPTION_ROWS = [
+    [Keys.hide_premium_row, "premium", "hide_premium_row"],
+    [Keys.hide_stars_row, "stars", "hide_stars_row"],
+    [Keys.hide_ton_row, "ton", "hide_ton_row"],
+    [Keys.hide_wallet_row, "wallet", "hide_wallet_row"],
+    [Keys.hide_business_row, "business", "hide_business_row"],
+    [Keys.hide_send_a_gift_row, "sendGift", "hide_send_a_gift_row"],
+    // One switch covers the whole Help section, which the host splits into
+    // three rows; the original removed the registry entry that contained them.
+    [Keys.hide_help_section, ["support", "faq", "tips"], "hide_help_section"]
+];
+
+// The switches whose effect exists only in the Android UI. Kept so a settings
+// export round-trips and so the screen matches the original, but named once at
+// load instead of pretending a tap changed something.
+var ANDROID_ONLY_KEYS = [
+    Keys.hide_stories,
+    Keys.hide_action_bar_status,
+    Keys.hide_greeting_button,
+    Keys.hide_profile_actions_stories_button,
+    Keys.hide_profile_actions_gift_button,
+    Keys.hide_profile_actions_stream_button,
+    Keys.hide_stories_tab,
+    Keys.hide_gifts_tab,
+    Keys.hide_profile_background_emoji,
+    Keys.hide_profile_pinned_gifts,
+    Keys.hide_profile_colorful_background,
+    Keys.hide_boost_badge,
+    Keys.hide_premium_badge,
+    Keys.hide_collectible_status,
+    Keys.hide_stars_rating,
+    Keys.hide_bot_verification,
+    Keys.hide_profile_music,
+    Keys.hide_profile_business,
+    Keys.hide_action_bar_live_stream,
+    Keys.hide_action_bar_archived_stories,
+    Keys.hide_action_bar_send_gift,
+    Keys.hide_action_bar_boost_group,
+    Keys.hide_action_bar_add_shortcut,
+    Keys.hide_action_bar_report,
+    Keys.hide_action_bar_clear_history,
+    Keys.hide_bottom_gift_button,
+    Keys.hide_gift_cards,
+    Keys.hide_giveaway_cards,
+    Keys.hide_star_reaction,
+    Keys.hide_group_stickers,
+    Keys.hide_emoji_search,
+    Keys.hide_premium_emoji_keyboard,
+    Keys.hide_premium_emoji_reactions,
+    Keys.hide_premium_search,
+    Keys.hide_premium_suggestions,
+    Keys.hide_premium_stickers_recent,
+    Keys.hide_premium_stickers_search,
+    Keys.hide_premium_stickers_grid,
+    Keys.hide_premium_features,
+    Keys.hide_articles_editor,
+    Keys.hide_ai_button,
+    Keys.hide_ai_summarize
+];
+
+// --- settings helpers ------------------------------------------------------
+
+function plugin() {
+    return LiteGramPlugin.instance;
+}
+
+// The original's `Switch`, which only differs from the SDK one by defaulting
+// `link_alias` to the key when none was given.
+function MakeSwitch(key, text, options) {
+    options = options || {};
+    return Switch({
+        key: key,
+        text: text,
+        default: options.default === undefined ? false : options.default,
+        subtext: options.subtext === undefined ? null : options.subtext,
+        icon: options.icon === undefined ? null : options.icon,
+        on_change: options.on_change === undefined ? null : options.on_change,
+        on_long_click: options.on_long_click === undefined ? null : options.on_long_click,
+        link_alias: options.link_alias === undefined ? key : options.link_alias
+    });
+}
+
+// "Switch All": the group is switched on only when at least one row is off, so a
+// second tap turns everything off instead of leaving it half-on. Every row gets
+// the same value; only the last write reloads the screen, which is what the
+// original did to avoid rebuilding it six times.
+function toggleGroupOptions(keys, defaultValue) {
+    var instance = plugin();
+    if (!instance) {
+        return;
+    }
+    var target = false;
+    for (var i = 0; i < keys.length; i++) {
+        if (!instance.get_setting(keys[i], defaultValue === undefined ? false : defaultValue)) {
+            target = true;
+            break;
+        }
+    }
+    for (var j = 0; j < keys.length; j++) {
+        instance.set_setting(keys[j], target, j === keys.length - 1);
+    }
+}
+
+function toggleSettingsOptions() {
+    toggleGroupOptions(SETTINGS_OPTION_ROWS.map(function (row) { return row[0]; }));
+}
+
+function togglePremiumEmojiOptions() {
+    toggleGroupOptions(PREMIUM_EMOJI_ROWS.map(function (row) { return row[0]; }), true);
+}
+
+function togglePremiumStickersOptions() {
+    toggleGroupOptions(PREMIUM_STICKERS_ROWS.map(function (row) { return row[0]; }), true);
+}
+
+// The premium badge and the collectible status share one visual slot, so the
+// original wrote both and then offered a restart.
+function premiumBadgeChanged(value) {
+    var instance = plugin();
+    if (!instance) {
+        return;
+    }
+    instance.set_setting(Keys.hide_premium_badge, value, false);
+    instance.set_setting(Keys.hide_collectible_status, value, true);
+    showRestartBulletin(value);
+}
+
+function showRestartBulletin(enabled) {
+    if (enabled) {
+        return;
+    }
+    var bulletin = ui.bulletin.show_with_button(
+        t("restart_required"),
+        "extera_outline",
+        t("restart"),
+        function () {
+            // `restart_app` killed the process on Android. A plugin cannot exit the
+            // app on iOS, and there is no supported API for relaunching it, so the
+            // button closes the bulletin: the setting is already saved and applies
+            // on the next launch.
+            ui.bulletin.show_info(t("restart_required"));
+        }
+    );
+    return bulletin;
+}
+
+function openGithub() {
+    return android_utils.open_url(GITHUB_URL);
+}
+
+// --- settings sections -----------------------------------------------------
+
+function chatSettings() {
+    var rows = [
+        Header({ text: t("chat_list") }),
+        Text({
+            key: Keys.hide_stories,
+            text: t("hide_stories"),
+            link_alias: Keys.hide_stories,
+            on_click: null,
+            icon: "extera_outline"
+        }),
+        Text({
+            key: Keys.hide_action_bar_status,
+            text: t("hide_action_bar_status"),
+            link_alias: Keys.hide_action_bar_status,
+            on_click: null,
+            icon: "extera_outline"
+        }),
+        MakeSwitch(Keys.hide_greeting_button, t("hide_greeting_button"), { subtext: t("hide_greeting_button_sub") }),
+        Header({ text: t("action_bar") }),
+        MakeSwitch(Keys.hide_action_bar_live_stream, t("hide_action_bar_live_stream")),
+        MakeSwitch(Keys.hide_action_bar_archived_stories, t("hide_action_bar_archived_stories")),
+        MakeSwitch(Keys.hide_action_bar_send_gift, t("hide_action_bar_send_gift")),
+        MakeSwitch(Keys.hide_action_bar_boost_group, t("hide_action_bar_boost_group")),
+        MakeSwitch(Keys.hide_action_bar_add_shortcut, t("hide_action_bar_add_shortcut")),
+        MakeSwitch(Keys.hide_action_bar_report, t("hide_action_bar_report")),
+        MakeSwitch(Keys.hide_action_bar_clear_history, t("hide_action_bar_clear_history")),
+        Header({ text: t("gifts") }),
+        MakeSwitch(Keys.hide_bottom_gift_button, t("hide_bottom_gift_button")),
+        MakeSwitch(Keys.hide_gift_cards, t("hide_gift_cards")),
+        MakeSwitch(Keys.hide_giveaway_cards, t("hide_giveaway_cards")),
+        MakeSwitch(Keys.hide_star_reaction, t("hide_star_reaction")),
+        MakeSwitch(Keys.hide_group_stickers, t("hide_group_stickers")),
+        MakeSwitch(Keys.hide_emoji_search, t("hide_emoji_search")),
+        Header({ text: t("premium_emoji_settings_header") }),
+        Text({ text: t("switch_all"), key: Keys.switch_all_premium_emoji, link_alias: Keys.switch_all_premium_emoji, on_click: togglePremiumEmojiOptions })
+    ];
+    // The premium emoji rows were declared with `default=_C` in the original,
+    // i.e. on by default: the user sees the filter before choosing it.
+    for (var i = 0; i < PREMIUM_EMOJI_ROWS.length; i++) {
+        rows.push(MakeSwitch(PREMIUM_EMOJI_ROWS[i][0], t(PREMIUM_EMOJI_ROWS[i][1]), { default: true }));
+    }
+    rows.push(Header({ text: t("premium_stickers_settings_header") }));
+    rows.push(Text({ text: t("switch_all"), key: Keys.switch_all_premium_stickers, link_alias: Keys.switch_all_premium_stickers, on_click: togglePremiumStickersOptions }));
+    for (var j = 0; j < PREMIUM_STICKERS_ROWS.length; j++) {
+        rows.push(MakeSwitch(PREMIUM_STICKERS_ROWS[j][0], t(PREMIUM_STICKERS_ROWS[j][1]), { default: true }));
+    }
+    return rows;
+}
+
+function profileSettings() {
+    var instance = plugin();
+    var premiumBadgeHidden = instance ? !!instance.get_setting(Keys.hide_premium_badge, false) : false;
+    var rows = [
+        Header({ text: t("profile_buttons") }),
+        MakeSwitch(Keys.hide_profile_actions_stories_button, t("hide_profile_actions_stories_button")),
+        MakeSwitch(Keys.hide_profile_actions_gift_button, t("hide_profile_actions_gift_button")),
+        MakeSwitch(Keys.hide_profile_actions_stream_button, t("hide_profile_actions_stream_button")),
+        Header({ text: t("profile_tabs") }),
+        MakeSwitch(Keys.hide_stories_tab, t("hide_stories_tab")),
+        MakeSwitch(Keys.hide_gifts_tab, t("hide_gifts_tab")),
+        Header({ text: t("profile_appearance") }),
+        Text({
+            key: Keys.reply_elements,
+            text: t("manage_reply_elements"),
+            link_alias: Keys.reply_elements,
+            on_click: null,
+            icon: "extera_outline"
+        }),
+        MakeSwitch(Keys.hide_profile_background_emoji, t("hide_profile_background_emoji"), {
+            subtext: t("hide_profile_background_emoji_sub")
+        }),
+        MakeSwitch(Keys.hide_profile_pinned_gifts, t("hide_profile_pinned_gifts")),
+        MakeSwitch(Keys.hide_profile_colorful_background, t("hide_profile_colorful_background")),
+        MakeSwitch(Keys.hide_boost_badge, t("hide_boost_badge")),
+        MakeSwitch(Keys.hide_premium_badge, t("hide_premium_badge"), {
+            subtext: t("hide_premium_badge_sub"),
+            on_change: premiumBadgeChanged
+        })
+    ];
+    // The collectible status is only offered while the premium badge is on: it is
+    // the same visual slot, and the original hid the second switch in that case.
+    if (!premiumBadgeHidden) {
+        rows.push(MakeSwitch(Keys.hide_collectible_status, t("hide_collectible_status"), {
+            subtext: t("hide_collectible_status_sub")
+        }));
+    }
+    rows.push(MakeSwitch(Keys.hide_stars_rating, t("hide_stars_rating")));
+    rows.push(MakeSwitch(Keys.hide_bot_verification, t("hide_bot_verification")));
+    rows.push(MakeSwitch(Keys.hide_profile_music, t("hide_profile_music")));
+    rows.push(MakeSwitch(Keys.hide_profile_business, t("hide_profile_business"), {
+        subtext: t("hide_profile_business_sub")
+    }));
+    return rows;
+}
+
+function interfaceSettings() {
+    var rows = [
+        Header({ text: t("settings_options") }),
+        Text({ text: t("switch_all"), key: Keys.switch_all, link_alias: Keys.switch_all, on_click: toggleSettingsOptions })
+    ];
+    for (var i = 0; i < SETTINGS_OPTION_ROWS.length; i++) {
+        rows.push(MakeSwitch(SETTINGS_OPTION_ROWS[i][0], t(SETTINGS_OPTION_ROWS[i][2])));
+    }
+    rows.push(Header({ text: t("drawer_options") }));
+    rows.push(Text({
+        key: Keys.drawer_options,
+        text: t("manage_drawer_options"),
+        link_alias: Keys.drawer_options,
+        on_click: null,
+        icon: "extera_outline"
+    }));
+    rows.push(Header({ text: t("premium_features_header") }));
+    rows.push(MakeSwitch(Keys.hide_premium_features, t("hide_premium_features"), {
+        subtext: t("hide_premium_features_sub")
+    }));
+    rows.push(MakeSwitch(Keys.hide_articles_editor, t("hide_articles_editor")));
+    rows.push(Header({ text: t("ai_features_header") }));
+    rows.push(MakeSwitch(Keys.hide_ai_button, t("hide_ai_button")));
+    rows.push(MakeSwitch(Keys.hide_ai_summarize, t("hide_ai_summarize")));
+    return rows;
+}
+
+function aboutSettings() {
+    return [
+        Header({ text: t("about_plugin") }),
+        Text({ text: t("github_repository"), icon: "msg_link", on_click: openGithub }),
+        Divider({ text: t("github_sub") })
+    ];
+}
+
+function mainSettingsList() {
+    // Each row carries an explicit `key`: without one the bootstrap derives a
+    // key from the visible text, and a translated label would change the
+    // identifier `collectSubSettings` looks the page up by. The key is the same
+    // string the original used as the section alias.
+    return [
+        Text({
+            key: Keys.chatSettings,
+            text: t("category_chat"),
+            icon: "msg_discussion",
+            create_sub_fragment: chatSettings,
+            link_alias: Keys.chatSettings
+        }),
+        Text({
+            key: Keys.profileSettings,
+            text: t("category_profile"),
+            icon: "msg_contacts",
+            create_sub_fragment: profileSettings,
+            link_alias: Keys.profileSettings
+        }),
+        Text({
+            key: Keys.interfaceSettings,
+            text: t("category_interface"),
+            icon: "msg_settings",
+            create_sub_fragment: interfaceSettings,
+            link_alias: Keys.interfaceSettings
+        }),
+        Text({
+            key: Keys.aboutSettings,
+            text: t("category_about"),
+            icon: "msg_help",
+            create_sub_fragment: aboutSettings,
+            link_alias: Keys.aboutSettings
+        })
+    ];
+}
+
+// --- plugin ----------------------------------------------------------------
+
+function LiteGramPlugin() {
+    BasePlugin.call(this);
+    LiteGramPlugin.instance = this;
+    // Answering before `on_plugin_load` is deliberate: the settings are already
+    // in the store, and the settings screen may be built before the lifecycle
+    // call lands. Only `on_plugin_unload` turns the hook off.
+    this.unloaded = false;
+    this.warnedAboutAndroidOnly = false;
+}
+
+LiteGramPlugin.prototype = Object.create(BasePlugin.prototype);
+LiteGramPlugin.prototype.constructor = LiteGramPlugin;
+
+LiteGramPlugin.instance = null;
+
+LiteGramPlugin.prototype.on_plugin_load = function () {
+    LiteGramPlugin.instance = this;
+    this.unloaded = false;
+    // One line instead of a silent no-op: a user who turns on a switch that this
+    // build cannot honour should be able to see why in the plugin log rather than
+    // guess.
+    var enabled = [];
+    for (var i = 0; i < ANDROID_ONLY_KEYS.length; i++) {
+        if (this.get_setting(ANDROID_ONLY_KEYS[i], false)) {
+            enabled.push(ANDROID_ONLY_KEYS[i]);
+        }
+    }
+    if (enabled.length > 0) {
+        this.log("LiteGram: " + enabled.length + " switch(es) affect only the Android view tree and have no iOS surface: " + enabled.join(", "));
+    }
+};
+
+LiteGramPlugin.prototype.on_plugin_unload = function () {
+    // A hook must not answer for a plugin that is going away: the host drops the
+    // context right after this, and an answer in between would hide settings rows
+    // on behalf of a plugin the user just disabled.
+    this.unloaded = true;
+    if (LiteGramPlugin.instance === this) {
+        LiteGramPlugin.instance = null;
+    }
+};
+
+// The settings tab asks which rows it may build. Keys the host does not know are
+// ignored by it, so answering with the full list of what to keep is enough.
+LiteGramPlugin.prototype.on_settings_rows_hook = function (account, payload, extra) {
+    if (this.unloaded) {
+        return undefined;
+    }
+    var offered = (payload && payload.keys) || [];
+    var hidden = {};
+    for (var i = 0; i < SETTINGS_OPTION_ROWS.length; i++) {
+        var row = SETTINGS_OPTION_ROWS[i];
+        if (!this.get_setting(row[0], false)) {
+            continue;
+        }
+        if (Object.prototype.toString.call(row[1]) === "[object Array]") {
+            for (var j = 0; j < row[1].length; j++) {
+                hidden[row[1][j]] = true;
+            }
+        } else {
+            hidden[row[1]] = true;
+        }
+    }
+    var kept = [];
+    for (var k = 0; k < offered.length; k++) {
+        if (!hidden[offered[k]]) {
+            kept.push(offered[k]);
+        }
+    }
+    return kept;
+};
+
+LiteGramPlugin.prototype.create_settings = function () {
+    LiteGramPlugin.instance = this;
+    return mainSettingsList();
+};
+
+LiteGramPlugin.prototype.get_instance = function () {
+    return LiteGramPlugin.instance;
+};
+
+var Plugin = LiteGramPlugin;

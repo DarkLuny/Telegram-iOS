@@ -2890,7 +2890,11 @@ public class ChatMessageAnimatedStickerItemNode: ChatMessageItemView {
     override public func animateInsertion(_ currentTimestamp: Double, duration: Double, options: ListViewItemAnimationOptions) {
         super.animateInsertion(currentTimestamp, duration: duration, options: options)
         
-        self.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
+        // A plugin style animates the row as a whole, fade included, so its
+        // alpha replaces the stock one. The dice still has to roll either way.
+        if !self.pluginInsertionAnimationPlayed {
+            self.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
+        }
         
         if let telegramDice = self.telegramDice, let item = self.item, item.message.effectivelyIncoming(item.context.account.peerId) {
             if let value = telegramDice.value, value != 0 {

@@ -1,6 +1,10 @@
 import Foundation
 import JavaScriptCore
 import SwiftSignalKit
+// The appearance hooks' value types (`PluginInsertionAnimation`,
+// `PluginNameColorsOverride`, `PluginThemeOverride`, `PluginDetailItem`) live in
+// the core, so the dispatchers that parse them name those types here.
+import TelegramCore
 
 /// Owns every loaded plugin and dispatches hook traffic to them.
 ///
@@ -54,6 +58,13 @@ public final class PluginManager: PluginHost {
 
     private func notifyChanged() {
         self.changesPipe.putNext(Void())
+        // A different set of plugins can mean a different accent, so the
+        // interface is rebuilt as well as the plugin list. Hopped to the main
+        // queue because this runs on the script queue and the rebuild reads
+        // `PresentationData` and touches UI.
+        Queue.mainQueue().async {
+            PluginHookPoints.shared.notifyAppearanceChanged()
+        }
     }
 
     private init() {
@@ -140,6 +151,20 @@ public final class PluginManager: PluginHost {
         }
         let loader = PluginLoader(bootstrapSource: bootstrapSource, host: self)
         let appVersion = self.bundleAppVersion
+
+        // The plugins that ship with the app are written out before anything is
+        // read, so a fresh install has all seven without the user having to pick
+        // files. Ids come from each source's own `__id__`, read here because
+        // installation has to happen before the loader exists for that file.
+        for source in bundledPluginSources {
+            // The id comes from the source's own `__id__`. A source without one
+            // is written under a placeholder so the loader can report why it is
+            // unusable instead of it vanishing from the list.
+            let pluginId = loader.manifestIdentifier(in: source) ?? "plugin"
+            if self.store.installBundled(pluginId: pluginId, source: source) {
+                self.pluginLog(pluginId: pluginId, text: "installed bundled plugin")
+            }
+        }
 
         var prepared: [LoadedPlugin] = []
         self.lock.lock()
@@ -236,6 +261,18 @@ public final class PluginManager: PluginHost {
         self.lock.lock()
         defer { self.lock.unlock() }
         return self.loaded.values.sorted { $0.manifest.name < $1.manifest.name }
+    }
+
+    /// Whether any plugin is loaded at all.
+    ///
+    /// The appearance hooks are consulted while rows and names are being built,
+    /// which happens far more often than anything else in this runtime. Asking
+    /// this first turns "no plugins installed" into one lock and no JSON, instead
+    /// of building a payload for a list that is known empty.
+    public var hasLoadedPlugins: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return !self.loaded.isEmpty
     }
 
     private func plugin(id: String) -> LoadedPlugin? {
@@ -631,8 +668,50 @@ public final class PluginManager: PluginHost {
         return self.actions?.selectedAccountId()
     }
 
+    /// Answers `themeColors` from the live theme.
+    ///
+    /// The parse and the encode happen here rather than in the runtime so the
+    /// runtime only has to map a name to a colour; a plugin asks once per
+    /// settings rebuild, so this is not on a hot path.
+    public func pluginThemeColors(pluginId: String, namesJSON: String) -> String? {
+        guard let names = (try? JSONSerialization.jsonObject(with: Data(namesJSON.utf8))) as? [String] else {
+            return "{}"
+        }
+        let colors = self.actions?.themeColors(names: names) ?? [:]
+        var object: [String: Any] = [:]
+        for (name, value) in colors {
+            object[name] = Int(value)
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return "{}"
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
     public func pluginCopyToClipboard(pluginId: String, text: String) {
         self.actions?.copyToClipboard(pluginId: pluginId, text: text)
+    }
+
+    /// Answers `open_url`. The action is asynchronous, so the return value means
+    /// "accepted", not "finished loading": a plugin that only wants a button to
+    /// do something never reads it.
+    public func pluginOpenUrl(pluginId: String, url: String) -> Bool {
+        guard let url = URL(string: url), !url.absoluteString.isEmpty else {
+            return false
+        }
+        guard let actions = self.actions else {
+            return false
+        }
+        actions.openUrl(pluginId: pluginId, url: url)
+        return true
+    }
+
+    /// Answers `appVersion` with the build the app is running.
+    ///
+    /// The same value the manifest gate compares against, read from the bundle
+    /// so the two can never disagree.
+    public func pluginAppVersion(pluginId: String) -> String {
+        return self.bundleAppVersion
     }
 
     public func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String) {
@@ -821,6 +900,213 @@ public final class PluginManager: PluginHost {
             }
         }
         return result.sorted { $0.priority > $1.priority }.map { $0.description }
+    }
+
+    // MARK: - Appearance queries
+
+    /// Asks one plugin for the answer to a `query` callback.
+    ///
+    /// The bootstrap returns `{ "value": ... }` so that "the plugin has nothing
+    /// to say" (`undefined`, or no such method) is distinguishable from a real
+    /// `null` answer. Both become `nil` here: from the app's side there is no
+    /// difference between a plugin that opts out and one that is not installed.
+    private func queryValue(plugin: LoadedPlugin, event: String, payloadJSON: String, context: [String: Any]) -> Any? {
+        guard let json = self.callJS(
+            plugin: plugin,
+            function: "__extera.query",
+            arguments: [event, payloadJSON, self.jsonString(context)]
+        ) else {
+            return nil
+        }
+        guard let object = self.parseJSONObject(json) else {
+            return nil
+        }
+        guard let value = object["value"], !(value is NSNull) else {
+            return nil
+        }
+        return value
+    }
+
+    /// Encodes any JSON-able value, not only a dictionary. The query payloads are
+    /// sometimes arrays (the attach-menu key list), and `JSONSerialization` will
+    /// take those at the top level on iOS 13 and later.
+    private func jsonText(_ object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: data, encoding: .utf8) else {
+            return "null"
+        }
+        return text
+    }
+
+    /// Plugins in load order, which is the order hook chains run in. The list
+    /// screen uses `loadedPlugins` (name order) because a user reads names; a
+    /// decision across plugins has to be reproducible, so it uses this instead.
+    private var pluginsInLoadOrder: [LoadedPlugin] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.loaded.values.sorted { $0.loadIndex < $1.loadIndex }
+    }
+
+    /// The attach-menu keys the plugins want hidden, in menu order.
+    ///
+    /// Each plugin sees the list the previous one left behind, so two plugins
+    /// that hide different buttons both apply. A plugin that answers with a key
+    /// that was not in its input is ignored rather than trusted, because the
+    /// answer decides which buttons the user can reach.
+    public func dispatchAttachMenuExclusions(account: Int64, peerId: Int64?, keys: [String]) -> [String] {
+        guard !keys.isEmpty else {
+            return keys
+        }
+        var current = keys
+        var context: [String: Any] = ["account": account]
+        if let peerId = peerId {
+            context["peer"] = peerId
+        }
+        for plugin in self.pluginsInLoadOrder {
+            let payload = self.jsonText(["keys": current])
+            guard let answer = self.queryValue(plugin: plugin, event: "on_attach_menu_hook", payloadJSON: payload, context: context) else {
+                continue
+            }
+            guard let list = answer as? [Any] else {
+                continue
+            }
+            var requested = Set<String>()
+            for entry in list {
+                if let key = entry as? String {
+                    requested.insert(key)
+                }
+            }
+            // Keep only what was offered, so a typo cannot remove an unseen key.
+            current = current.filter { requested.contains($0) }
+        }
+        return current
+    }
+
+    /// The settings rows the plugins want hidden, in screen order.
+    ///
+    /// Same contract as the attach menu: each plugin sees what the previous one
+    /// kept, and a key that was not offered is ignored. There is no peer here
+    /// because every settings row belongs to the account itself.
+    public func dispatchSettingsRowExclusions(account: Int64, keys: [String]) -> [String] {
+        guard !keys.isEmpty else {
+            return keys
+        }
+        var current = keys
+        let context: [String: Any] = ["account": account]
+        for plugin in self.pluginsInLoadOrder {
+            let payload = self.jsonText(["keys": current])
+            guard let answer = self.queryValue(plugin: plugin, event: "on_settings_rows_hook", payloadJSON: payload, context: context) else {
+                continue
+            }
+            guard let list = answer as? [Any] else {
+                continue
+            }
+            var requested = Set<String>()
+            for entry in list {
+                if let key = entry as? String {
+                    requested.insert(key)
+                }
+            }
+            current = current.filter { requested.contains($0) }
+        }
+        return current
+    }
+
+    /// How a message row or date separator should animate in, or `nil` for the
+    /// stock insertion.
+    ///
+    /// Plugins are asked in load order and the first answer wins: two plugins
+    /// animating the same row would produce one animation playing over another,
+    /// which is not something either of them asked for.
+    public func dispatchInsertionAnimation(account: Int64, messageJSON: String, isDate: Bool, width: Double, height: Double) -> PluginInsertionAnimation? {
+        let context: [String: Any] = [
+            "account": account,
+            "isDate": isDate,
+            "width": width,
+            "height": height
+        ]
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_message_inserted", payloadJSON: messageJSON, context: context) else {
+                continue
+            }
+            guard let dictionary = answer as? [String: Any] else {
+                continue
+            }
+            if let animation = PluginInsertionAnimation(json: dictionary) {
+                return animation
+            }
+        }
+        return nil
+    }
+
+    /// The colour override a plugin wants for peer names, or `nil` for the theme.
+    public func dispatchNameColors(account: Int64?) -> PluginNameColorsOverride? {
+        var context: [String: Any] = [:]
+        if let account = account {
+            context["account"] = account
+        }
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_name_colors", payloadJSON: "null", context: context) else {
+                continue
+            }
+            guard let dictionary = answer as? [String: Any] else {
+                continue
+            }
+            if let override = PluginNameColorsOverride(json: dictionary) {
+                return override
+            }
+        }
+        return nil
+    }
+
+    /// The accent a plugin wants for the whole interface, or `nil` for the theme.
+    ///
+    /// Asked through its own callback, `on_theme_colors`, rather than sharing
+    /// `on_name_colors`: recolouring names and recolouring the interface are two
+    /// separate promises, and a plugin that only does one of them must not be
+    /// forced to answer for the other. First answer wins, for the same reason as
+    /// the animation hook — two accents cannot both be applied.
+    public func dispatchThemeOverride(account: Int64?) -> PluginThemeOverride? {
+        var context: [String: Any] = [:]
+        if let account = account {
+            context["account"] = account
+        }
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_theme_colors", payloadJSON: "null", context: context) else {
+                continue
+            }
+            guard let dictionary = answer as? [String: Any] else {
+                continue
+            }
+            if let override = PluginThemeOverride(json: dictionary) {
+                return override
+            }
+        }
+        return nil
+    }
+
+    /// Extra rows for the message-details screen, in plugin and item order.
+    public func dispatchMessageDetails(account: Int64, messageJSON: String) -> [PluginDetailItem] {
+        let context: [String: Any] = ["account": account]
+        var result: [PluginDetailItem] = []
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_message_details", payloadJSON: messageJSON, context: context) else {
+                continue
+            }
+            guard let list = answer as? [Any] else {
+                continue
+            }
+            for entry in list {
+                guard let dictionary = entry as? [String: Any],
+                      let title = dictionary["title"] as? String,
+                      let value = dictionary["value"] as? String else {
+                    continue
+                }
+                result.append(PluginDetailItem(title: title, value: value))
+            }
+        }
+        return result
     }
 
     /// Runs the click handler of a menu item. The item may have been removed or
@@ -1093,6 +1379,13 @@ public final class PluginManager: PluginHost {
     public func setSetting(pluginId: String, key: String, value: Any?) {
         self.store.setSetting(key, value: value, for: pluginId)
         self.settingsChanged?(pluginId)
+        // A colour plugin's accent usually lives in a setting, so a change has to
+        // reach the theme that was already built. The callback below answers with
+        // the new colour; this asks the interface to rebuild and read it. Sent
+        // after the callback so the plugin has already seen the new value.
+        Queue.mainQueue().async {
+            PluginHookPoints.shared.notifyAppearanceChanged()
+        }
         guard let plugin = self.plugin(id: pluginId) else {
             return
         }
@@ -1114,7 +1407,7 @@ public final class PluginManager: PluginHost {
             guard let self = self else {
                 return
             }
-            for plugin in self.loadedPlugins {
+            for plugin in self.pluginsInLoadOrder {
                 self.callLifecycle(plugin, "on_app_event", context: ["event": event])
             }
         }
@@ -1128,7 +1421,7 @@ public final class PluginManager: PluginHost {
     /// it already owns the script queue — so `sync` cannot deadlock.
     public func shutdown() {
         self.withJSQueue {
-            for plugin in self.loadedPlugins {
+            for plugin in self.pluginsInLoadOrder {
                 self.callLifecycle(plugin, "on_app_event", context: ["event": "STOP"])
             }
             self.unloadAllOnQueue()
@@ -1178,8 +1471,12 @@ public protocol PluginActions: AnyObject {
     func dismissAlert(pluginId: String)
     /// The account id a bare `account` defaults to, for `get_selected_account()`.
     func selectedAccountId() -> Int64?
+    /// `Theme.getColor` for the names a plugin asked about, as `0xRRGGBB`.
+    func themeColors(names: [String]) -> [String: UInt32]
     /// `android_utils.copy_to_clipboard`.
     func copyToClipboard(pluginId: String, text: String)
+    /// `android_utils.open_url`: hand a URL to the app's own opener.
+    func openUrl(pluginId: String, url: URL)
 
     // Network and proxy. Each answers by calling
     // `PluginManager.resolveBridgeCallback(pluginId:token:...)` — never
@@ -1205,5 +1502,11 @@ public extension PluginActions {
     /// would let a removed plugin keep talking to the network. Defaulted so an
     /// implementation that never starts one does not have to write it.
     func cancelPendingBridges() {
+    }
+
+    /// A build that never reads a theme colour answers with an empty map instead
+    /// of failing the plugin's settings screen.
+    func themeColors(names: [String]) -> [String: UInt32] {
+        return [:]
     }
 }

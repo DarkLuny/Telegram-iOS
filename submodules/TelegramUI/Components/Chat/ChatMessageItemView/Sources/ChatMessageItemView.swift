@@ -711,9 +711,46 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
     open func cancelInsertionAnimations() {
     }
     
+    /// Asks the plugins how this message should appear, and plays their answer.
+    ///
+    /// A plugin that animates new messages replaces the stock slide-in: the header
+    /// asks, the plugin returns the numbers for its style, and this method plays
+    /// them. Returning `false` — no plugins, no answer, or a plugin that is off —
+    /// leaves the stock animation untouched, so an app without plugins behaves
+    /// exactly as before.
+    ///
+    /// Subclasses that add their own insertion alpha check
+    /// `pluginInsertionAnimationPlayed` and skip it: two animations on the same
+    /// `opacity` key would replace each other, and the plugin's one is the
+    /// intended appearance.
+    public private(set) var pluginInsertionAnimationPlayed = false
+
+    @discardableResult
+    open func playPluginInsertionAnimation() -> Bool {
+        guard let item = self.item else {
+            return false
+        }
+        let played = PluginInsertionPlayback.play(
+            layer: self.layer,
+            accountId: item.context.account.id.int64,
+            message: item.message,
+            isDate: false,
+            size: self.bounds.size
+        )
+        if played {
+            self.pluginInsertionAnimationPlayed = true
+        }
+        return played
+    }
+    
     override open func animateInsertion(_ currentTimestamp: Double, duration: Double, options: ListViewItemAnimationOptions) {
+        self.pluginInsertionAnimationPlayed = false
         if options.short {
             //self.layer.animateBoundsOriginYAdditive(from: -self.bounds.size.height, to: 0.0, duration: 0.4, timingFunction: kCAMediaTimingFunctionSpring)
+        } else if self.playPluginInsertionAnimation() {
+            // The plugin's animation is playing instead of the stock offset.
+            // `transitionOffset` stays at zero so the row is already in place and
+            // only the plugin's transform moves it.
         } else {
             self.transitionOffset = options.invertOffsetDirection ? self.bounds.size.height * 1.4 : -self.bounds.size.height * 1.6
             self.addTransitionOffsetAnimation(0.0, duration: duration, beginAt: currentTimestamp)
