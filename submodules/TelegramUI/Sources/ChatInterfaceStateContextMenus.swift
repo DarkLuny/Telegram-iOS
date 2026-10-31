@@ -2521,11 +2521,13 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
                     }
                     actions.append(.action(ContextMenuActionItem(text: "Message details", textColor: .primary, icon: { theme in
                         return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Info"), color: theme.actionSheet.primaryTextColor)
-                    }, action: { [weak context, weak interfaceInteraction] c, _ in
+                    }, action: { c, _ in
+                        // Both are captured strongly on purpose: the item lives
+                        // inside the menu that `interfaceInteraction` owns, so
+                        // neither can outlive the controller, and a weak capture
+                        // here would need unwrapping again inside the nested
+                        // dismissal closure for no benefit.
                         c?.dismiss(completion: {
-                            guard let context = context, let interfaceInteraction = interfaceInteraction else {
-                                return
-                            }
                             let presentationData = context.sharedContext.currentPresentationData.with { $0 }
                             guard let actionSheet = PluginMessageDetailsSheet.make(presentationData: presentationData, items: detailItems) else {
                                 return

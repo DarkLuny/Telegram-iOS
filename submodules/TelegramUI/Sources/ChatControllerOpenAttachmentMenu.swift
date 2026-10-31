@@ -436,7 +436,7 @@ extension ChatControllerImpl {
                     let offeredKeys = buttons.map { $0.key }
                     let keptKeys = Set(attachMenuExclusions(
                         strongSelf.context.account.id.int64,
-                        strongSelf.presentationInterfaceState.renderedPeer?.peer.id.toInt64(),
+                        strongSelf.presentationInterfaceState.renderedPeer?.peerId.toInt64(),
                         offeredKeys
                     ))
                     if keptKeys != Set(offeredKeys) {
