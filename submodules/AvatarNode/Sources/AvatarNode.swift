@@ -92,7 +92,7 @@ public func calculateAvatarColors(context: AccountContext?, explicitColorIndex: 
         }
     }
     
-    let colors: [UIColor]
+    var colors: [UIColor]
     if icon != .none {
         if case .deletedIcon = icon {
             colors = AvatarNode.grayscaleColors
