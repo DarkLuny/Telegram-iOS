@@ -33,6 +33,28 @@ public protocol PluginHost: AnyObject {
     /// `android_utils.copy_to_clipboard`.
     func pluginCopyToClipboard(pluginId: String, text: String)
     func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String)
+
+    // Network and proxy. Both are asynchronous: the answer is delivered by
+    // calling `__extera.runCallback(token, json)` once the work finishes, so a
+    // plugin never blocks the script queue waiting for a socket or a database
+    // transaction. exteraGram's plugins reach these through Python's `urllib`
+    // and Java reflection; here they are explicit host calls.
+    //
+    /// `http_get` — `headersJSON` is a JSON object of request headers, `timeout`
+    /// is in seconds (0 means the default). The callback receives either
+    /// `{"ok": true, "status": 200, "text": "...", "headers": {...}}` or
+    /// `{"ok": false, "error": "..."}`.
+    func pluginHttpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String)
+    /// The proxy list as `{"ok": true, "servers": [{"link": "tg://...", "kind": "mtproto|web|socks", "host": "...", "port": 443}]}`.
+    func pluginProxyList(pluginId: String, callbackToken: String)
+    /// Adds every parseable link in `linksJSON`. Answers
+    /// `{"ok": true, "added": 0, "duplicates": 0, "invalid": 0}`.
+    func pluginProxyAdd(pluginId: String, linksJSON: String, callbackToken: String)
+    /// Empties the list and turns proxying off. Answers `{"ok": true, "removed": 0}`.
+    func pluginProxyRemoveAll(pluginId: String, callbackToken: String)
+    /// The id of the account's own user, which is also the Saved Messages peer.
+    /// Answers `{"ok": true, "peer_id": 123}`.
+    func pluginOwnPeerId(pluginId: String, account: Int64?, callbackToken: String)
 }
 
 public struct PluginMenuItem {
@@ -161,6 +183,14 @@ public final class PluginLoader {
     /// version gate decided. These are literal assignments, so they are read as
     /// text instead.
     public func readManifest(from source: String, fallbackId: String) throws -> PluginManifest {
+        // A `.plugin` file in the wild is usually Python: exteraGram's SDK is
+        // Python, and the six plugins that could not be ported all look like
+        // this. Evaluating one produces "Unexpected identifier" from JavaScriptCore,
+        // which says nothing about why. Recognising the shape here turns a
+        // cryptic syntax error into an instruction.
+        if self.looksLikePython(source) {
+            throw PluginError.pythonSource
+        }
         let rawId = self.literalString(in: source, named: "__id__") ?? fallbackId
         guard !rawId.isEmpty else {
             throw PluginError.missingIdentifier
@@ -268,6 +298,57 @@ public final class PluginLoader {
             return false
         }
         return value.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+    }
+
+    /// Whether the source is Python rather than JavaScript.
+    ///
+    /// Deliberately conservative: it fires on lines that start at column zero
+    /// with a Python-only keyword, plus the two decorators and the
+    /// `class X(BasePlugin)` declaration exteraGram plugins use. JavaScript has no
+    /// statement that begins with `import x` followed by a bare module name,
+    /// `def`, `elif`, or `pass`, and a comment mentioning Python does not trip it.
+    /// Getting this wrong in the other direction — refusing a real JavaScript
+    /// plugin — is the failure that matters, so every marker is anchored.
+    private func looksLikePython(_ source: String) -> Bool {
+        var sawDefinition = false
+        var sawClass = false
+        for rawLine in source.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") {
+                continue
+            }
+            // `def name(...):` and `async def` only exist in Python where a
+            // JavaScript function would need `function`.
+            if line.hasPrefix("def ") && line.hasSuffix(":") {
+                sawDefinition = true
+            } else if line.hasPrefix("async def ") {
+                sawDefinition = true
+            }
+            // `class Name(BasePlugin):` — the base in parentheses and the colon
+            // are both Python; JavaScript would write `class Name extends`.
+            if line.hasPrefix("class ") && line.hasSuffix(":") && line.contains("(") {
+                sawClass = true
+            }
+            if sawDefinition && sawClass {
+                return true
+            }
+            // A decorator is unambiguous on its own: `@joverride` above a
+            // function is the exteraGram idiom.
+            if line.hasPrefix("@") && !line.hasPrefix("@media") {
+                let rest = line.dropFirst()
+                if rest.range(of: "^[A-Za-z_][A-Za-z0-9_.]*$", options: .regularExpression) != nil {
+                    return true
+                }
+            }
+            // `from module import name` is Python; JavaScript has no `from`
+            // statement at the start of a line.
+            if line.hasPrefix("from ") && line.contains(" import ") {
+                return true
+            }
+        }
+        // The fallback pair: a file with both a `def` and a `BasePlugin` class is
+        // Python even if the class was written in one line.
+        return sawDefinition && source.contains("BasePlugin")
     }
 
     // MARK: - Bridge
@@ -391,6 +472,34 @@ public final class PluginLoader {
             host.pluginSchedule(pluginId: id, delayMilliseconds: delay, token: token)
         }
         hostObject.setObject(schedule as AnyObject, forKeyedSubscript: "schedulePlugin" as NSString)
+
+        // Network and proxy. Each takes a callback token rather than returning a
+        // value: the script queue must not block on a socket, and the answer is
+        // delivered by `__extera.resolveBridge(token, json)` when it arrives.
+        let httpGet: @convention(block) (String, String, String, Double, String) -> Void = { id, url, headersJSON, timeout, token in
+            host.pluginHttpGet(pluginId: id, url: url, headersJSON: headersJSON, timeout: timeout, callbackToken: token)
+        }
+        hostObject.setObject(httpGet as AnyObject, forKeyedSubscript: "httpGet" as NSString)
+
+        let proxyList: @convention(block) (String, String) -> Void = { id, token in
+            host.pluginProxyList(pluginId: id, callbackToken: token)
+        }
+        hostObject.setObject(proxyList as AnyObject, forKeyedSubscript: "proxyList" as NSString)
+
+        let proxyAdd: @convention(block) (String, String, String) -> Void = { id, linksJSON, token in
+            host.pluginProxyAdd(pluginId: id, linksJSON: linksJSON, callbackToken: token)
+        }
+        hostObject.setObject(proxyAdd as AnyObject, forKeyedSubscript: "proxyAdd" as NSString)
+
+        let proxyRemoveAll: @convention(block) (String, String) -> Void = { id, token in
+            host.pluginProxyRemoveAll(pluginId: id, callbackToken: token)
+        }
+        hostObject.setObject(proxyRemoveAll as AnyObject, forKeyedSubscript: "proxyRemoveAll" as NSString)
+
+        let ownPeerId: @convention(block) (String, Double, String) -> Void = { id, account, token in
+            host.pluginOwnPeerId(pluginId: id, account: PluginLoader.accountValue(account), callbackToken: token)
+        }
+        hostObject.setObject(ownPeerId as AnyObject, forKeyedSubscript: "ownPeerId" as NSString)
 
         context.setObject(hostObject, forKeyedSubscript: "__host" as NSString)
     }

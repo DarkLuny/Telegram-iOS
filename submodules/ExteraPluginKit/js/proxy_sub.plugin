@@ -1,0 +1,651 @@
+/*
+ * Proxy Sub — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original is a Python plugin that reads the proxy list of a Telegram
+ * Android client through Java reflection (`SharedConfig`, exteraGram's
+ * `ProxyController`) and adds entries through `ProxySettings.fromUri`. None of
+ * that exists on iOS, so this port keeps the behaviour and the setting names and
+ * reaches the same three operations through the runtime's `http` and `proxy`
+ * modules:
+ *
+ *   http.get_json  -> reads the subscription source
+ *   proxy.add      -> adds the links the source produced
+ *   proxy.list     -> reads the list the client currently holds
+ *   proxy.remove_all
+ *   proxy.own_peer_id + send_message -> export to Saved Messages
+ *
+ * The setting keys are unchanged on purpose: someone who used the Android plugin
+ * should find their switches where they left them, and the labels describe the
+ * same choices.
+ */
+
+var __id__ = "proxy_sub";
+var __name__ = "Proxy Sub";
+var __description__ = "Загружает списки прокси MTProto и WebProxy из удалённого источника и добавляет их в клиент.\n\nВозможности:\n • Фильтрация по протоколам и странам со счётчиками\n • Экспорт прокси (MTProto, WebProxy, SOCKS) в Избранное сообщением или файлом\n • Автоматический переход на второй источник, если первый недоступен";
+var __author__ = "@akresik";
+var __version__ = "3.0.2";
+var __min_version__ = "12.10.6";
+var __icon__ = "OliverEmoji/21";
+
+// The two mirrors the original reads, in the same order. A source that fails is
+// skipped and the next one is tried; the plugin never asks the user to retry by
+// hand, because a mirror being down is routine.
+var SOURCES = [
+    "https://gitverse.ru/api/repos/Akres/Proxy/raw/branch/master/proxies.json",
+    "https://github.com/theakres/Proxy/raw/main/proxies.json",
+];
+
+// Protocol keys, in the order the settings screen lists them. The names are the
+// original's, including `web_websocket_lanes`, which the current source does not
+// emit but an older cached list may.
+var PROTOCOL_KEYS = [
+    "mtproto_faketls",
+    "mtproto_padding",
+    "web_websocket",
+    "web_websocket_lanes",
+    "web_https",
+    "web_https_lanes",
+];
+
+var PROTOCOL_LABELS = {
+    mtproto_faketls: ["FakeTLS", "MTProto"],
+    mtproto_padding: ["Padding", "MTProto"],
+    web_websocket: ["WebSocket", "WebProxy"],
+    web_websocket_lanes: ["WebSocket-Lanes", "WebProxy"],
+    web_https: ["HTTPS", "WebProxy"],
+    web_https_lanes: ["HTTPS-Lanes", "WebProxy"],
+};
+
+// Names of countries in Russian, so the filter reads the way the original's
+// `babel.Locale("ru").territories` did. A missing code falls back to the code
+// itself, which is what `babel` did too.
+var COUNTRY_NAMES = {
+    AE: "ОАЭ", AM: "Армения", AT: "Австрия", AU: "Австралия", AZ: "Азербайджан",
+    BE: "Бельгия", BG: "Болгария", BR: "Бразилия", BY: "Беларусь", CA: "Канада",
+    CH: "Швейцария", CL: "Чили", CN: "Китай", CY: "Кипр", CZ: "Чехия",
+    DE: "Германия", DK: "Дания", EE: "Эстония", EG: "Египет", ES: "Испания",
+    FI: "Финляндия", FR: "Франция", GB: "Великобритания", GE: "Грузия",
+    GR: "Греция", HK: "Гонконг", HR: "Хорватия", HU: "Венгрия", ID: "Индонезия",
+    IE: "Ирландия", IL: "Израиль", IN: "Индия", IR: "Иран", IS: "Исландия",
+    IT: "Италия", JP: "Япония", KG: "Кыргызстан", KR: "Южная Корея",
+    KZ: "Казахстан", LT: "Литва", LU: "Люксембург", LV: "Латвия",
+    MD: "Молдова", MX: "Мексика", MY: "Малайзия", NL: "Нидерланды",
+    NO: "Норвегия", NZ: "Новая Зеландия", PH: "Филиппины", PL: "Польша",
+    PT: "Португалия", RO: "Румыния", RS: "Сербия", RU: "Россия", SE: "Швеция",
+    SG: "Сингапур", SI: "Словения", SK: "Словакия", TH: "Таиланд",
+    TR: "Турция", TW: "Тайвань", UA: "Украина", US: "США", UZ: "Узбекистан",
+    VN: "Вьетнам", ZA: "ЮАР",
+};
+
+// Populated by "Список протоколов и стран"; until then the screen shows only the
+// button that fetches it, which is how the original behaved.
+var knownProtocols = null;
+var knownCountries = null;
+
+// --- helpers --------------------------------------------------------------
+
+function parseEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    var server = entry.server;
+    if (!server) {
+        return null;
+    }
+    var secret = entry.secret === undefined || entry.secret === null ? "" : String(entry.secret);
+    if (entry.via) {
+        return { kind: 'web', via: String(entry.via), server: String(server), secret: secret, port: 443 };
+    }
+    var port = parseInt(entry.port, 10);
+    if (!port || !isFinite(port)) {
+        return null;
+    }
+    var subtype = secret.toLowerCase().indexOf("ee") === 0 ? "faketls" : "padding";
+    return { kind: 'mtproto', subtype: subtype, server: String(server), port: port, secret: secret };
+}
+
+function proxyKey(p) {
+    if (p.kind === 'web') {
+        return "web:" + p.server + ":" + p.secret;
+    }
+    return "mtproto:" + p.server + ":" + p.port + ":" + p.secret;
+}
+
+function buildUri(p) {
+    if (p.kind === 'web') {
+        return "tg://webproxy?server=" + p.server + "&secret=" + p.secret;
+    }
+    return "tg://proxy?server=" + p.server + "&port=" + p.port + "&secret=" + p.secret;
+}
+
+function protocolKey(p) {
+    if (p.kind === 'web') {
+        // `via` names the transport: `websocket`, `websocket-lanes`, `https`,
+        // `https-lanes`. The setting key is the same word with `-` as `_`.
+        return "web_" + String(p.via || 'websocket').replace(/-/g, '_');
+    }
+    return "mtproto_" + p.subtype;
+}
+
+function entryCountry(entry) {
+    var value = entry && entry.country;
+    if (typeof value !== 'string') {
+        return null;
+    }
+    var trimmed = value.trim().toUpperCase();
+    return /^[A-Z]{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function countryFlag(code) {
+    var result = "";
+    for (var i = 0; i < code.length; i += 1) {
+        result += String.fromCodePoint(0x1f1e6 + code.charCodeAt(i) - 65);
+    }
+    return result;
+}
+
+function countryName(code) {
+    return COUNTRY_NAMES[code] || code;
+}
+
+function stableHash(text) {
+    // A short, stable suffix for the export file name. The original used
+    // `sha1(time)`; the exact value does not matter, only that two exports do
+    // not overwrite each other while one is still uploading.
+    var hash = 5381;
+    var source = String(text);
+    for (var i = 0; i < source.length; i += 1) {
+        hash = ((hash << 5) + hash + source.charCodeAt(i)) | 0;
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0').slice(0, 7);
+}
+
+function ipCompare(a, b) {
+    // IPv4 sorts numerically; anything else sorts as text after the numbers,
+    // which is what the original's `ipaddress`-then-string fallback did.
+    var pattern = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+    var ma = pattern.exec(a);
+    var mb = pattern.exec(b);
+    if (ma && mb) {
+        for (var i = 1; i <= 4; i += 1) {
+            var da = parseInt(ma[i], 10);
+            var db = parseInt(mb[i], 10);
+            if (da !== db) {
+                return da - db;
+            }
+        }
+        return 0;
+    }
+    if (ma) { return -1; }
+    if (mb) { return 1; }
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+function mtpSortCompare(a, b) {
+    var byAddress = ipCompare(a.addr, b.addr);
+    if (byAddress !== 0) {
+        return byAddress;
+    }
+    if (a.port !== b.port) {
+        return a.port - b.port;
+    }
+    if (a.secret.length !== b.secret.length) {
+        return a.secret.length - b.secret.length;
+    }
+    return a.secret < b.secret ? -1 : (a.secret > b.secret ? 1 : 0);
+}
+
+function socksLine(entry) {
+    var line = "tg://socks?server=" + entry.addr + "&port=" + entry.port;
+    if (entry.user) {
+        line += "&user=" + encodeURIComponent(entry.user);
+    }
+    if (entry.pass) {
+        line += "&pass=" + encodeURIComponent(entry.pass);
+    }
+    return line;
+}
+
+// --- plugin ---------------------------------------------------------------
+
+class ProxyManagerPlugin extends BasePlugin {
+    create_settings() {
+        if (knownProtocols === null) {
+            // First run: the screen offers the one action that fills the rest.
+            // Showing empty protocol switches before the source was read would
+            // look like a source that has nothing in it.
+            return [
+                new Header({ text: "Источник" }),
+                new Selector({
+                    key: "proxy_source",
+                    text: "Источник прокси",
+                    icon: "msg_link",
+                    default: 0,
+                    items: ["GitVerse", "GitHub"],
+                }),
+                new Divider({ text: "Выберите ниже типы прокси, которые хотите получать. Подробную информацию о получаемых прокси и протоколах можно просмотреть на [сайте](https://proxy.akres.xyz), если не открывается — попробуйте [зеркало](https://akres.gitverse.site/proxy)" }),
+                new Header({ text: "Что получать" }),
+                new Text({
+                    text: "Список протоколов и стран",
+                    icon: "msg_retry",
+                    accent: true,
+                    on_click: () => this.fetchStats(),
+                }),
+            ].concat(this.actionsHeader());
+        }
+
+        var items = [
+            new Header({ text: "Источник" }),
+            new Selector({
+                key: "proxy_source",
+                text: "Источник прокси",
+                icon: "msg_link",
+                default: 0,
+                items: ["GitVerse", "GitHub"],
+            }),
+            new Divider({ text: "Выберите ниже типы прокси, которые хотите получать. Подробную информацию о получаемых прокси и протоколах можно просмотреть на [сайте](https://proxy.akres.xyz), если не открывается — попробуйте [зеркало](https://akres.gitverse.site/proxy)" }),
+            new Header({ text: "Что получать" }),
+            new Text({
+                text: "Список протоколов и стран",
+                icon: "msg_retry",
+                accent: true,
+                on_click: () => this.fetchStats(),
+            }),
+            new Switch({
+                key: "filter_enabled",
+                text: "Фильтр",
+                icon: "msg_folders",
+                default: true,
+                on_change: () => this.set_setting("filter_reload", Date.now(), true),
+            }),
+        ];
+
+        if (this.filterOn()) {
+            items.push(new Selector({
+                key: "fetch_mode",
+                text: "Способ получения",
+                icon: "msg_list",
+                default: 0,
+                items: ["Протокол", "Страна"],
+                on_change: () => this.set_setting("fetch_mode_reload", Date.now(), true),
+            }));
+            items = items.concat(this.statsSettings());
+            items.push(new Divider({}));
+        } else {
+            items.push(new Divider({ text: "Без фильтра при получении будут добавлены все доступные прокси." }));
+        }
+
+        return items.concat(this.actionsHeader());
+    }
+
+    actionsHeader() {
+        return [
+            new Header({ text: "Действия" }),
+            new Text({ text: "Получить новый список", icon: "msg_download", on_click: () => this.fetchProxies() }),
+            new Text({ text: "Экспортировать прокси", icon: "msg_share", on_click: () => this.exportProxies() }),
+            new Text({ text: "Удалить все прокси", icon: "msg_delete", red: true, on_click: () => this.confirmDeleteAll() }),
+        ];
+    }
+
+    filterOn() {
+        return knownProtocols !== null && !!this.get_setting("filter_enabled", true);
+    }
+
+    statsSettings() {
+        var items = [];
+        if (this.get_setting("fetch_mode", 0) === 1) {
+            if (!knownCountries || !Object.keys(knownCountries).length) {
+                return [new Text({ text: "В источнике нет данных о странах" })];
+            }
+            items.push(new Header({ text: "Страна" }));
+            var codes = Object.keys(knownCountries);
+            codes.sort((a, b) => {
+                var byCount = knownCountries[b] - knownCountries[a];
+                if (byCount !== 0) {
+                    return byCount;
+                }
+                return countryName(a) < countryName(b) ? -1 : (countryName(a) > countryName(b) ? 1 : 0);
+            });
+            for (var i = 0; i < codes.length; i += 1) {
+                var code = codes[i];
+                items.push(new Switch({
+                    key: "country_" + code,
+                    text: countryFlag(code) + " " + countryName(code) + " (" + knownCountries[code] + ")",
+                    default: false,
+                }));
+            }
+            return items;
+        }
+
+        var lastGroup = null;
+        for (var k = 0; k < PROTOCOL_KEYS.length; k += 1) {
+            var key = PROTOCOL_KEYS[k];
+            var count = knownProtocols[key];
+            if (!count) {
+                continue;
+            }
+            var label = PROTOCOL_LABELS[key];
+            if (label[1] !== lastGroup) {
+                items.push(new Header({ text: label[1] }));
+                lastGroup = label[1];
+            }
+            items.push(new Switch({ key: key, text: label[0] + " (" + count + ")", default: false }));
+        }
+        return items;
+    }
+
+    resetFilters() {
+        var codes = knownCountries || {};
+        for (var code in codes) {
+            if (Object.prototype.hasOwnProperty.call(codes, code)) {
+                this.set_setting("country_" + code, false);
+            }
+        }
+        for (var i = 0; i < PROTOCOL_KEYS.length; i += 1) {
+            this.set_setting(PROTOCOL_KEYS[i], false);
+        }
+    }
+
+    selectionError() {
+        if (!this.filterOn()) {
+            return null;
+        }
+        if (this.get_setting("fetch_mode", 0) === 1) {
+            var codes = Object.keys(knownCountries || {});
+            if (codes.length && !codes.some((code) => this.get_setting("country_" + code, false))) {
+                return "Выберите хотя бы одну страну.";
+            }
+            return null;
+        }
+        var chosen = PROTOCOL_KEYS.some((key) => this.get_setting(key, false));
+        return chosen ? null : "Выберите хотя бы один протокол.";
+    }
+
+    countryAllowed(entry) {
+        if (!this.filterOn() || this.get_setting("fetch_mode", 0) !== 1 || !knownCountries) {
+            return true;
+        }
+        var code = entryCountry(entry);
+        if (!code) {
+            return true;
+        }
+        return !!this.get_setting("country_" + code, false);
+    }
+
+    isAllowed(p) {
+        if (!this.filterOn() || this.get_setting("fetch_mode", 0) === 1) {
+            return true;
+        }
+        var key = protocolKey(p);
+        if (PROTOCOL_KEYS.indexOf(key) < 0) {
+            return true;
+        }
+        return !!this.get_setting(key, false);
+    }
+
+    // Tries the chosen source first, then the other one. Both failing is the
+    // only hard error the plugin reports.
+    loadEntries(callback) {
+        var preferred = this.get_setting("proxy_source", 0) === 1 ? 1 : 0;
+        var order = [preferred, 1 - preferred];
+        var attempt = 0;
+
+        var tryNext = () => {
+            if (attempt >= order.length) {
+                callback(null);
+                return;
+            }
+            var index = order[attempt];
+            attempt += 1;
+            http.get_json(SOURCES[index], { timeout: 8 }, (response) => {
+                if (!response || !response.ok || !response.json) {
+                    this.log("[PS] source " + index + " failed: " + (response && response.error ? response.error : "no data"));
+                    tryNext();
+                    return;
+                }
+                if (!Array.isArray(response.json)) {
+                    this.log("[PS] source " + index + " is not a list");
+                    tryNext();
+                    return;
+                }
+                callback(response.json);
+            });
+        };
+
+        tryNext();
+    }
+
+    fetchStats() {
+        ui.bulletin.show_info("Загружаем списки протоколов и стран…");
+        this.loadEntries((entries) => {
+            if (entries === null) {
+                ui.bulletin.show_error("Не удалось загрузить списки из источника");
+                return;
+            }
+            var countries = {};
+            var protocols = {};
+            for (var i = 0; i < entries.length; i += 1) {
+                var p = parseEntry(entries[i]);
+                if (!p) {
+                    continue;
+                }
+                var key = protocolKey(p);
+                protocols[key] = (protocols[key] || 0) + 1;
+                var country = entryCountry(entries[i]);
+                if (country) {
+                    countries[country] = (countries[country] || 0) + 1;
+                }
+            }
+            if (!Object.keys(protocols).length) {
+                ui.bulletin.show_error("В источнике нет прокси");
+                return;
+            }
+            knownProtocols = protocols;
+            knownCountries = countries;
+            this.resetFilters();
+            this.set_setting("stats_loaded_at", Date.now() / 1000, true);
+        });
+    }
+
+    fetchProxies() {
+        var error = this.selectionError();
+        if (error) {
+            ui.bulletin.show_info(error);
+            return;
+        }
+        ui.bulletin.show_info("Загружаем список прокси…");
+        this.loadEntries((entries) => {
+            if (entries === null) {
+                ui.bulletin.show_error("Не удалось загрузить прокси из всех источников");
+                return;
+            }
+            // A source can list the same server twice; the map keeps the last
+            // copy and the order the source used for everything else.
+            var wanted = {};
+            for (var i = 0; i < entries.length; i += 1) {
+                var p = parseEntry(entries[i]);
+                if (p && this.isAllowed(p) && this.countryAllowed(entries[i])) {
+                    wanted[proxyKey(p)] = buildUri(p);
+                }
+            }
+            var links = Object.keys(wanted).map((key) => wanted[key]);
+            if (!links.length) {
+                ui.bulletin.show_info("Под выбранные фильтры ничего не подошло.");
+                return;
+            }
+            proxy.add(links, (result) => {
+                if (!result || !result.ok) {
+                    ui.bulletin.show_error("Не удалось добавить прокси: " + (result && result.error ? result.error : "unknown error"));
+                    return;
+                }
+                var message = "Добавлено: " + result.added + ". Уже было: " + result.duplicates + ".";
+                if (result.invalid) {
+                    message += " Пропущено: " + result.invalid + ".";
+                }
+                ui.bulletin.show_success(message);
+            });
+        });
+    }
+
+    confirmDeleteAll() {
+        proxy.list((result) => {
+            if (!result || !result.ok) {
+                ui.bulletin.show_error("Не удалось прочитать список прокси");
+                return;
+            }
+            var total = (result.servers || []).length;
+            if (total === 0) {
+                ui.bulletin.show_info("Нет прокси для удаления.");
+                return;
+            }
+            var builder = new AlertDialogBuilder();
+            builder.set_title("Удалить все прокси?");
+            builder.set_message("После нажатия этой кнопки все прокси (" + total + ") будут удалены. Рекомендуется сделать экспорт, если среди них есть нужные вам прокси.");
+            builder.set_positive_button("Удалить", (dialog) => {
+                dialog.dismiss();
+                proxy.remove_all((removed) => {
+                    if (!removed || !removed.ok) {
+                        ui.bulletin.show_error("Не удалось удалить все прокси.");
+                        return;
+                    }
+                    ui.bulletin.show_success("Удалено прокси: " + removed.removed + ".");
+                });
+            });
+            builder.set_negative_button("Отмена", (dialog) => dialog.dismiss());
+            builder.show();
+        });
+    }
+
+    exportProxies() {
+        proxy.list((result) => {
+            if (!result || !result.ok) {
+                ui.bulletin.show_error("Не удалось прочитать список прокси");
+                return;
+            }
+            var servers = result.servers || [];
+            if (!servers.length) {
+                ui.bulletin.show_info("Нет прокси для экспорта.");
+                return;
+            }
+
+            var faketls = [];
+            var padding = [];
+            var web = [];
+            var socks = [];
+            for (var i = 0; i < servers.length; i += 1) {
+                var server = servers[i];
+                if (!server || !server.link) {
+                    continue;
+                }
+                if (server.kind === 'web') {
+                    web.push(server.link);
+                } else if (server.kind === 'socks') {
+                    var parsed = proxy.parse_link(server.link);
+                    socks.push({
+                        addr: server.host,
+                        port: server.port,
+                        secret: "",
+                        user: parsed ? parsed.user : "",
+                        pass: parsed ? parsed.password : "",
+                    });
+                } else {
+                    var secret = this.secretOf(server.link);
+                    var entry = {
+                        addr: server.host,
+                        port: server.port,
+                        secret: secret,
+                        line: server.link,
+                    };
+                    if (secret.toLowerCase().indexOf("ee") === 0) {
+                        faketls.push(entry);
+                    } else {
+                        padding.push(entry);
+                    }
+                }
+            }
+
+            faketls.sort(mtpSortCompare);
+            padding.sort(mtpSortCompare);
+            socks.sort(mtpSortCompare);
+            web.sort();
+
+            var sections = [];
+            if (faketls.length) {
+                sections.push("FakeTLS (MTP):\n" + faketls.map((e) => e.line).join("\n"));
+            }
+            if (padding.length) {
+                sections.push("Padding (MTP):\n" + padding.map((e) => e.line).join("\n"));
+            }
+            if (web.length) {
+                sections.push("WebProxy:\n" + web.join("\n"));
+            }
+            if (socks.length) {
+                sections.push("SOCKS:\n" + socks.map(socksLine).join("\n"));
+            }
+            if (!sections.length) {
+                ui.bulletin.show_error("Не удалось сформировать список.");
+                return;
+            }
+
+            var text = sections.join("\n\n");
+            var total = faketls.length + padding.length + web.length + socks.length;
+            var entities = this.exportEntities(sections, text);
+
+            proxy.own_peer_id((own) => {
+                if (!own || !own.ok) {
+                    ui.bulletin.show_error("Не удалось определить Избранное");
+                    return;
+                }
+                // 4096 UTF-16 units is Telegram's message limit; above it the
+                // export has to go as a file, exactly as the original did.
+                if (text.length <= 4096) {
+                    this.send_message({ peer: own.peer_id, message: text, entities: entities });
+                    ui.bulletin.show_success("Экспортировано " + total + " прокси в Избранное.");
+                    return;
+                }
+                var fileName = "proxy-" + stableHash(String(Date.now())) + ".txt";
+                var path = this.get_plugin_directory() + "/" + fileName;
+                if (!file_utils.write_file(path, text)) {
+                    ui.bulletin.show_error("Не удалось записать файл экспорта");
+                    return;
+                }
+                this.send_document(own.peer_id, path);
+                ui.bulletin.show_success("Экспортировано " + total + " прокси файлом в Избранное.");
+            });
+        });
+    }
+
+    // The secret of an MTProto link, for the FakeTLS/padding split. The host
+    // returns the link rather than the raw secret because the link is what a
+    // plugin re-emits.
+    secretOf(link) {
+        var parsed = proxy.parse_link(link);
+        return parsed && parsed.secret ? parsed.secret : "";
+    }
+
+    // Bold section headers and one collapsed quote around the whole export, the
+    // same two attributes the original attached through `TLRPC`.
+    exportEntities(sections, text) {
+        var entities = [];
+        var offset = 0;
+        for (var i = 0; i < sections.length; i += 1) {
+            var newline = sections[i].indexOf("\n");
+            var bold = new TLRPC.TL_messageEntityBold();
+            bold.offset = offset;
+            bold.length = newline < 0 ? sections[i].length : newline;
+            entities.push(bold);
+            offset += sections[i].length;
+            if (i < sections.length - 1) {
+                offset += 2;
+            }
+        }
+        var quote = new TLRPC.TL_messageEntityBlockquote();
+        quote.offset = 0;
+        quote.length = text.length;
+        quote.collapsed = true;
+        entities.push(quote);
+        return entities;
+    }
+}
+
+var Plugin = ProxyManagerPlugin;

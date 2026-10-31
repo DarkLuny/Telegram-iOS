@@ -40,6 +40,34 @@ function makeHost() {
         selectedAccount: () => 42,
         pluginDirectory: () => '/plugins/demo',
         schedulePlugin: (id, delay, token) => calls.push(['schedulePlugin', id, delay, token]),
+        // The asynchronous bridges: the fake host records the request and keeps
+        // the token, so a test can answer it with `resolveBridge` the way the
+        // real host does after its signal emits.
+        httpGet: (id, url, headers, timeout, token) => {
+            calls.push(['httpGet', id, url, JSON.parse(headers || '{}'), timeout, token]);
+            host.pendingHttp = { token, url };
+            return undefined;
+        },
+        proxyList: (id, token) => {
+            calls.push(['proxyList', id, token]);
+            host.pendingProxyList = { token };
+            return undefined;
+        },
+        proxyAdd: (id, links, token) => {
+            calls.push(['proxyAdd', id, JSON.parse(links || '[]'), token]);
+            host.pendingProxyAdd = { token, links: JSON.parse(links || '[]') };
+            return undefined;
+        },
+        proxyRemoveAll: (id, token) => {
+            calls.push(['proxyRemoveAll', id, token]);
+            host.pendingProxyRemoveAll = { token };
+            return undefined;
+        },
+        ownPeerId: (id, account, token) => {
+            calls.push(['ownPeerId', id, account, token]);
+            host.pendingOwnPeerId = { token, account };
+            return undefined;
+        },
     };
     return host;
 }
@@ -673,6 +701,32 @@ test('alert builder sends roles and tokens, and dismiss closes it', () => {
     void ctx;
 });
 
+test('an alert button listener receives the builder and the button id', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var seen = null;
+        var dismissed = 0;
+        var alert = new AlertDialogBuilder(null)
+            .set_title("T")
+            .set_positive_button("Yes", function (builder, which) {
+                seen = which;
+                dismissed += 1;
+                builder.dismiss();
+            })
+            .show();
+    `, host);
+    const payload = host.calls.find(c => c[0] === 'showAlert')[2];
+    const positive = payload.buttons.find(b => b.role === 'positive');
+    assert.strictEqual(typeof positive.token, 'string');
+    // The token bridge is argument-less; the builder and the id are supplied by
+    // the bootstrap, which is how a ported `lambda dialog, which: ...` works.
+    ctx.__extera.runCallback(positive.token, '[]');
+    assert.strictEqual(ctx.seen, ctx.AlertDialogBuilder.BUTTON_POSITIVE);
+    assert.strictEqual(ctx.dismissed, 1);
+    assert.ok(host.calls.some(c => c[0] === 'dismissAlert' && c[1] === 'demo'));
+});
+
 test('Text rows report click and sub-page support to the renderer', () => {
     const host = makeHost();
     const ctx = runPlugin(`
@@ -925,6 +979,154 @@ test('FilesController registers, rejects duplicates and unregisters', () => {
     assert.strictEqual(ctx.file_utils.FilesController.SUPPORT_ICONS, false);
     // Registering is honest about not intercepting anything on iOS.
     assert.ok(host.calls.some(c => c[0] === 'log' && c[2].includes('cannot intercept')));
+});
+
+test('http.get resolves through a bridge token', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var answered = null;
+        var token = http.get("https://example.com/list.json", { headers: { "X-Test": 1 }, timeout: 5 }, function (response) {
+            answered = response;
+        });
+    `, host);
+    const call = host.calls.find(c => c[0] === 'httpGet');
+    assert.ok(call, 'the request reached the host');
+    assert.strictEqual(call[2], 'https://example.com/list.json');
+    assert.deepStrictEqual(call[3], { 'X-Test': '1' });
+    assert.strictEqual(call[4], 5);
+    assert.strictEqual(call[5], ctx.token);
+    // The host answers exactly as PluginRuntime does.
+    ctx.__extera.resolveBridge(ctx.token, JSON.stringify({ ok: true, status: 200, text: '[]', headers: {} }));
+    // Cross-realm objects have a different prototype, so compare by value.
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.answered)), { ok: true, status: 200, text: '[]', headers: {} });
+});
+
+test('http.get_json parses the body and reports a malformed one', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var good = null;
+        var bad = null;
+        var goodToken = http.get_json("https://example.com/a.json", function (r) { good = r; });
+        var badToken = http.get_json("https://example.com/b.json", function (r) { bad = r; });
+    `, host);
+    ctx.__extera.resolveBridge(ctx.goodToken, JSON.stringify({ ok: true, status: 200, text: '{"servers":[1,2]}' }));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.good.json)), { servers: [1, 2] });
+    ctx.__extera.resolveBridge(ctx.badToken, JSON.stringify({ ok: true, status: 200, text: '<html>' }));
+    assert.strictEqual(ctx.bad.ok, false);
+    assert.ok(ctx.bad.error.includes('not valid JSON'));
+});
+
+test('a failed request reaches the callback without throwing', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var seen = null;
+        http.get("https://example.com/x", function (r) { seen = r; });
+    `, host);
+    ctx.__extera.resolveBridge(host.pendingHttp.token, JSON.stringify({ ok: false, error: 'boom' }));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.seen)), { ok: false, error: 'boom' });
+});
+
+test('a throwing bridge callback is logged, not propagated', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        http.get("https://example.com/x", function () { throw new Error("inner"); });
+    `, host);
+    const token = host.pendingHttp.token;
+    assert.doesNotThrow(() => ctx.__extera.resolveBridge(token, '{"ok":true}'));
+    assert.ok(host.calls.some(c => c[0] === 'log' && c[2].includes('callback error')));
+});
+
+test('proxy helpers forward the list, the links and the own peer id', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var listed = null;
+        var added = null;
+        var removed = null;
+        var own = null;
+        proxy.list(function (r) { listed = r; });
+        proxy.add(["tg://proxy?server=a&port=443&secret=ee01", ""], function (r) { added = r; });
+        proxy.remove_all(function (r) { removed = r; });
+        proxy.own_peer_id(function (r) { own = r; });
+    `, host);
+    ctx.__extera.resolveBridge(host.pendingProxyList.token, JSON.stringify({ ok: true, servers: [] }));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(ctx.listed)), { ok: true, servers: [] });
+    // An empty string is not a link; only the real one is forwarded.
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(host.pendingProxyAdd.links)), ['tg://proxy?server=a&port=443&secret=ee01']);
+    ctx.__extera.resolveBridge(host.pendingProxyAdd.token, JSON.stringify({ ok: true, added: 1, duplicates: 0, invalid: 0 }));
+    assert.strictEqual(ctx.added.added, 1);
+    ctx.__extera.resolveBridge(host.pendingProxyRemoveAll.token, '{"ok":true,"removed":3}');
+    assert.strictEqual(ctx.removed.removed, 3);
+    ctx.__extera.resolveBridge(host.pendingOwnPeerId.token, '{"ok":true,"peer_id":777}');
+    assert.strictEqual(ctx.own.peer_id, 777);
+});
+
+test('proxy.parse_link classifies the three link kinds', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var fake = proxy.parse_link("tg://proxy?server=1.2.3.4&port=443&secret=ee1122");
+        var pad = proxy.parse_link("tg://proxy?server=1.2.3.4&port=443&secret=aabb");
+        var web = proxy.parse_link("tg://webproxy?server=example.com&secret=ee99");
+        var socks = proxy.parse_link("tg://socks?server=5.6.7.8&port=1080&user=u&pass=p");
+        var junk = proxy.parse_link("https://example.com");
+        var keys = [
+            proxy.protocol_key(fake), proxy.protocol_key(pad),
+            proxy.protocol_key(web), proxy.protocol_key(socks)
+        ];
+    `, host);
+    assert.strictEqual(ctx.fake.subtype, 'faketls');
+    assert.strictEqual(ctx.pad.subtype, 'padding');
+    assert.strictEqual(ctx.web.kind, 'web');
+    assert.strictEqual(ctx.web.port, 443);
+    assert.strictEqual(ctx.socks.kind, 'socks');
+    assert.strictEqual(ctx.socks.user, 'u');
+    assert.strictEqual(ctx.junk, null);
+    assert.deepStrictEqual(Array.from(ctx.keys), ['mtproto_faketls', 'mtproto_padding', 'web_websocket', 'socks']);
+});
+
+test('proxy.own_peer_id accepts an explicit account', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {});
+        var seen = null;
+        proxy.own_peer_id(7, function (r) { seen = r; });
+    `, host);
+    assert.strictEqual(host.pendingOwnPeerId.account, 7);
+    ctx.__extera.resolveBridge(host.pendingOwnPeerId.token, '{"ok":true,"peer_id":7}');
+    assert.strictEqual(ctx.seen.peer_id, 7);
+});
+
+test('send_message passes entities a plugin built itself', () => {
+    const host = makeHost();
+    const runPluginWithHost = (source) => runPlugin(source, host);
+    const ctx = runPluginWithHost(`
+        var __plugin_instance__ = __extera.register(class P extends BasePlugin {
+            run(peer) {
+                var bold = new TLRPC.TL_messageEntityBold();
+                bold.offset = 0;
+                bold.length = 4;
+                var quote = new TLRPC.TL_messageEntityBlockquote();
+                quote.offset = 0;
+                quote.length = 10;
+                quote.collapsed = true;
+                this.send_message({ peer: peer, message: "Head\\nBody", entities: [bold, quote] });
+            }
+        });
+        __extera.instance.run(5);
+    `);
+    const call = host.calls.find(c => c[0] === 'sendText');
+    assert.ok(call, 'the message reached the host');
+    const options = call[5];
+    assert.deepStrictEqual(options.entities, [
+        { type: 'bold', offset: 0, length: 4 },
+        { type: 'blockquote', offset: 0, length: 10, collapsed: true },
+    ]);
+    assert.strictEqual(ctx.__extera.instance.get_setting('missing', 1), 1);
 });
 
 let failed = 0;

@@ -257,6 +257,16 @@ private final class PluginActionsImpl: PluginActions {
     var contexts: [Int64: AccountContext] = [:]
     var primaryAccountId: Int64?
 
+    /// In-flight bridge requests, in the order they started.
+    ///
+    /// A bridge answer arrives asynchronously and the signal stops if its
+    /// disposable is released, so every one has to stay alive somewhere. This is
+    /// that place: `startBridge` appends, the `completed:` closure removes. Guarded
+    /// by `bridgeLock` because `ownPeerId` resolves on the main queue while an HTTP
+    /// answer arrives on a session queue.
+    fileprivate var pendingBridges: [MetaDisposable] = []
+    fileprivate let bridgeLock = NSLock()
+
     private func resolve(_ account: Int64?) -> AccountContext? {
         if let account = account, let context = self.contexts[account] {
             return context
@@ -379,6 +389,222 @@ private final class PluginActionsImpl: PluginActions {
                 ),
                 nil
             )
+        }
+    }
+
+    // MARK: - Network and proxy
+    //
+    // These five bridges are the reason a plugin does not need Python: fetching a
+    // subscription, editing the proxy list and finding Saved Messages all live
+    // here, behind one callback token each. Nothing in this section touches the
+    // account manager's queue synchronously: the answer is always delivered by
+    // `resolveBridgeCallback` after the signal emits.
+
+    /// `http_get`: one GET request, resolved into the plugin's callback.
+    ///
+    /// Every non-2xx status and every transport failure comes back as
+    /// `{"ok": false, "error": "..."}` rather than a thrown exception, because a
+    /// plugin's refresh routine usually walks several mirrors and has to report
+    /// which one failed. A `2xx` answer carries the body, the status and the
+    /// lowercased headers.
+    func httpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String) {
+        var headers: [String: String] = [:]
+        if let data = headersJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in object {
+                if let value = value as? String {
+                    headers[key] = value
+                }
+            }
+        }
+
+        self.startBridge { completed in
+            return PluginHttpAccess.get(pluginId: pluginId, url: url, headers: headers, timeout: timeout).start(next: { response in
+                var result: [String: Any] = [
+                    "ok": response.status >= 200 && response.status < 300,
+                    "status": response.status,
+                    "text": String(data: response.body, encoding: .utf8) ?? "",
+                    "headers": response.headers,
+                ]
+                if response.status < 200 || response.status >= 300 {
+                    result["error"] = "HTTP \(response.status)"
+                }
+                PluginManager.shared.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: result)
+            }, error: { failure in
+                PluginManager.shared.resolveBridgeCallback(
+                    pluginId: pluginId,
+                    token: callbackToken,
+                    response: ["ok": false, "error": failure.description]
+                )
+                // A signal that fails never calls `completed:`, and the bridge
+                // handle is released only from that closure. Releasing it here
+                // is what keeps a rejected request (a bad URL, the throttle)
+                // from staying in the in-flight list for the session.
+                completed()
+            }, completed: completed)
+        }
+    }
+
+    /// The proxy list as the app currently holds it.
+    ///
+    /// Each entry is re-serialised as a link instead of raw host/port, so a plugin
+    /// that exports the list produces exactly the `tg://` links the client itself
+    /// would have written. `kind` is derived from the connection so a plugin can
+    /// filter without re-parsing the link.
+    func proxyList(pluginId: String, callbackToken: String) {
+        guard let sharedContext = self.sharedContext else {
+            self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+            return
+        }
+        self.startBridge { completed in
+            return PluginProxyAccess.servers(accountManager: sharedContext.accountManager).start(next: { servers in
+                let entries: [[String: Any]] = servers.map { server in
+                    return [
+                        "link": PluginProxyAccess.link(for: server) ?? "",
+                        "kind": PluginProxyAccess.kind(for: server),
+                        "host": server.host,
+                        "port": Int(server.port),
+                    ]
+                }
+                PluginManager.shared.resolveBridgeCallback(
+                    pluginId: pluginId,
+                    token: callbackToken,
+                    response: ["ok": true, "servers": entries]
+                )
+            }, completed: completed)
+        }
+    }
+
+    /// Adds the links a plugin collected.
+    ///
+    /// Duplicates are counted rather than treated as an error: a subscription that
+    /// refreshes on every launch adds nothing the second time, and the plugin's
+    /// report can say so.
+    func proxyAdd(pluginId: String, linksJSON: String, callbackToken: String) {
+        guard let sharedContext = self.sharedContext else {
+            self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+            return
+        }
+        var links: [String] = []
+        if let data = linksJSON.data(using: .utf8),
+           let list = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            links = list.compactMap { $0 as? String }
+        }
+        self.startBridge { completed in
+            return PluginProxyAccess.add(accountManager: sharedContext.accountManager, links: links).start(next: { result in
+                PluginManager.shared.resolveBridgeCallback(
+                    pluginId: pluginId,
+                    token: callbackToken,
+                    response: [
+                        "ok": true,
+                        "added": result.added,
+                        "duplicates": result.duplicates,
+                        "invalid": result.invalid,
+                    ]
+                )
+            }, completed: completed)
+        }
+    }
+
+    /// Empties the proxy list and reports how many entries were dropped.
+    func proxyRemoveAll(pluginId: String, callbackToken: String) {
+        guard let sharedContext = self.sharedContext else {
+            self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+            return
+        }
+        self.startBridge { completed in
+            return PluginProxyAccess.removeAll(accountManager: sharedContext.accountManager).start(next: { removed in
+                PluginManager.shared.resolveBridgeCallback(
+                    pluginId: pluginId,
+                    token: callbackToken,
+                    response: ["ok": true, "removed": removed]
+                )
+            }, completed: completed)
+        }
+    }
+
+    /// The account's own user id, which is exactly Saved Messages: exporting a
+    /// proxy list to yourself is a send to this peer.
+    func ownPeerId(pluginId: String, account: Int64?, callbackToken: String) {
+        Queue.mainQueue().async {
+            guard let context = self.resolve(account) else {
+                self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+                return
+            }
+            // `account.peerId` is a Postbox `PeerId`; the conversion lives in
+            // TelegramCore so this module stays free of Postbox.
+            PluginManager.shared.resolveBridgeCallback(
+                pluginId: pluginId,
+                token: callbackToken,
+                response: ["ok": true, "peer_id": pluginSavedMessagesPeerId(account: context.account)]
+            )
+        }
+    }
+
+    private func failBridge(pluginId: String, token: String, error: String) {
+        PluginManager.shared.resolveBridgeCallback(
+            pluginId: pluginId,
+            token: token,
+            response: ["ok": false, "error": error]
+        )
+    }
+
+    // MARK: - Bridge lifetime
+    //
+    // `Signal.start` hands back the disposable that keeps the work alive, so
+    // dropping it right after the call would cancel every request before it
+    // finished. Each one is kept here until its signal completes, then released:
+    // a plugin that refreshes on every launch must not accumulate subscriptions.
+
+    /// Starts `body`, retaining the disposable until it completes.
+    ///
+    /// `body` receives the closure it must pass as `completed:`; all the bridge
+    /// signals emit once and then complete, so that is exactly the lifetime of
+    /// one request. A `MetaDisposable` holds the subscription while it runs and
+    /// is removed from the list the moment it finishes.
+    @discardableResult
+    private func startBridge(_ body: (@escaping () -> Void) -> Disposable) -> Disposable {
+        let handle = MetaDisposable()
+        // Registered before the body runs: a signal that fails validation
+        // completes synchronously inside `start`, and the completion path would
+        // then remove a handle that had not been appended yet, leaking it.
+        self.bridgeLock.lock()
+        self.pendingBridges.append(handle)
+        self.bridgeLock.unlock()
+
+        let disposable = body { [weak self, weak handle] in
+            guard let self = self, let handle = handle else {
+                return
+            }
+            self.releaseBridge(handle)
+        }
+        // A handle released by a synchronous completion is already disposed, and
+        // `MetaDisposable.set` disposes the subscription straight away in that
+        // case instead of starting work nobody will collect.
+        handle.set(disposable)
+        return handle
+    }
+
+    private func releaseBridge(_ handle: MetaDisposable) {
+        self.bridgeLock.lock()
+        if let index = self.pendingBridges.firstIndex(where: { $0 === handle }) {
+            self.pendingBridges.remove(at: index)
+        }
+        self.bridgeLock.unlock()
+        handle.dispose()
+    }
+
+    /// Drops every in-flight bridge request.
+    ///
+    /// Called when the runtime goes away; a request whose plugin no longer exists
+    /// has nowhere to deliver its answer.
+    func cancelPendingBridges() {
+        self.bridgeLock.lock()
+        let pending = self.pendingBridges
+        self.pendingBridges = []
+        self.bridgeLock.unlock()
+        for handle in pending {
+            handle.dispose()
         }
     }
 

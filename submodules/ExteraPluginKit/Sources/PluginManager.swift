@@ -211,6 +211,11 @@ public final class PluginManager: PluginHost {
     }
 
     private func unloadAllOnQueue() {
+        // Bridge answers that arrive after this point have no plugin to reach, so
+        // the in-flight requests are dropped first. A plugin that was removed
+        // while a subscription refresh was running must not keep its socket open.
+        self.actions?.cancelPendingBridges()
+
         self.lock.lock()
         let plugins = Array(self.loaded.values)
         self.lock.unlock()
@@ -653,6 +658,46 @@ public final class PluginManager: PluginHost {
         }
     }
 
+    public func pluginHttpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.httpGet(pluginId: pluginId, url: url, headersJSON: headersJSON, timeout: timeout, callbackToken: callbackToken)
+    }
+
+    public func pluginProxyList(pluginId: String, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.proxyList(pluginId: pluginId, callbackToken: callbackToken)
+    }
+
+    public func pluginProxyAdd(pluginId: String, linksJSON: String, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.proxyAdd(pluginId: pluginId, linksJSON: linksJSON, callbackToken: callbackToken)
+    }
+
+    public func pluginProxyRemoveAll(pluginId: String, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.proxyRemoveAll(pluginId: pluginId, callbackToken: callbackToken)
+    }
+
+    public func pluginOwnPeerId(pluginId: String, account: Int64?, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.ownPeerId(pluginId: pluginId, account: account, callbackToken: callbackToken)
+    }
+
     // MARK: - Plugin-visible callbacks
 
     /// Runs a callback the plugin stored under `token`.
@@ -666,6 +711,33 @@ public final class PluginManager: PluginHost {
             return
         }
         _ = self.callJS(plugin: plugin, function: "__extera.runCallback", arguments: [token, "[]"])
+    }
+
+    /// Delivers a resolved value to a plugin's pending bridge callback.
+    ///
+    /// Called from whatever queue the work finished on. `callJS` serializes onto
+    /// the script queue itself, so nothing here has to hop first; a plugin whose
+    /// context was unloaded in the meantime is simply dropped, which is the same
+    /// rule `runScheduled` follows.
+    ///
+    /// These tokens live in a separate map from the bulletin/alert ones: a
+    /// bulletin callback is one-shot and takes no arguments, while a bridge
+    /// callback receives the result object and may be the only thing the plugin
+    /// was waiting for.
+    public func resolveBridgeCallback(pluginId: String, token: String, response: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: response),
+              let text = String(data: data, encoding: .utf8) else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: token, responseJSON: "{\"ok\":false,\"error\":\"the response could not be encoded\"}")
+            return
+        }
+        self.resolveBridgeCallback(pluginId: pluginId, token: token, responseJSON: text)
+    }
+
+    public func resolveBridgeCallback(pluginId: String, token: String, responseJSON: String) {
+        guard let plugin = self.plugin(id: pluginId) else {
+            return
+        }
+        _ = self.callJS(plugin: plugin, function: "__extera.resolveBridge", arguments: [token, responseJSON])
     }
 
     /// Tells every loaded plugin which account the UI has selected.
@@ -1108,4 +1180,30 @@ public protocol PluginActions: AnyObject {
     func selectedAccountId() -> Int64?
     /// `android_utils.copy_to_clipboard`.
     func copyToClipboard(pluginId: String, text: String)
+
+    // Network and proxy. Each answers by calling
+    // `PluginManager.resolveBridgeCallback(pluginId:token:...)` — never
+    // synchronously, and never by blocking the script queue.
+    func httpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String)
+    func proxyList(pluginId: String, callbackToken: String)
+    func proxyAdd(pluginId: String, linksJSON: String, callbackToken: String)
+    func proxyRemoveAll(pluginId: String, callbackToken: String)
+    func ownPeerId(pluginId: String, account: Int64?, callbackToken: String)
+
+    /// Drops every in-flight bridge request.
+    ///
+    /// Declared as a requirement, not only as an extension member, so the call
+    /// reaches the implementation through the existential: a method that exists
+    /// only in an extension is dispatched statically, and the runtime's own
+    /// `cancelPendingBridges` would never run.
+    func cancelPendingBridges()
+}
+
+public extension PluginActions {
+    /// Called before the plugins are unloaded: a request whose plugin no longer
+    /// exists has nowhere to deliver its answer, and keeping the socket open
+    /// would let a removed plugin keep talking to the network. Defaulted so an
+    /// implementation that never starts one does not have to write it.
+    func cancelPendingBridges() {
+    }
 }

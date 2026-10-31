@@ -49,6 +49,7 @@ public enum PluginError: Error, CustomStringConvertible {
     case evaluationFailed(String)
     case noPluginClass
     case runtimeUnavailable
+    case pythonSource
     case notTextFile
     case tooLarge
 
@@ -74,6 +75,8 @@ public enum PluginError: Error, CustomStringConvertible {
             return "plugin failed to load: \(message)"
         case .noPluginClass:
             return "plugin does not register a class extending BasePlugin"
+        case .pythonSource:
+            return "this is a Python exteraGram plugin, not JavaScript. The runtime is JavaScriptCore, so `import`, `def`, and Python class bodies do not run; the plugin has to be ported to JavaScript first."
         case .runtimeUnavailable:
             return "the JavaScript runtime is unavailable"
         }

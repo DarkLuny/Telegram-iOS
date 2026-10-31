@@ -137,6 +137,15 @@ public func enqueuePluginMessage(
     |> ignoreValues
 }
 
+/// The account's own user id, which is also the Saved Messages peer.
+///
+/// A plugin exporting something to itself names that peer by id; `PeerId` is a
+/// Postbox type, so the conversion stays in the engine instead of leaking into
+/// `ExteraPluginKit`.
+public func pluginSavedMessagesPeerId(account: Account) -> Int64 {
+    return account.peerId.toInt64()
+}
+
 /// Edits an existing message's text on behalf of a plugin.
 ///
 /// exteraGram's `edit_message(message_obj, text=...)` reaches into the Android

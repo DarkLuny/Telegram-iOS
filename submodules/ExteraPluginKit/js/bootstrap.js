@@ -25,6 +25,15 @@
  *   __host.copyToClipboard(pluginId, text)
  *   __host.pluginDirectory(pluginId)
  *   __host.schedulePlugin(pluginId, delayMs, token)
+ *   __host.httpGet(pluginId, url, headersJson, timeout, token)
+ *   __host.proxyList(pluginId, token)
+ *   __host.proxyAdd(pluginId, linksJson, token)
+ *   __host.proxyRemoveAll(pluginId, token)
+ *   __host.ownPeerId(pluginId, account, token)
+ *
+ * The last five answer through `__extera.resolveBridge(token, json)` instead of
+ * returning a value, because a socket or a database transaction cannot finish
+ * inside the call.
  *
  * `js/test/bootstrap.test.js` installs a fake `__host` with exactly this shape,
  * so a bridge the bootstrap calls but the test does not provide fails there
@@ -544,6 +553,71 @@ var __extera = (function () {
         return { text: parsed.message, entities: parsed.entities };
     }
 
+    // Maps a `TL_messageEntity*` class name onto the entity type the host knows.
+    //
+    // Java's names are not the lowercase strings the host switches on: `Strike`
+    // is `strikethrough`, `TextUrl` is `text_link`, and `CustomEmoji` is
+    // `custom_emoji`. Doing the mapping here means `explicitEntities` can accept
+    // both a class instance and a plain object without guessing.
+    var ENTITY_TYPES = {
+        Bold: 'bold',
+        Italic: 'italic',
+        Underline: 'underline',
+        Strike: 'strikethrough',
+        Strikethrough: 'strikethrough',
+        Spoiler: 'spoiler',
+        Code: 'code',
+        Pre: 'pre',
+        TextUrl: 'text_link',
+        Blockquote: 'blockquote',
+        CustomEmoji: 'custom_emoji',
+    };
+
+    // Normalises entities a plugin built itself.
+    //
+    // A ported plugin constructs `TLRPC.TL_messageEntityBold`-like objects with
+    // `offset`/`length`/`type`, or plain objects with a `type` string. Both are
+    // mapped onto the shape the host understands, and anything without a usable
+    // type or a positive length is dropped rather than sent as an invalid
+    // attribute.
+    function explicitEntities(value) {
+        if (!value || typeof value.length !== 'number' || value.length === 0) {
+            return null;
+        }
+        var result = [];
+        for (var i = 0; i < value.length; i += 1) {
+            var entity = value[i];
+            if (!entity || typeof entity !== 'object') {
+                continue;
+            }
+            var offset = typeof entity.offset === 'number' ? entity.offset : null;
+            var length = typeof entity['length'] === 'number' ? entity['length'] : null;
+            if (offset === null || length === null || length <= 0 || offset < 0) {
+                continue;
+            }
+            var type = entity.type;
+            if (typeof type !== 'string') {
+                // A class-shaped entity: `TL_messageEntityBold` and friends. The
+                // trailing part of the class name is the only naming convention
+                // both the SDK and this runtime share, and it is mapped through
+                // a table because Java spells two of them differently
+                // (`Strike`, `TextUrl`).
+                var name = (entity.constructor && entity.constructor.name) || '';
+                type = ENTITY_TYPES[name.replace(/^TL_messageEntity/, '')] || '';
+            }
+            if (!type) {
+                continue;
+            }
+            var copy = { type: type, offset: offset, length: length };
+            if (entity.url !== undefined) { copy.url = entity.url; }
+            if (entity.language !== undefined) { copy.language = entity.language; }
+            if (entity.collapsed !== undefined) { copy.collapsed = !!entity.collapsed; }
+            if (entity.document_id !== undefined) { copy.document_id = String(entity.document_id); }
+            result.push(copy);
+        }
+        return result.length > 0 ? result : null;
+    }
+
     // Caption handling for the media helpers: `caption` plus the same
     // `parse_mode` the text helpers take. The result goes back onto the options
     // object as plain text and entities, so the host does not parse a second time.
@@ -593,6 +667,106 @@ var __extera = (function () {
         return JSON.stringify(result);
     }
 
+    // --- asynchronous bridge requests -------------------------------------
+    //
+    // Some host operations cannot answer inline: a socket, a database
+    // transaction, the account's own id. Each of those takes a callback token
+    // instead of returning a value, and the host calls
+    // `__extera.resolveBridge(token, json)` once the answer is ready.
+    //
+    // The tokens live in their own map rather than in `heldCallbacks`: a
+    // bulletin button is one-shot and takes no arguments, while a bridge answer
+    // always arrives with a result object, and the two must not be confused when
+    // a dialog is dismissed while a request is still running.
+
+    var heldBridgeCallbacks = {};
+    var bridgeCounter = 0;
+
+    function holdBridgeCallback(fn) {
+        bridgeCounter += 1;
+        var token = 'b' + bridgeCounter;
+        if (typeof fn === 'function') {
+            heldBridgeCallbacks[token] = fn;
+        }
+        return token;
+    }
+
+    function resolveBridge(token, responseJSON) {
+        var fn = heldBridgeCallbacks[token];
+        if (typeof fn !== 'function') {
+            return null;
+        }
+        delete heldBridgeCallbacks[token];
+        var value;
+        try {
+            value = responseJSON ? JSON.parse(responseJSON) : null;
+        } catch (error) {
+            value = { ok: false, error: 'the host sent a response that is not JSON' };
+        }
+        try {
+            fn(value);
+        } catch (error) {
+            // A throw inside a plugin callback must not escape into the host's
+            // stack: it would be reported as a failure of the bridge instead of
+            // as a failure of the plugin's own code.
+            bridgeMissing('log')(pluginId, 'callback error: ' + error);
+        }
+        return null;
+    }
+
+    function requestHttp(url, options, callback) {
+        options = options || {};
+        var token = holdBridgeCallback(callback);
+        var headers = {};
+        var source = options.headers || {};
+        for (var key in source) {
+            if (Object.prototype.hasOwnProperty.call(source, key)) {
+                headers[key] = String(source[key]);
+            }
+        }
+        bridgeMissing('httpGet')(
+            pluginId,
+            String(url),
+            JSON.stringify(headers),
+            typeof options.timeout === 'number' ? options.timeout : 0,
+            token
+        );
+        return token;
+    }
+
+    function requestProxyList(callback) {
+        var token = holdBridgeCallback(callback);
+        bridgeMissing('proxyList')(pluginId, token);
+        return token;
+    }
+
+    function requestProxyAdd(links, callback) {
+        var token = holdBridgeCallback(callback);
+        var list = [];
+        for (var i = 0; i < (links || []).length; i += 1) {
+            if (typeof links[i] === 'string' && links[i]) {
+                list.push(links[i]);
+            }
+        }
+        bridgeMissing('proxyAdd')(pluginId, JSON.stringify(list), token);
+        return token;
+    }
+
+    function requestProxyRemoveAll(callback) {
+        var token = holdBridgeCallback(callback);
+        bridgeMissing('proxyRemoveAll')(pluginId, token);
+        return token;
+    }
+
+    function requestOwnPeerId(account, callback) {
+        var token = holdBridgeCallback(callback);
+        var value = currentAccount(account);
+        // Swift reads the account as a `Double` and treats a non-finite value as
+        // "whichever account the runtime picks".
+        bridgeMissing('ownPeerId')(pluginId, typeof value === 'number' ? value : NaN, token);
+        return token;
+    }
+
     // --- ui.alert ---------------------------------------------------------
     //
     // `AlertDialogBuilder` is a builder in exteraGram: setters accumulate state,
@@ -626,7 +800,13 @@ var __extera = (function () {
     function addButton(self, role, text, listener) {
         self._buttons[role] = {
             text: String(text),
-            token: holdCallback(listener),
+            // exteraGram calls the listener as `listener(builder, which)`, where
+            // `which` is one of the `BUTTON_*` constants, and the builder is how
+            // a plugin calls `dismiss()` from inside it. Neither can cross the
+            // token bridge, which is argument-less, so both are supplied here.
+            token: holdCallback(typeof listener === 'function' ? function () {
+                return listener(self, AlertDialogBuilder['BUTTON_' + role.toUpperCase()]);
+            } : null),
         };
         return self;
     }
@@ -644,7 +824,14 @@ var __extera = (function () {
         for (var i = 0; i < (items || []).length; i += 1) {
             list.push(String(items[i]));
         }
-        this._items = { values: list, token: holdCallback(listener) };
+        // The item listener is `listener(builder, index)`, like the button ones.
+        var self = this;
+        this._items = {
+            values: list,
+            token: holdCallback(typeof listener === 'function' ? function () {
+                return listener(self, arguments.length > 0 ? arguments[0] : 0);
+            } : null),
+        };
         return this;
     };
     AlertDialogBuilder.prototype.set_positive_button = function (text, listener) {
@@ -1125,7 +1312,11 @@ var __extera = (function () {
                 return;
             }
             var payload = prepareText(params.message, options);
-            options.entities = payload.entities;
+            // `entities` is what a ported plugin builds itself when it wants
+            // formatting the parser cannot express — a bold section header, a
+            // collapsed blockquote. exteraGram accepts them in the same dict, so
+            // they take precedence over whatever `parse_mode` produced.
+            options.entities = explicitEntities(params.entities) || payload.entities;
             bridgeMissing('sendText')(
                 pluginId,
                 currentAccount(options.account),
@@ -1705,6 +1896,16 @@ var __extera = (function () {
         },
         holdCallback: holdCallback,
         runCallback: runCallback,
+        // Asynchronous bridge requests. A plugin-facing helper below calls the
+        // `request*` form, which stores the callback under a token and returns
+        // it; the host answers with `resolveBridge`.
+        holdBridge: holdBridgeCallback,
+        resolveBridge: resolveBridge,
+        requestHttp: requestHttp,
+        requestProxyList: requestProxyList,
+        requestProxyAdd: requestProxyAdd,
+        requestProxyRemoveAll: requestProxyRemoveAll,
+        requestOwnPeerId: requestOwnPeerId,
         parseText: parseText,
         // A `file_utils` call. The host answers with a JSON document, so the
         // value arrives with its real type (`true`, `null`, `["a"]`) instead of
@@ -1802,6 +2003,11 @@ var Input = __extera.api.Input;
 var EditText = __extera.api.EditText;
 var Text = __extera.api.Text;
 var Custom = __extera.api.Custom;
+// A plugin that confirms an action builds an `AlertDialogBuilder` directly rather
+// than going through `ui.alert`; it is exported the same way the settings
+// controls are, so both `new AlertDialogBuilder(...)` and
+// `ui.alert.AlertDialogBuilder(...)` reach the one implementation.
+var AlertDialogBuilder = __extera.api.AlertDialogBuilder;
 
 // `ui.settings`, `client_utils`, `hook_utils` and `android_utils` are Python
 // modules in exteraGram. Here they are plain objects so a ported plugin can keep
@@ -2034,6 +2240,186 @@ function NotificationCenterDelegate() {
 }
 client_utils.NotificationCenterDelegate = NotificationCenterDelegate;
 
+// --- http ----------------------------------------------------------------
+//
+// exteraGram plugins read the network through Python's `urllib`, which cannot
+// exist here. This is the replacement: one GET request, answered through a
+// callback. It is deliberately callback-shaped rather than returning a value,
+// because the script queue must never block on a socket — a plugin that did
+// would freeze every other plugin and the hook it ran from.
+//
+// The host reports transport failures as `{ok: false, error: "..."}` instead of
+// throwing, so a plugin's refresh routine can try the next mirror without a
+// try/catch around every call. A non-2xx status is also `ok: false`, with the
+// status and body still present: a 404 body often explains the failure.
+var http = {
+    get: function (url, options, callback) {
+        if (typeof options === 'function') {
+            callback = options;
+            options = {};
+        }
+        return __extera.requestHttp(url, options || {}, callback);
+    },
+
+    // Same request, with the body parsed as JSON. The parse happens here so a
+    // plugin that fetched a subscription gets an object, and a malformed body is
+    // reported as an error rather than as a string it has to test.
+    get_json: function (url, options, callback) {
+        if (typeof options === 'function') {
+            callback = options;
+            options = {};
+        }
+        return __extera.requestHttp(url, options || {}, function (response) {
+            if (!response || !response.ok) {
+                callback(response || { ok: false, error: 'no response' });
+                return;
+            }
+            var value;
+            try {
+                value = JSON.parse(response.text);
+            } catch (error) {
+                callback({
+                    ok: false,
+                    status: response.status,
+                    error: 'the response is not valid JSON: ' + error.message,
+                    text: response.text,
+                });
+                return;
+            }
+            response.json = value;
+            callback(response);
+        });
+    },
+
+    // No POST bridge: the host only exposes a read. Saying so is better than a
+    // request that silently goes out as a GET.
+    post: function (url, body, options, callback) {
+        __extera.log('http.post is not available on iOS; only http.get is');
+        var cb = typeof options === 'function' ? options : callback;
+        if (typeof cb === 'function') {
+            cb({ ok: false, error: 'http.post is not available on iOS' });
+        }
+        return null;
+    },
+};
+
+// --- proxy ---------------------------------------------------------------
+//
+// Reading and editing the client's proxy list. exteraGram's plugins do this
+// through Java reflection into `SharedConfig` and exteraGram's own
+// `ProxyController`; here it is four host calls, one per operation.
+//
+// `list` answers with `{ok, servers: [{link, kind, host, port}]}` where `kind`
+// is `mtproto`, `web` or `socks`. `add` takes links, not objects, so a plugin
+// can pass exactly what it fetched.
+var proxy = {
+    list: function (callback) {
+        return __extera.requestProxyList(callback);
+    },
+
+    add: function (links, callback) {
+        return __extera.requestProxyAdd(links, callback);
+    },
+
+    // The whole list, not the active server: a plugin that offers "remove all"
+    // means the list the user sees in settings.
+    remove_all: function (callback) {
+        return __extera.requestProxyRemoveAll(callback);
+    },
+
+    own_peer_id: function (account, callback) {
+        if (typeof account === 'function') {
+            callback = account;
+            account = undefined;
+        }
+        return __extera.requestOwnPeerId(account, callback);
+    },
+
+    // Parses a link without touching the host. A subscription is filtered before
+    // it is added, and this is what decides whether an entry is MTProto, a Web
+    // proxy or SOCKS, and whether it is FakeTLS.
+    parse_link: function (link) {
+        var text = String(link === undefined || link === null ? '' : link).trim();
+        var match = /^tg:\/\/(proxy|socks|webproxy)\?(.*)$/i.exec(text);
+        if (!match) {
+            return null;
+        }
+        var kind = match[1].toLowerCase();
+        var query = {};
+        match[2].split('&').forEach(function (pair) {
+            if (!pair) {
+                return;
+            }
+            var eq = pair.indexOf('=');
+            var key = eq < 0 ? pair : pair.slice(0, eq);
+            var value = eq < 0 ? '' : pair.slice(eq + 1);
+            query[decodeURIComponent(key).toLowerCase()] = decodeURIComponent(value.replace(/\+/g, ' '));
+        });
+        var server = query.server || '';
+        if (!server) {
+            return null;
+        }
+        if (kind === 'webproxy') {
+            return {
+                kind: 'web',
+                host: server,
+                port: 443,
+                secret: query.secret || '',
+                link: text,
+            };
+        }
+        var port = parseInt(query.port, 10);
+        if (!isFinite(port) || port <= 0) {
+            return null;
+        }
+        var result = {
+            kind: kind === 'socks' ? 'socks' : 'mtproto',
+            host: server,
+            port: port,
+            secret: query.secret || '',
+            link: text,
+        };
+        if (result.kind === 'socks') {
+            result.user = query.user || '';
+            result.password = query.pass || '';
+        } else {
+            // `ee` marks a FakeTLS secret; everything else is padding.
+            result.subtype = result.secret.toLowerCase().indexOf('ee') === 0 ? 'faketls' : 'padding';
+        }
+        return result;
+    },
+
+    // The protocol key a settings switch is stored under, so a ported plugin's
+    // filter keys keep their names.
+    protocol_key: function (entry) {
+        if (!entry) {
+            return null;
+        }
+        if (entry.kind === 'web') {
+            return 'web_websocket';
+        }
+        if (entry.kind === 'socks') {
+            return 'socks';
+        }
+        return 'mtproto_' + (entry.subtype || 'padding');
+    },
+};
+
+// `client_utils` reaches the same two modules, because a ported plugin imports
+// its helpers from either place.
+client_utils.http_get = function (url, options, callback) {
+    return http.get(url, options, callback);
+};
+client_utils.http_get_json = function (url, options, callback) {
+    return http.get_json(url, options, callback);
+};
+client_utils.proxy_list = function (callback) {
+    return proxy.list(callback);
+};
+client_utils.get_own_peer_id = function (account, callback) {
+    return proxy.own_peer_id(account, callback);
+};
+
 // --- file_utils ----------------------------------------------------------
 //
 // Directories follow iOS: the plugin's own folder, and the app's Documents and
@@ -2259,4 +2645,49 @@ var extera_utils = {
             return function (self, value) { if (self) { self[name] = value; } };
         },
     },
+};
+
+// --- TLRPC ---------------------------------------------------------------
+//
+// Message entities are the one Java type a plugin legitimately builds: an export
+// that wants bold section headers or a collapsed quote constructs
+// `TLRPC.TL_messageEntityBold` and sets `offset`/`length` on it. There is no
+// `TLRPC` here, but the classes are plain records, so they are reproduced as
+// such. `send_message` reads `offset`/`length`/`type` off whatever it is given,
+// which is exactly what these carry.
+//
+// The rest of `TLRPC` is request and update types. A plugin that builds one is
+// talking to the MTProto layer directly, which this runtime does not expose, so
+// any other member is absent and the plugin fails at the point it reaches for
+// it instead of somewhere unrelated.
+function messageEntityClass(name, extras) {
+    var Entity = function () {
+        this.offset = 0;
+        this.length = 0;
+        if (extras) {
+            for (var key in extras) {
+                if (Object.prototype.hasOwnProperty.call(extras, key)) {
+                    this[key] = extras[key];
+                }
+            }
+        }
+    };
+    // The name is what `explicitEntities` reads when an entity carries no
+    // explicit `type`, so it has to survive minification-free evaluation.
+    Object.defineProperty(Entity, 'name', { value: 'TL_messageEntity' + name });
+    return Entity;
+}
+
+var TLRPC = {
+    TL_messageEntityBold: messageEntityClass('Bold'),
+    TL_messageEntityItalic: messageEntityClass('Italic'),
+    TL_messageEntityUnderline: messageEntityClass('Underline'),
+    TL_messageEntityStrike: messageEntityClass('Strike'),
+    TL_messageEntityStrikethrough: messageEntityClass('Strike'),
+    TL_messageEntitySpoiler: messageEntityClass('Spoiler'),
+    TL_messageEntityCode: messageEntityClass('Code'),
+    TL_messageEntityPre: messageEntityClass('Pre', { language: '' }),
+    TL_messageEntityTextUrl: messageEntityClass('TextUrl', { url: '' }),
+    TL_messageEntityBlockquote: messageEntityClass('Blockquote', { collapsed: false }),
+    TL_messageEntityCustomEmoji: messageEntityClass('CustomEmoji', { document_id: '0' }),
 };
