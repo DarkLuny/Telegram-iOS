@@ -164,7 +164,7 @@ public enum PluginProxyAccess {
     }
 
     private static func hexData(_ value: String) -> Data? {
-        var text = value.hasPrefix("0x") ? String(value.dropFirst(2)) : value
+        let text = value.hasPrefix("0x") ? String(value.dropFirst(2)) : value
         guard text.count % 2 == 0, !text.isEmpty else {
             return nil
         }

@@ -34,8 +34,8 @@ public protocol PluginHost: AnyObject {
     func pluginCopyToClipboard(pluginId: String, text: String)
     func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String)
 
-    // Network and proxy. Both are asynchronous: the answer is delivered by
-    // calling `__extera.runCallback(token, json)` once the work finishes, so a
+    // Network and proxy. All five are asynchronous: the answer is delivered by
+    // calling `__extera.resolveBridge(token, json)` once the work finishes, so a
     // plugin never blocks the script queue waiting for a socket or a database
     // transaction. exteraGram's plugins reach these through Python's `urllib`
     // and Java reflection; here they are explicit host calls.
