@@ -277,7 +277,9 @@ test('loading never downloads the dex and says why once', () => {
     const writes = state.calls.filter((c) => c[0] === 'fileOp' && (c[2] === 'write_bytes' || c[2] === 'write_text'));
     assert.deepStrictEqual(writes, [], 'no cache file is written');
     const text = logText(state);
-    assert.ok(text.includes('needs Dalvik'), text);
+    // The wording describes what the module is, not a failure: iOS has no
+    // Dalvik, so this line explains why nothing is downloaded.
+    assert.ok(text.includes('Dalvik module'), text);
     assert.ok(text.includes('Not downloading'), text);
 });
 

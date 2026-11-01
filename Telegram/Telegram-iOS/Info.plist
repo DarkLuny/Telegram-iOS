@@ -369,6 +369,44 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.source-code</string>
+				<string>public.text</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>ExteraGram Plugin</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.telegram.Telegram-iOS.extera-plugin</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>plugin</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/javascript</string>
+					<string>text/javascript</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>ExteraGram Plugin</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.telegram.Telegram-iOS.extera-plugin</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

@@ -72,29 +72,36 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
         case .pluginsHeader:
             return ItemListSectionHeaderItem(presentationData: presentationData, text: "Plugins", sectionId: self.section)
         case let .plugin(_, summary):
-            var label = "v\(summary.version)"
+            // The row is the switch and the way in at the same time, which is
+            // what exteraGram's list does: the checkbox turns the plugin on and
+            // off without opening anything, and a tap anywhere else opens its
+            // settings. `ItemListSwitchItem` reports those two gestures
+            // separately (`updated` for the switch, `action` for the row).
+            var detail = "v\(summary.version)"
             if !summary.author.isEmpty {
-                label = "\(summary.author) · \(label)"
+                detail = "\(summary.author) · \(detail)"
             }
             // A plugin that is enabled but failed to load must not look like a
             // working one: the row says so and carries the reason as its detail.
             if summary.isEnabled && !summary.isLoaded {
-                label = "Failed"
+                detail = "Failed to load"
             } else if !summary.isEnabled {
-                label = "Off"
+                detail = detail.isEmpty ? "Off" : "Off · \(detail)"
             }
-            let subtitle: String? = summary.isEnabled ? summary.loadError : nil
-            return ItemListDisclosureItem(
+            if summary.isEnabled, let loadError = summary.loadError {
+                detail = loadError
+            }
+            return ItemListSwitchItem(
                 presentationData: presentationData,
                 systemStyle: .glass,
                 title: summary.name,
-                enabled: true,
-                label: label,
-                labelStyle: .text,
-                additionalDetailLabel: subtitle,
+                text: detail,
+                value: summary.isEnabled,
                 sectionId: self.section,
                 style: .blocks,
-                disclosureStyle: .arrow,
+                updated: { value in
+                    arguments.setPluginEnabled(summary.id, value)
+                },
                 action: {
                     arguments.openPlugin(summary.id)
                 }
@@ -141,15 +148,17 @@ private final class PluginsControllerArguments {
     let openPlugin: (String) -> Void
     let openLog: () -> Void
     let installPlugin: () -> Void
+    let setPluginEnabled: (String, Bool) -> Void
     /// The signal that builds the rows captures these arguments, so the plugin
     /// manager's change notifications keep rebuilding the list while the screen
     /// is open. `deinit` unsubscribes once the controller is gone.
     private let changesDisposable: Disposable
 
-    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, installPlugin: @escaping () -> Void, changesDisposable: Disposable) {
+    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, installPlugin: @escaping () -> Void, setPluginEnabled: @escaping (String, Bool) -> Void, changesDisposable: Disposable) {
         self.openPlugin = openPlugin
         self.openLog = openLog
         self.installPlugin = installPlugin
+        self.setPluginEnabled = setPluginEnabled
         self.changesDisposable = changesDisposable
     }
 
@@ -175,6 +184,16 @@ private func pluginsControllerEntries(installed: [PluginManager.PluginSummary]) 
     return entries
 }
 
+/// Holds the controller whose navigation stack plugin screens are pushed onto.
+///
+/// The arguments are built before their controller (the controller's state
+/// closure captures them), so "open this plugin" has nowhere to look for the
+/// stack at that point. Weak, because the controller owns the list that owns
+/// the arguments.
+private final class PluginsControllerHost {
+    weak var controller: ViewController?
+}
+
 /// Entry point for the settings row.
 public func pluginsController(context: AccountContext) -> ViewController {
     let manager = PluginManager.shared
@@ -190,12 +209,13 @@ public func pluginsController(context: AccountContext) -> ViewController {
         statePromise.set(stateValue.with { $0 })
     })
 
+    let host = PluginsControllerHost()
     let arguments = PluginsControllerArguments(
         openPlugin: { pluginId in
-            context.sharedContext.presentGlobalController(pluginSettingsController(context: context, pluginId: pluginId), nil)
+            pushPluginController(context: context, from: host, controller: pluginSettingsController(context: context, pluginId: pluginId))
         },
         openLog: {
-            context.sharedContext.presentGlobalController(pluginLogController(context: context), nil)
+            pushPluginController(context: context, from: host, controller: pluginLogController(context: context))
         },
         installPlugin: {
             // The importer outlives this closure: `UIDocumentPickerViewController`
@@ -212,6 +232,10 @@ public func pluginsController(context: AccountContext) -> ViewController {
                 }
             })
             importer.present(sharedContext: context.sharedContext)
+        },
+        setPluginEnabled: { pluginId, enabled in
+            PluginStore.shared.setEnabled(enabled, pluginId: pluginId)
+            PluginManager.shared.reloadPlugins()
         },
         changesDisposable: changesDisposable
     )
@@ -241,7 +265,30 @@ public func pluginsController(context: AccountContext) -> ViewController {
     // The screen opens as a pushed settings page, so it inherits the back button
     // rather than presenting as a modal.
     let controller = ItemListController(context: context, state: signal)
+    host.controller = controller
     return controller
+}
+
+/// Forwards a plugin screen onto the navigation stack the manager was opened in.
+///
+/// This is what gives the plugin screen and the log viewer a back button. They
+/// used to be handed to `presentGlobalController`, which adds them to the
+/// window's overlay layer. An overlay has no `UINavigationController` above it:
+/// `ItemListController` drew its title but `backNavigationButton` had nowhere to
+/// go, and the swipe-back gesture is absent there too, so the only way out was
+/// to kill the app.
+///
+/// Pushing onto the controller that opened the row keeps the stack intact, so
+/// the back button, the swipe and the theme behave exactly as on every other
+/// settings page. The overlay stays as a fallback for the case where the manager
+/// is on screen without a stack (nothing else presents it, but a plugin can).
+private func pushPluginController(context: AccountContext, from host: PluginsControllerHost, controller: ViewController) {
+    controller.navigationPresentation = .modal
+    if let container = host.controller, container.navigationController is NavigationController {
+        container.push(controller)
+    } else {
+        context.sharedContext.presentGlobalController(controller, nil)
+    }
 }
 
 // MARK: - One plugin's settings
@@ -252,7 +299,6 @@ private enum PluginSettingsSection: Int32 {
 }
 
 private enum PluginSettingsEntry: ItemListNodeEntry {
-    case enabled(Bool)
     case header(index: Int, text: String)
     case note(index: Int, text: String)
     case toggle(index: Int, key: String, title: String, subtitle: String?, value: Bool)
@@ -267,9 +313,9 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
     case remove
 
     // `ItemListController` walks the entries in order and expects sections never
-    // to go backwards, and `stableId` alone decides that order. The enable switch
-    // therefore belongs to the first section, like every control row; only the
-    // two action buttons sit in the trailing one.
+    // to go backwards, and `stableId` alone decides that order. Every control row
+    // is in the first section; only the two action buttons sit in the trailing
+    // one.
     var section: ItemListSectionId {
         switch self {
         case .reload, .remove:
@@ -281,8 +327,6 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
 
     var stableId: Int32 {
         switch self {
-        case .enabled:
-            return 0
         case let .header(index, _), let .note(index, _), let .toggle(index, _, _, _, _),
              let .selector(index, _, _, _, _), let .input(index, _, _, _, _, _, _),
              let .action(index, _, _, _, _, _, _), let .subPage(index, _, _, _):
@@ -303,18 +347,6 @@ private enum PluginSettingsEntry: ItemListNodeEntry {
     func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
         let arguments = arguments as! PluginSettingsControllerArguments
         switch self {
-        case let .enabled(value):
-            return ItemListSwitchItem(
-                presentationData: presentationData,
-                systemStyle: .glass,
-                title: "Enabled",
-                value: value,
-                sectionId: self.section,
-                style: .blocks,
-                updated: { value in
-                    arguments.setEnabled(value)
-                }
-            )
         case let .header(_, text):
             return ItemListSectionHeaderItem(presentationData: presentationData, text: text, sectionId: self.section)
         case let .note(_, text):
@@ -430,7 +462,6 @@ private final class PluginSettingsControllerArguments {
     let presentSelector: (String, String) -> Void
     let clickRow: (String, Bool) -> Void
     let openSubPage: (String, String) -> Void
-    let setEnabled: (Bool) -> Void
     let reload: () -> Void
     let remove: () -> Void
 
@@ -439,7 +470,6 @@ private final class PluginSettingsControllerArguments {
         presentSelector: @escaping (String, String) -> Void,
         clickRow: @escaping (String, Bool) -> Void,
         openSubPage: @escaping (String, String) -> Void,
-        setEnabled: @escaping (Bool) -> Void,
         reload: @escaping () -> Void,
         remove: @escaping () -> Void
     ) {
@@ -447,7 +477,6 @@ private final class PluginSettingsControllerArguments {
         self.presentSelector = presentSelector
         self.clickRow = clickRow
         self.openSubPage = openSubPage
-        self.setEnabled = setEnabled
         self.reload = reload
         self.remove = remove
     }
@@ -537,9 +566,8 @@ private func pluginControlEntries(controls: [PluginManager.SettingsControl], sta
     return entries
 }
 
-private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], isEnabled: Bool, loadError: String?) -> [PluginSettingsEntry] {
+private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], loadError: String?) -> [PluginSettingsEntry] {
     var entries: [PluginSettingsEntry] = []
-    entries.append(.enabled(isEnabled))
     if let loadError = loadError {
         // A plugin that did not load has no settings to show, and saying only
         // "This plugin has no settings" would hide the real reason.
@@ -609,11 +637,6 @@ private func pluginSettingsArguments(context: AccountContext, pluginId: String, 
         openSubPage: { key, title in
             host.controller?.push(pluginSubSettingsController(context: context, pluginId: pluginId, parentKey: key, title: title))
         },
-        setEnabled: { enabled in
-            store.setEnabled(enabled, pluginId: pluginId)
-            manager.reloadPlugins()
-            bump()
-        },
         reload: {
             manager.reloadPlugins()
             bump()
@@ -628,7 +651,6 @@ private func pluginSettingsArguments(context: AccountContext, pluginId: String, 
 
 public func pluginSettingsController(context: AccountContext, pluginId: String) -> ViewController {
     let manager = PluginManager.shared
-    let store = PluginStore.shared
     let statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
     let stateValue = Atomic(value: Int32(0))
 
@@ -661,7 +683,6 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
             presentationData: ItemListPresentationData(presentationData),
             entries: pluginSettingsEntries(
                 controls: manager.settings(for: pluginId),
-                isEnabled: store.isEnabled(pluginId),
                 loadError: summary?.loadError
             ),
             style: .blocks,

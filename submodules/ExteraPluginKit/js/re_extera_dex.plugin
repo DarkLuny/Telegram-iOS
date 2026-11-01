@@ -69,12 +69,16 @@ var STRINGS = {
         open_settings_sub: "Модуль re:extera — это dex-код для Android. iOS его не исполняет; кнопка проверит, есть ли сборка под вашу версию Telegram.",
         checking: "Проверяем версию re:extera…",
         found: "Для Telegram {0} есть сборка re:extera: код {1}.",
-        found_fallback: "Для Telegram {0} отдельной сборки нет. Есть более старая: {1}, код {2}.",
-        none: "В actual.json нет ни одной сборки, подходящей для Telegram {0}.",
+        // The wording says what is true: iOS does not run dex at all, so this is
+        // information about upstream, not a failure of the plugin. The previous
+        // text read like an error ("отдельной сборки нет"), which made a working
+        // plugin look broken.
+        found_fallback: "Сборок re:extera для iOS не бывает: модуль — это dex для Android. Для Telegram {0} ближайшая версия re:extera — {1}, код {2}. Устанавливать её не нужно и некуда.",
+        none: "Для Telegram {0} в списке re:extera нет ни одной сборки.",
         failed: "Не удалось прочитать список версий re:extera: {0}",
-        no_version: "Версия приложения неизвестна, проверить сборку нельзя.",
+        no_version: "Версия приложения неизвестна, поэтому версию re:extera сверить не с чем.",
         cache_found: "В кэше лежит {0} (байт: {1}), но iOS не может исполнить dex.",
-        android_only: "re:extera требует Dalvik; на iOS модуль не загружается.",
+        android_only: "re:extera — модуль на Dalvik. iOS его не исполняет, поэтому плагин только сообщает сведения о версиях.",
         unloaded: "re:extera: плагин выгружен."
     },
     en: {
@@ -82,12 +86,12 @@ var STRINGS = {
         open_settings_sub: "The re:extera module is dex code for Android. iOS cannot execute it; this button checks whether a build exists for your Telegram version.",
         checking: "Checking the re:extera version…",
         found: "Telegram {0} has a re:extera build: code {1}.",
-        found_fallback: "There is no build for Telegram {0}. The newest older one is {1}, code {2}.",
-        none: "actual.json lists no build that fits Telegram {0}.",
+        found_fallback: "There are no re:extera builds for iOS: the module is Android dex. For Telegram {0} the closest re:extera version is {1}, code {2}. There is nothing to install here.",
+        none: "The re:extera list has no build for Telegram {0}.",
         failed: "Could not read the re:extera version list: {0}",
-        no_version: "The app version is unknown, so the build cannot be checked.",
+        no_version: "The app version is unknown, so there is nothing to compare the re:extera version against.",
         cache_found: "A cache holds {0} ({1} bytes), but iOS cannot execute dex.",
-        android_only: "re:extera needs Dalvik; the module does not load on iOS.",
+        android_only: "re:extera is a Dalvik module. iOS does not run it, so this plugin only reports version information.",
         unloaded: "re:extera: plugin unloaded."
     }
 };

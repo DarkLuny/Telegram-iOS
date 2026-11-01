@@ -27,6 +27,7 @@ import StoryContainerScreen
 import WallpaperGalleryScreen
 import BrowserUI
 import PeerMessagesMediaPlaylist
+import ExteraPluginKit
 
 func openChatMessageImpl(_ params: OpenChatMessageParams) -> Bool {
     var story: TelegramMediaStory?
@@ -233,6 +234,21 @@ func openChatMessageImpl(_ params: OpenChatMessageParams) -> Bool {
             case let .document(file, immediateShare):
                 params.dismissInput()
                 let presentationData = params.context.sharedContext.currentPresentationData.with { $0 }
+                // A `.plugin` file is not something to preview: it is a plugin to
+                // install. Handling it here means the tap in a chat goes straight
+                // to the same confirmation the document picker uses, instead of
+                // opening the JavaScript source in a text viewer.
+                //
+                // The document is not necessarily downloaded yet — tapping a file
+                // in a chat normally starts the download and then opens it, so a
+                // plugin that is still in the cloud would silently fall through to
+                // the stock viewer. `PluginFileInstaller` accepts a resource and
+                // fetches it when there is no completed path yet.
+                if !immediateShare, PluginFileInstaller.canInstall(fileName: file.fileName, mimeType: file.mimeType) {
+                    let url = params.context.engine.resources.completedResourcePath(id: EngineMediaResource.Id(file.resource.id)).map { URL(fileURLWithPath: $0) }
+                    PluginFileInstaller.present(file: file, context: params.context, existingURL: url)
+                    return true
+                }
                 if immediateShare {
                     let controller = params.context.sharedContext.makeShareScreen(context: params.context, params: ShareControllerParams(subject: .media(.standalone(media: file), nil), immediateExternalShare: true))
                     params.present(controller, nil, .window(.root))

@@ -1,10 +1,16 @@
 load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
 
-# bootstrap.js is the plugin-visible API (BasePlugin, HookResult, ui.settings,
-# ...). It is written as JavaScript so it can be unit-tested with node, and
-# converted to a Swift string literal at build time so the binary carries it as
-# a resource-free constant. Hand-escaping it into Swift would be a second copy
-# to keep in sync, which is exactly the bug this avoids.
+# The bootstrap is the plugin-visible API (BasePlugin, HookResult,
+# ui.settings, ...). It is written as JavaScript so it can be unit-tested with
+# node, and converted to a Swift string literal at build time so the binary
+# carries it as a resource-free constant. Hand-escaping it into Swift would be a
+# second copy to keep in sync, which is exactly the bug this avoids.
+#
+# The plugins themselves are deliberately *not* embedded: a plugin is installed
+# by the user from a `.plugin` file (opened from a chat, or picked in the plugin
+# screen), exactly as on exteraGram. Shipping them inside the binary made them
+# impossible to remove, and made the IPA the update channel for code the user
+# did not ask for.
 genrule(
     name = "PluginBootstrapSource",
     srcs = [
@@ -20,35 +26,6 @@ genrule(
     visibility = ["//visibility:public"],
 )
 
-# The ported plugins ship inside the app, embedded the same way as the bootstrap:
-# one source file, tested with node, carried as a Swift literal. Without this a
-# sideload build would install with no plugins at all, because iOS gives the app
-# no folder the user can drop a file into.
-#
-# Each file is named explicitly and `$(locations ...)` passes every staged path:
-# Bazel stages declared inputs flat, so the `js/` directory they sit in during a
-# build is not the one in the repository.
-filegroup(
-    name = "plugin_sources",
-    srcs = glob(["js/*.plugin"]),
-)
-
-genrule(
-    name = "PluginBundledSources",
-    srcs = [
-        ":plugin_sources",
-        "generate_bootstrap.py",
-        "generate_bundled_plugins.py",
-    ],
-    outs = ["PluginBundledSources.swift"],
-    cmd = """
-        python3 $(location generate_bundled_plugins.py) \\
-            $(locations :plugin_sources) \\
-            --out=$(OUTS)
-    """,
-    visibility = ["//visibility:public"],
-)
-
 swift_library(
     name = "ExteraPluginKit",
     module_name = "ExteraPluginKit",
@@ -56,7 +33,6 @@ swift_library(
         "Sources/**/*.swift",
     ]) + [
         ":PluginBootstrap.swift",
-        ":PluginBundledSources.swift",
     ],
     copts = [
         "-warnings-as-errors",

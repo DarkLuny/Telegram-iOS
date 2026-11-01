@@ -2637,6 +2637,17 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
     }
     
     func handleOpenURL(_ url: URL) {
+        // A plugin shared into the app arrives as a file URL. It has to be
+        // handled before `openUrl`, which would hand it to the in-app browser and
+        // show the JavaScript source as text.
+        if PluginFileInstaller.canInstall(url: url) {
+            let _ = (self.sharedContextPromise.get()
+            |> take(1)
+            |> deliverOnMainQueue).start(next: { sharedApplicationContext in
+                PluginFileInstaller.present(url: url, sharedContext: sharedApplicationContext.sharedContext)
+            })
+            return
+        }
         guard self.openUrlInProgress != url else {
             return
         }

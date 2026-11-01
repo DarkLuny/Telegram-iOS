@@ -152,20 +152,6 @@ public final class PluginManager: PluginHost {
         let loader = PluginLoader(bootstrapSource: bootstrapSource, host: self)
         let appVersion = self.bundleAppVersion
 
-        // The plugins that ship with the app are written out before anything is
-        // read, so a fresh install has all seven without the user having to pick
-        // files. Ids come from each source's own `__id__`, read here because
-        // installation has to happen before the loader exists for that file.
-        for source in bundledPluginSources {
-            // The id comes from the source's own `__id__`. A source without one
-            // is written under a placeholder so the loader can report why it is
-            // unusable instead of it vanishing from the list.
-            let pluginId = loader.manifestIdentifier(in: source) ?? "plugin"
-            if self.store.installBundled(pluginId: pluginId, source: source) {
-                self.pluginLog(pluginId: pluginId, text: "installed bundled plugin")
-            }
-        }
-
         var prepared: [LoadedPlugin] = []
         self.lock.lock()
         self.failures.removeAll()
@@ -232,6 +218,21 @@ public final class PluginManager: PluginHost {
             }
             self.lock.unlock()
             self.callLifecycle(plugin, "on_plugin_load")
+        }
+
+        // The theme, the peer-name palette and the settings rows were all built
+        // before this point: plugin scripts are evaluated after the first frame,
+        // and `applyPluginThemeOverride` read `nil` from every plugin that had not
+        // loaded yet. Without asking for one rebuild here, a colour plugin only
+        // takes effect at the next settings change, which reads as "the plugin
+        // does not work".
+        //
+        // Sent only when something actually loaded, so a build with no plugins
+        // does not repaint the interface for nothing.
+        if !prepared.isEmpty {
+            Queue.mainQueue().async {
+                PluginHookPoints.shared.notifyAppearanceChanged()
+            }
         }
     }
 
