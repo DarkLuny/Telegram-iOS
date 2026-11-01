@@ -346,6 +346,13 @@ ReExteraPlugin.prototype.on_plugin_load = function () {
     }
 
     this.log("Init " + __version__);
+    // One line that answers "is the store writable at all": a path of `null`
+    // means `get_plugin_directory()` failed and nothing can be saved, and a path
+    // the sandbox refuses shows up as a failed write on the first message.
+    var storePath = this.storePath();
+    this.log("Store " + (storePath === null ? "unavailable" : storePath)
+        + ", save deleted " + (this.saveRemoteDeletionsEnabled() ? "on" : "off")
+        + ", save own " + (this.saveOwnDeletionsEnabled() ? "on" : "off"));
     try {
         this.load();
     } catch (error) {
@@ -471,6 +478,17 @@ ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited) {
     // spellings are accepted so a saved entry is the same whichever path
     // produced it, and the panel reads one field.
     var rawText = message.text !== undefined ? message.text : message.message;
+    // A store that stays empty has three possible causes — no update reached the
+    // plugin, the switch was read as off, or the write failed — and one line per
+    // message would tell them apart, but also flood the log in a busy chat. The
+    // first few are enough for that, and the load line states the switch values.
+    if (this._storeLogged === undefined) {
+        this._storeLogged = 0;
+    }
+    if (this._storeLogged < 5) {
+        this._storeLogged += 1;
+        this.log("Storing " + peerId + " #" + messageId + (edited ? " (edit)" : ""));
+    }
     var mediaKind = message.media_kind;
     if (mediaKind === undefined && message.media !== undefined && message.media !== null) {
         mediaKind = typeof message.media === "object" ? String(message.media._ || "none") : String(message.media);
@@ -548,6 +566,18 @@ ReExteraPlugin.prototype.processDeletedMessages = function (account, messageIds,
     var peer = (peerId === undefined || peerId === null) ? null : Number(peerId);
     if (peer === 0) {
         peer = null;
+    }
+    // Logged at the one place a delete is applied: when a saved message is not
+    // marked deleted, the log shows which ids arrived and which peer they were
+    // matched against, so an id-space problem is visible without a debugger.
+    // Capped like the storing lines, because a channel difference can name
+    // hundreds of ids in one batch.
+    if (this._deleteLogged === undefined) {
+        this._deleteLogged = 0;
+    }
+    if (this._deleteLogged < 5) {
+        this._deleteLogged += 1;
+        this.log("Delete " + messageIds.join(",") + (peer === null ? " (global ids)" : " peer " + peer));
     }
     var matches = function (entry) {
         if (peer !== null && Number(entry.peer_id) !== peer) {
