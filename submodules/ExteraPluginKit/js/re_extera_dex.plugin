@@ -16,9 +16,9 @@
  *   - `fetch_version_info` — reads `actual.json`, picks the entry for the running
  *     Telegram build, and falls back to the closest build at or below it, exactly
  *     like the original (exact match, then "newest key that is <= current").
- *   - A settings row that runs that lookup and reports the answer, so a user
- *     learns whether upstream even ships a build for this client instead of
- *     staring at a switch that does nothing.
+ *   - A settings row that says what the module is. It is a label, not a button:
+ *     a tap that answered "there is nothing to install" read as a failure, and
+ *     the same answer is already in the log after every load.
  *
  * What it deliberately does not do:
  *
@@ -65,15 +65,12 @@ var CACHE_FILE = "cached.dat";
 
 var STRINGS = {
     ru: {
-        open_settings: "Настройки re:extera",
-        open_settings_sub: "Модуль re:extera — это dex-код для Android. iOS его не исполняет; кнопка проверит, есть ли сборка под вашу версию Telegram.",
-        checking: "Проверяем версию re:extera…",
+        open_settings: "Модуль re:extera",
+        // Deliberately short and factual. The row is a caption, not a button, so
+        // this text is all a user ever sees here; it must not read as a failure.
+        open_settings_sub: "Это dex-код для Android. iOS его не исполняет — сведения о версиях плагин пишет в лог.",
         found: "Для Telegram {0} есть сборка re:extera: код {1}.",
-        // The wording says what is true: iOS does not run dex at all, so this is
-        // information about upstream, not a failure of the plugin. The previous
-        // text read like an error ("отдельной сборки нет"), which made a working
-        // plugin look broken.
-        found_fallback: "Сборок re:extera для iOS не бывает: модуль — это dex для Android. Для Telegram {0} ближайшая версия re:extera — {1}, код {2}. Устанавливать её не нужно и некуда.",
+        found_fallback: "Для Telegram {0} ближайшая версия re:extera — {1}, код {2}. Запустить dex на iOS нельзя.",
         none: "Для Telegram {0} в списке re:extera нет ни одной сборки.",
         failed: "Не удалось прочитать список версий re:extera: {0}",
         no_version: "Версия приложения неизвестна, поэтому версию re:extera сверить не с чем.",
@@ -82,11 +79,10 @@ var STRINGS = {
         unloaded: "re:extera: плагин выгружен."
     },
     en: {
-        open_settings: "re:extera Settings",
-        open_settings_sub: "The re:extera module is dex code for Android. iOS cannot execute it; this button checks whether a build exists for your Telegram version.",
-        checking: "Checking the re:extera version…",
+        open_settings: "re:extera module",
+        open_settings_sub: "This is dex code for Android. iOS cannot execute it; the plugin writes version details to the log.",
         found: "Telegram {0} has a re:extera build: code {1}.",
-        found_fallback: "There are no re:extera builds for iOS: the module is Android dex. For Telegram {0} the closest re:extera version is {1}, code {2}. There is nothing to install here.",
+        found_fallback: "For Telegram {0} the closest re:extera version is {1}, code {2}. Dex cannot run on iOS.",
         none: "The re:extera list has no build for Telegram {0}.",
         failed: "Could not read the re:extera version list: {0}",
         no_version: "The app version is unknown, so there is nothing to compare the re:extera version against.",
@@ -445,47 +441,49 @@ ReExteraPlugin.prototype.on_plugin_unload = function () {
 
 ReExteraPlugin.prototype.create_settings = function () {
     var key = "open_settings";
-    var self = this;
     return [
+        // A caption, not a button. The original opened the module's own screen on
+        // tap; there is no such screen here, and a tap that only answered "there
+        // is nothing to install" read as the plugin being broken. The version
+        // lookup still runs on load and writes its answer to the log, which is
+        // where a user debugging a plugin looks anyway.
         Text({
             key: key,
             text: this.localized_open_settings(),
             subtext: t("open_settings_sub"),
-            icon: "extera_outline",
-            on_click: function () {
-                self.open_settings();
-            }
+            icon: "extera_outline"
         })
     ];
 };
 
-// The row the original used to open the module's own screen. There is no such
-// screen here, so the same tap answers the question the module existed for: does
-// upstream ship a build for the client that is running?
+// The original opened the module's own screen here. There is no such screen, and
+// nothing taps this any more (the settings row is a caption), but a ported caller
+// may still reach it: it answers in the log, where a version question belongs,
+// instead of in a bulletin that reads like an error.
 ReExteraPlugin.prototype.open_settings = function () {
     var loader = this.loader;
     if (!loader) {
         return;
     }
-    ui.bulletin.show_info(t("checking"));
+    this.log("Opening settings: the re:extera module has no settings screen on iOS");
     loader.fetch_version_info(function (info, error) {
         if (error) {
-            ui.bulletin.show_error(t("failed", error));
+            loader.log(t("failed", error));
             return;
         }
         var appVersion = loader.get_app_version();
         if (appVersion === null) {
-            ui.bulletin.show_error(t("no_version"));
+            loader.log(t("no_version"));
             return;
         }
         if (!info) {
-            ui.bulletin.show_info(t("none", appVersion));
+            loader.log(t("none", appVersion));
             return;
         }
         if (info.exact) {
-            ui.bulletin.show_info(t("found", appVersion, info.code));
+            loader.log(t("found", appVersion, info.code));
         } else {
-            ui.bulletin.show_info(t("found_fallback", appVersion, info.key, info.code));
+            loader.log(t("found_fallback", appVersion, info.key, info.code));
         }
         if (info.link) {
             loader.downloadUrl = info.link;

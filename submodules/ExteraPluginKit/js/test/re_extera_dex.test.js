@@ -142,6 +142,12 @@ function clickSettingsRow(ctx) {
     ctx.__extera.invokeSettingCallback(row.key, 'click', 'null');
 }
 
+// The row is a caption, so nothing taps it any more. `open_settings` still exists
+// because a ported caller may reach it, and this is what such a caller does.
+function callOpenSettings(ctx) {
+    ctx.__extera.instance.open_settings();
+}
+
 function logText(state) {
     return state.calls.filter((c) => c[0] === 'log').map((c) => String(c[2])).join('\n');
 }
@@ -234,37 +240,48 @@ test('a failing version list reports the transport error, not a crash', () => {
     assert.ok(logText(state).includes('Error fetching version info'));
 });
 
-test('the settings row is one text row with a translated label', () => {
+test('the settings row is one caption with a translated label', () => {
     const state = makeHost();
     const ctx = load(state, 'en-US');
     const rows = settingsOf(ctx);
     assert.strictEqual(rows.length, 1);
     assert.strictEqual(rows[0].type, 'text');
     assert.strictEqual(rows[0].key, 'open_settings');
-    assert.strictEqual(rows[0].text, 're:extera Settings');
+    assert.strictEqual(rows[0].text, 're:extera module');
+    // A caption, not a button: a tap has nothing to do here for the module's own
+    // screen, and the row only explains what the module is.
+    assert.strictEqual(rows[0].has_click, false);
+    assert.ok(rows[0].subtext.includes('dex'), rows[0].subtext);
 
     const ru = makeHost();
     const ruCtx = load(ru, 'ru-RU');
-    assert.strictEqual(settingsOf(ruCtx)[0].text, 'Настройки re:extera');
+    assert.strictEqual(settingsOf(ruCtx)[0].text, 'Модуль re:extera');
 });
 
-test('a tap on the row reports the matching build, which the module itself cannot show', () => {
+test('tapping the row shows no bulletin; the lookup writes to the log instead', () => {
     const state = makeHost();
     const ctx = load(state, 'en-US');
+    const before = state.bulletins.length;
     clickSettingsRow(ctx);
-    const texts = state.bulletins.map((b) => b.text).join(' | ');
-    assert.ok(state.bulletins.some((b) => b.kind === 'info' && b.text.includes('Checking')));
-    assert.ok(texts.includes('13.1.1'), texts);
-    assert.ok(texts.includes('13110'), texts);
+    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
+    callOpenSettings(ctx);
+    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
+    const text = logText(state);
+    assert.ok(text.includes('has no settings screen'), text);
+    assert.ok(text.includes('13.1.1'), text);
+    assert.ok(text.includes('13110'), text);
 });
 
-test('a tap on the row with no build for this version says so instead of linking', () => {
+test('a lookup with no build for this version logs that instead of bridging a bulletin', () => {
     const state = makeHost({ appVersion: '11.0.0' });
     const ctx = load(state, 'en-US');
+    const before = state.bulletins.length;
     clickSettingsRow(ctx);
-    const texts = state.bulletins.map((b) => b.text).join(' | ');
-    assert.ok(texts.includes('11.0.0'), texts);
-    assert.ok(texts.includes('no build'), texts);
+    callOpenSettings(ctx);
+    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
+    const text = logText(state);
+    assert.ok(text.includes('11.0.0'), text);
+    assert.ok(text.includes('no build'), text);
 });
 
 test('loading never downloads the dex and says why once', () => {
@@ -308,9 +325,10 @@ test('start_from_bytes and show_settings answer without pretending', () => {
 test('an unknown app version is reported instead of guessed', () => {
     const state = makeHost({ appVersion: 'Unknown' });
     const ctx = load(state, 'en-US');
-    clickSettingsRow(ctx);
-    const texts = state.bulletins.map((b) => b.text).join(' | ');
-    assert.ok(texts.includes('unknown'), texts);
+    callOpenSettings(ctx);
+    assert.deepStrictEqual(state.bulletins, [], JSON.stringify(state.bulletins));
+    const text = logText(state);
+    assert.ok(text.includes('unknown'), text);
 });
 
 test('unloading stops the loader and logs it', () => {
