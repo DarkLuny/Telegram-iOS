@@ -1869,6 +1869,54 @@ plist_fragment(
             </dict>
         </dict>
     </array>
+    <!--
+        The `.plugin` type is ours, so it is declared as exported rather than
+        imported: an imported declaration would claim someone else defined it,
+        which contradicts the `Owner` rank below. Without any declaration the
+        system treats the extension as an unknown file, and neither sharing one
+        into the app nor opening it from Files reaches the installer.
+    -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.source-code</string>
+                <string>public.text</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>ExteraGram Plugin</string>
+            <key>UTTypeIdentifier</key>
+            <string>org.telegram.Telegram-iOS.extera-plugin</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>plugin</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/javascript</string>
+                    <string>text/javascript</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>ExteraGram Plugin</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.telegram.Telegram-iOS.extera-plugin</string>
+            </array>
+        </dict>
+    </array>
     <key>CADisableMinimumFrameDurationOnPhone</key>
     <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
