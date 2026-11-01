@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import JavaScriptCore
 import SwiftSignalKit
 // The appearance hooks' value types (`PluginInsertionAnimation`,
@@ -630,7 +631,21 @@ public final class PluginManager: PluginHost {
     }
 
     public func pluginSettings(pluginId: String) -> [String: Any] {
-        return self.store.settings(for: pluginId)
+        var values = self.store.settings(for: pluginId)
+        // A switch is stored as a `CFBoolean`, which arrives here as an
+        // `NSNumber`. JavaScriptCore turns an `NSNumber` into a JavaScript
+        // *number*, so `get_setting("hide_gallery", false)` answered `1` and a
+        // plugin written the usual way — `=== true`, or exteraGram's own
+        // `bool(get_setting(...))` on the Android side, where Python returned a
+        // real `bool` — saw a value that was not `true`. Converting here, at the
+        // one funnel every `get_setting` call goes through, gives a script the
+        // boolean it expects without each plugin having to coerce.
+        for (key, value) in values {
+            if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+                values[key] = number.boolValue
+            }
+        }
+        return values
     }
 
     public func pluginSetSetting(pluginId: String, key: String, value: Any?, reload: Bool) {
