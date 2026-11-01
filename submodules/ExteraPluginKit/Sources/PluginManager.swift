@@ -158,6 +158,19 @@ public final class PluginManager: PluginHost {
         guard let bootstrapSource = self.pluginSource else {
             return
         }
+        // A build from before the plugins became files wrote its own copies into
+        // the plugins directory and recorded them under a key this build does not
+        // use. Nothing updates those copies any more, so a fixed plugin kept
+        // running its old script after an update — which is exactly what the
+        // report about a stale bulletin was. They are dropped before anything is
+        // read, so not one hook can be answered by a copy the user did not
+        // install.
+        let removedLegacy = self.store.removeLegacyBundledPlugins()
+        if !removedLegacy.isEmpty {
+            for pluginId in removedLegacy {
+                self.pluginLog(pluginId: pluginId, text: "removed a copy written by an older build; install the .plugin again if you want it")
+            }
+        }
         let loader = PluginLoader(bootstrapSource: bootstrapSource, host: self)
         let appVersion = self.bundleAppVersion
 
