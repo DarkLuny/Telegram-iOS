@@ -455,7 +455,7 @@ ReExteraPlugin.prototype.saveOwnDeletionsEnabled = function () {
 // message can be looked up by `(peer, id)` without building a compound key, and
 // so the file stays readable. The list is capped: a chat left open for months
 // must not grow the file without bound.
-ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited) {
+ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited, deleted) {
     var message = messageJSON;
     if (typeof messageJSON === "string") {
         try {
@@ -521,8 +521,25 @@ ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited) {
     }
     for (var j = 0; j < store.deleted_keys.length; j += 1) {
         if (store.deleted_keys[j].peer_id === peerId && store.deleted_keys[j].id === messageId) {
+            // Already saved. When this call *is* the deletion — the message had
+            // arrived as `updateNewMessage` earlier and is now being erased — the
+            // existing entry has to be marked, or the sample would stay listed as
+            // a live message. `rememberMessage` is not called twice for a plain
+            // sighting of the same message, so this cannot mark a live one.
+            if (deleted && !store.deleted_keys[j].deleted) {
+                store.deleted_keys[j].deleted = true;
+                return this.writeStore();
+            }
             return false;
         }
+    }
+    // Saved because it was deleted, so the entry is already marked. The delete
+    // update and the state replay that follows it arrive as two separate steps:
+    // `updateDeleteMessages` fires first, when the store is still empty, and the
+    // message itself only arrives with the replay. Without this the entry would
+    // look like an ordinary message that merely happens to be in the file.
+    if (deleted) {
+        entry.deleted = true;
     }
     store.deleted_keys.push(entry);
     if (store.deleted_keys.length > STORE_LIMIT) {
@@ -612,27 +629,31 @@ ReExteraPlugin.prototype.processDeletedMessages = function (account, messageIds,
 // `on_messages_will_be_deleted` — the iOS equivalent of the module's
 // `DeleteMessages` / `MarkMessagesAsDeletedInternal` hooks.
 //
-// The server announces its own deletes with `updateDeleteMessages`, which is
-// handled in `on_update_hook` below. A delete the user performs himself is
-// different: the client asks the server, the server answers with
-// `affectedMessages`, and the client drops the row locally, so no update ever
-// arrives. The message also never came through `updateNewMessage` — sending it
-// from this device answers `updateShortSentMessage`, of which only the `pts` is
-// applied. Both halves are therefore missing, and this hook is the only place
-// where they still exist together: right before the delete, while the message is
-// in the store.
+// A delete the *server* performs arrives as `updateDeleteMessages`, but that
+// update carries ids only, and in a private chat the ids are the client's global
+// ones. The message is frequently absent from the plugin's own store too: it came
+// from history rather than from `updateNewMessage`. The host therefore reads each
+// message out of its database at the instant of deletion and hands it over here
+// with `remote` set, which is what the Android module did as well.
 //
-// The module stored the message in this hook (`putDeletedMessage`) and marked it
-// deleted afterwards; here the message arrives already described by
-// `pluginMessageDetailsJSON`, so it is saved as-is. The list is capped like the
-// update path, and duplicates are ignored, so a message the client deletes twice
-// — or one that also arrived as `updateNewMessage` — keeps one entry.
+// A delete the user performs himself is a different path: the client asks the
+// server, the server answers with `affectedMessages`, and the row is dropped
+// locally, so `updateDeleteMessages` never arrives. That path comes here without
+// `remote`. The two are separate switches in the module ("Сохранять удаленные
+// сообщения" and "Сохранять сообщения удаленные вручную") and stay separate here.
+//
+// The list is capped like the update path, and duplicates are ignored, so a
+// message the client deletes twice — or one that also arrived as
+// `updateNewMessage` — keeps one entry.
 ReExteraPlugin.prototype.on_messages_will_be_deleted = function (account, payload) {
-    if (!this.saveOwnDeletionsEnabled()) {
-        return;
-    }
     var messages = payload && payload.messages;
     if (!Array.isArray(messages) || messages.length === 0) {
+        return;
+    }
+    // `remote` is the server's delete, which the first switch covers. Anything
+    // without it is the user's own delete, which only the second switch keeps.
+    var remote = payload.remote === true;
+    if (remote ? !this.saveRemoteDeletionsEnabled() : !this.saveOwnDeletionsEnabled()) {
         return;
     }
     for (var i = 0; i < messages.length; i += 1) {
@@ -640,7 +661,9 @@ ReExteraPlugin.prototype.on_messages_will_be_deleted = function (account, payloa
         if (!message || typeof message !== "object") {
             continue;
         }
-        this.rememberMessage(message, false);
+        // Already a deletion, so the entry is written marked: the message is
+        // being removed and this is the only copy that will exist.
+        this.rememberMessage(message, false, true);
     }
 };
 

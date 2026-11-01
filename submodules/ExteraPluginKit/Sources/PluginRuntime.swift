@@ -236,7 +236,11 @@ public final class PluginRuntime {
             guard manager.hasLoadedPlugins else {
                 return false
             }
-            return manager.hasMessagesWillBeDeletedHook()
+            // Read from the flag `loadAllOnQueue` warms once per load, not from
+            // `hasPluginForHook`: the account state asks this on its own queue
+            // right before opening a postbox transaction, and running script
+            // there would block every database reader behind plugin code.
+            return manager.messagesWillBeDeletedHookCached
         }
 
         hooks.messagesWillBeDeleted = { accountId, messagesJSON in

@@ -777,6 +777,104 @@ test('a TL message keeps its direction and drops a null author', () => {
     assert.strictEqual(store.deleted_keys[0].sender_id, 0, 'no author means no sender, not peer 0');
 });
 
+test('the host can hand over a remotely deleted message it read from the database', () => {
+    // The real failure on device: the delete update named only global ids, and
+    // the message had never arrived as `updateNewMessage` because it came from
+    // history. Nothing was stored, so nothing could be marked. The host now reads
+    // the message at the moment of deletion and marks the payload `remote`.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{
+            id: 830636,
+            peer_id: 4242,
+            date: 1700000200,
+            text: 'rescued from the database',
+            sender_id: 4242,
+            is_out: false,
+            media_kind: 'none',
+        }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.strictEqual(state.written.length, 1, 'the remote switch covers it');
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].id, 830636);
+    assert.strictEqual(store.deleted_keys[0].text, 'rescued from the database');
+});
+
+test('a remote delete is ignored while only the own-deletion switch is on', () => {
+    // `remote` must pick the first switch, not the second: the two cover
+    // different deletes and the module kept them apart.
+    const state = makeHost({ settings: { re_extera_save_manually_deleted: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id: 5, peer_id: 6, date: 7, text: 'not kept', is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.deepStrictEqual(state.written, []);
+});
+
+test('a local delete is ignored while only the remote switch is on', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        messages: [{ id: 5, peer_id: 6, date: 7, text: 'not kept', is_out: true, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.deepStrictEqual(state.written, []);
+});
+
+test('a message first seen alive and then deleted is marked, not duplicated', () => {
+    // The common order: `updateNewMessage` stores the message, then the delete
+    // arrives. It must flip the existing entry rather than add a second row — and
+    // a live sighting must not be able to mark anything, which is why the flag is
+    // only honoured on the deletion path.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    const message = { _: 'message', id: 500, peer_id: { _: 'peerUser', user_id: 600 }, message: 'bye', date: 1700000500 };
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message }), JSON.stringify({
+        name: 'updateNewMessage', account: 900, field: 'update',
+    }));
+    let store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.deleted_keys[0].deleted, undefined, 'alive first');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id: 500, peer_id: 600, date: 1700000500, text: 'bye', is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.deleted_keys.length, 1, 'one row, not two');
+    assert.strictEqual(store.deleted_keys[0].deleted, true);
+});
+
+test('a message saved at the moment of deletion is already marked deleted', () => {
+    // Two steps produce one fact. The delete arrives first, when the store is
+    // still empty; the message itself is read from the database in the state
+    // replay that follows. An entry written here must therefore be marked, or the
+    // list would show it as a message that was merely seen.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id: 300, peer_id: 400, date: 1700000300, text: 'gone', is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].deleted, true, 'saved because it was deleted');
+});
+
+test('a message saved from an update is not marked deleted', () => {
+    // The other direction: an ordinary message must not be marked, or the list
+    // would call every message deleted.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 301, peer_id: { _: 'peerUser', user_id: 400 }, message: 'alive', date: 1700000301 },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].deleted, undefined);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try {

@@ -38,6 +38,10 @@ public final class PluginManager: PluginHost {
     /// from `on_plugin_load`, and at that point it is not in `loaded` yet.
     private var pendingHooks: [String: (requests: [String], substrings: [String], wantsSend: Bool)] = [:]
 
+    /// Cached answer to "does any plugin implement `on_messages_will_be_deleted`".
+    /// See `messagesWillBeDeletedHookAvailable`.
+    private var cachedMessagesWillBeDeletedHook: Bool?
+
     /// Why a plugin on disk did not load, keyed by id. Kept so the list screen can
     /// say so instead of showing the plugin as merely disabled.
     private var failures: [String: String] = [:]
@@ -243,6 +247,12 @@ public final class PluginManager: PluginHost {
             self.callLifecycle(plugin, "on_plugin_load")
         }
 
+        // A newly loaded plugin may implement `on_messages_will_be_deleted`, and
+        // the cached answer was computed before it existed. Computed here, on the
+        // script queue, so the account state never has to run script itself.
+        self.invalidateHookCaches()
+        _ = self.messagesWillBeDeletedHookAvailable()
+
         // The theme, the peer-name palette and the settings rows were all built
         // before this point: plugin scripts are evaluated after the first frame,
         // and `applyPluginThemeOverride` read `nil` from every plugin that had not
@@ -278,6 +288,7 @@ public final class PluginManager: PluginHost {
         self.lock.lock()
         self.loaded.removeAll()
         self.menuItems.removeAll()
+        self.cachedMessagesWillBeDeletedHook = nil
         self.lock.unlock()
     }
 
@@ -394,7 +405,9 @@ public final class PluginManager: PluginHost {
     /// Asked once per delete before any message is described; see
     /// `PluginHookPoints.wantsMessagesWillBeDeleted`.
     public func hasMessagesWillBeDeletedHook() -> Bool {
-        return self.hasPluginForHook("on_messages_will_be_deleted")
+        // Cached: the local delete path asks this before opening a transaction,
+        // and the answer must not run script on that queue.
+        return self.messagesWillBeDeletedHookCached
     }
 
     /// Mirror of `on_send_message_hook`. Runs for every plugin that asked for it.
@@ -1195,6 +1208,44 @@ public final class PluginManager: PluginHost {
             }
         }
         return false
+    }
+
+    /// Whether a plugin implements `on_messages_will_be_deleted`, answered without
+    /// touching a `JSContext`.
+    ///
+    /// The account state asks this before opening a transaction for a batch that
+    /// may carry a delete. Running script there would block every database reader
+    /// — and this queue — behind plugin code, so the answer is a plain cached
+    /// read. It is warmed while the script queue is held (see `loadAllOnQueue`),
+    /// which is why the first batch already sees a real answer.
+    public var messagesWillBeDeletedHookCached: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.cachedMessagesWillBeDeletedHook ?? false
+    }
+
+    /// The uncached form, which runs plugin JavaScript. Must only be called from
+    /// the script queue, where the call is inline rather than a queue hop.
+    public func messagesWillBeDeletedHookAvailable() -> Bool {
+        self.lock.lock()
+        if let cached = self.cachedMessagesWillBeDeletedHook {
+            self.lock.unlock()
+            return cached
+        }
+        self.lock.unlock()
+        let answer = self.hasPluginForHook("on_messages_will_be_deleted")
+        self.lock.lock()
+        self.cachedMessagesWillBeDeletedHook = answer
+        self.lock.unlock()
+        return answer
+    }
+
+    /// Forgets the cached answer above. Called whenever the loaded set changes,
+    /// because a plugin that defines the callback may have arrived or gone.
+    private func invalidateHookCaches() {
+        self.lock.lock()
+        self.cachedMessagesWillBeDeletedHook = nil
+        self.lock.unlock()
     }
 
     /// Extra rows for the message-details screen, in plugin and item order.

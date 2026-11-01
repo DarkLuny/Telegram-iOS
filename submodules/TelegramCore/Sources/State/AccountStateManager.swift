@@ -744,6 +744,10 @@ public final class AccountStateManager {
                 let auxiliaryMethods = self.auxiliaryMethods
                 let events = channelOperationsContext.events
                 let messagesRemovedContext = self.messagesRemovedContext
+                // Asked here, outside the transaction below: deciding "does a
+                // plugin listen" must never run plugin script while a postbox
+                // transaction is held.
+                let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
                 
                 let _ = (self.postbox.transaction { transaction -> AccountReplayedFinalState? in
                     if let state = transaction.getState() as? AuthorizedAccountState {
@@ -767,7 +771,8 @@ public final class AccountStateManager {
                         ),
                         removePossiblyDeliveredMessagesUniqueIds: [:],
                         ignoreDate: false,
-                        skipVerification: true
+                        skipVerification: true,
+                        deletedMessageCapture: deletedMessageCapture
                     )
                     
                     if let result = result, !result.deletedMessageIds.isEmpty {
@@ -907,9 +912,13 @@ public final class AccountStateManager {
                                                 }
                                             }
                                             let removePossiblyDeliveredMessagesUniqueIds = self?.removePossiblyDeliveredMessagesUniqueIds ?? Dictionary()
+                                            // Asked before the transaction opens: the
+                                            // answer is a cached flag, never plugin
+                                            // script run under a postbox lock.
+                                            let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
                                             return postbox.transaction { transaction -> (difference: Api.updates.Difference?, finalStatte: AccountReplayedFinalState?, skipBecauseOfError: Bool, resetState: Bool) in
                                                 let startTime = CFAbsoluteTimeGetCurrent()
-                                                let replayedState = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false)
+                                                let replayedState = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false, deletedMessageCapture: deletedMessageCapture)
                                                 let deltaTime = CFAbsoluteTimeGetCurrent() - startTime
                                                 if deltaTime > 1.0 {
                                                     Logger.shared.log("State", "replayFinalState took \(deltaTime)s")
@@ -1048,13 +1057,17 @@ public final class AccountStateManager {
                         }
                         
                         let removePossiblyDeliveredMessagesUniqueIds = self?.removePossiblyDeliveredMessagesUniqueIds ?? Dictionary()
+                        // Asked before the transaction opens: the answer is a
+                        // cached flag, so no plugin script runs under a postbox
+                        // lock.
+                        let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
                         
                         return postbox.transaction { transaction -> AccountReplayedFinalState? in
                             if finalState.discard {
                                 return nil
                             } else {
                                 let startTime = CFAbsoluteTimeGetCurrent()
-                                let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false)
+                                let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false, deletedMessageCapture: deletedMessageCapture)
                                 
                                 if let result = result, !result.deletedMessageIds.isEmpty {
                                     messagesRemovedContext.addIsMessagesDeletedInteractively(ids: result.deletedMessageIds)
@@ -1357,9 +1370,12 @@ public final class AccountStateManager {
                 let auxiliaryMethods = self.auxiliaryMethods
                 let removePossiblyDeliveredMessagesUniqueIds = self.removePossiblyDeliveredMessagesUniqueIds
                 let messagesRemovedContext = self.messagesRemovedContext
+                // Asked before the transaction opens: the answer is a cached
+                // flag, so no plugin script runs under a postbox lock.
+                let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
                 let signal = self.postbox.transaction { transaction -> AccountReplayedFinalState? in
                     let startTime = CFAbsoluteTimeGetCurrent()
-                    let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false)
+                    let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false, deletedMessageCapture: deletedMessageCapture)
                     let deltaTime = CFAbsoluteTimeGetCurrent() - startTime
                     if deltaTime > 1.0 {
                         Logger.shared.log("State", "replayFinalState took \(deltaTime)s")
@@ -1409,10 +1425,13 @@ public final class AccountStateManager {
             let auxiliaryMethods = self.auxiliaryMethods
             let removePossiblyDeliveredMessagesUniqueIds = self.removePossiblyDeliveredMessagesUniqueIds
             let messagesRemovedContext = self.messagesRemovedContext
+            // Asked before the transaction opens: the answer is a cached flag,
+            // so no plugin script runs under a postbox lock.
+            let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
             
             let signal = self.postbox.transaction { transaction -> AccountReplayedFinalState? in
                 let startTime = CFAbsoluteTimeGetCurrent()
-                let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false)
+                let result = replayFinalState(accountManager: accountManager, postbox: postbox, accountPeerId: accountPeerId, mediaBox: mediaBox, encryptionProvider: network.encryptionProvider, transaction: transaction, auxiliaryMethods: auxiliaryMethods, finalState: finalState, removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds, ignoreDate: false, skipVerification: false, deletedMessageCapture: deletedMessageCapture)
                 
                 if let result = result, !result.deletedMessageIds.isEmpty {
                     messagesRemovedContext.addIsMessagesDeletedInteractively(ids: result.deletedMessageIds)
@@ -1491,6 +1510,10 @@ public final class AccountStateManager {
                                             }
                                         }
                                         let removePossiblyDeliveredMessagesUniqueIds = self?.removePossiblyDeliveredMessagesUniqueIds ?? Dictionary()
+                                        // Asked before the transaction opens: it is a cached
+                                        // flag read, never plugin script under a
+                                        // postbox lock.
+                                        let deletedMessageCapture = pluginDeletedMessageCapture(accountId: network.accountId)
                                         return postbox.transaction { transaction -> (difference: Api.updates.Difference?, finalStatte: AccountReplayedFinalState?, skipBecauseOfError: Bool) in
                                             let startTime = CFAbsoluteTimeGetCurrent()
                                             let replayedState = replayFinalState(
@@ -1504,7 +1527,8 @@ public final class AccountStateManager {
                                                 finalState: finalState,
                                                 removePossiblyDeliveredMessagesUniqueIds: removePossiblyDeliveredMessagesUniqueIds,
                                                 ignoreDate: true,
-                                                skipVerification: false
+                                                skipVerification: false,
+                                                deletedMessageCapture: deletedMessageCapture
                                             )
                                             
                                             if let replayedState = replayedState, !replayedState.deletedMessageIds.isEmpty {

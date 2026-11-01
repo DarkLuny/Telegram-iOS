@@ -4097,6 +4097,60 @@ func recordUpdatedWebpage(_ id: MediaId, media: Media?, into updatedWebpages: in
     }
 }
 
+/// Whether to hand a plugin the messages an incoming state update erases.
+///
+/// Answered from a cached flag rather than by running plugin JavaScript: this is
+/// read on the account state's own queue, right before a postbox transaction
+/// opens, and script evaluation there would block every database reader behind
+/// plugin code. The runtime keeps `wantsMessagesWillBeDeleted` cheap for exactly
+/// that reason — it answers from a flag warmed once per load.
+struct PluginDeletedMessageCapture {
+    let accountId: Int64
+    let enabled: Bool
+}
+
+func pluginDeletedMessageCapture(accountId: Int64) -> PluginDeletedMessageCapture {
+    let hooks = PluginHookPoints.shared
+    let enabled = hooks.messagesWillBeDeleted != nil
+        && (hooks.wantsMessagesWillBeDeleted?() ?? true)
+    return PluginDeletedMessageCapture(accountId: accountId, enabled: enabled)
+}
+
+/// Hands a plugin the messages a state update is about to erase, while their text
+/// is still readable.
+///
+/// A delete update carries ids only, and in a private chat those ids are the
+/// client's *global* ones. The message may also never have been delivered as
+/// `updateNewMessage` — anything scrolled back to came from history — so a plugin
+/// that keeps deleted messages has neither the text nor a key to match against
+/// what it stored. Reading the message out of the transaction at the instant of
+/// deletion is what the Android module did, and it is the only point where both
+/// facts still exist.
+///
+/// The payload carries `remote`, so the plugin can tell a delete the server
+/// announced from one the user performed himself: the two are separate switches
+/// in the module, and the local path already reports itself through
+/// `_internal_deleteMessagesInteractively`.
+private func reportRemotelyDeletedMessages(transaction: Transaction, capture: PluginDeletedMessageCapture, messageIds: [MessageId]) {
+    guard capture.enabled, !messageIds.isEmpty else {
+        return
+    }
+    guard let hook = PluginHookPoints.shared.messagesWillBeDeleted else {
+        return
+    }
+    var described: [String] = []
+    for id in messageIds {
+        guard let message = transaction.getMessage(id) else {
+            continue
+        }
+        described.append(pluginMessageDetailsJSON(message))
+    }
+    if described.isEmpty {
+        return
+    }
+    hook(capture.accountId, "{\"remote\":true,\"messages\":[" + described.joined(separator: ",") + "]}")
+}
+
 func replayFinalState(
     accountManager: AccountManager<TelegramAccountManagerTypes>,
     postbox: Postbox,
@@ -4108,7 +4162,8 @@ func replayFinalState(
     finalState: AccountFinalState,
     removePossiblyDeliveredMessagesUniqueIds: [Int64: PeerId],
     ignoreDate: Bool,
-    skipVerification: Bool
+    skipVerification: Bool,
+    deletedMessageCapture: PluginDeletedMessageCapture? = nil
 ) -> AccountReplayedFinalState? {
     if !skipVerification {
         let verified = verifyTransaction(transaction, finalState: finalState.state)
@@ -4622,6 +4677,14 @@ func replayFinalState(
             case let .DeleteEphemeralMessages(peerId, ids):
                 deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
             case let .DeleteMessagesWithGlobalIds(ids):
+                // Resolved before the delete: the ids are the client's global
+                // ones and the mapping is what turns them into a message the
+                // plugin can be handed. A plugin that keeps deleted messages has
+                // nothing stored for these — they usually came from history, not
+                // from an update — so this is the last moment the text exists.
+                if let capture = deletedMessageCapture {
+                    reportRemotelyDeletedMessages(transaction: transaction, capture: capture, messageIds: transaction.messageIdsForGlobalIds(ids))
+                }
                 var resourceIds: [MediaResourceId] = []
                 transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
                     addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
@@ -4631,6 +4694,9 @@ func replayFinalState(
                 }
                 deletedMessageIds.append(contentsOf: ids.map { .global($0) })
             case let .DeleteMessages(ids):
+                if let capture = deletedMessageCapture {
+                    reportRemotelyDeletedMessages(transaction: transaction, capture: capture, messageIds: ids)
+                }
                 _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
                     addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
                 })
