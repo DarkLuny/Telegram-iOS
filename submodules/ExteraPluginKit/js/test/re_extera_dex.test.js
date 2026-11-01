@@ -324,6 +324,25 @@ test('each part of ghost mode can be turned off on its own', () => {
     assert.strictEqual(hookOf(ctx, 'messages.readHistory').strategy, 'cancel');
 });
 
+test('ghost mode lets the client go offline even though it blocks going online', () => {
+    const state = makeHost({ settings: { re_extera_ghost: true } });
+    const ctx = load(state, 'en-US');
+    const online = JSON.parse(ctx.__extera.runHook(
+        'pre_request_hook',
+        JSON.stringify({ offline: false }),
+        JSON.stringify({ name: 'account.updateStatus', tlName: 'TL_account_updateStatus', account: 900, field: 'request' })
+    ));
+    assert.strictEqual(online.strategy, 'cancel');
+    // The other direction is the client leaving; suppressing it would strand the
+    // account as permanently online.
+    const offline = JSON.parse(ctx.__extera.runHook(
+        'pre_request_hook',
+        JSON.stringify({ offline: true }),
+        JSON.stringify({ name: 'account.updateStatus', tlName: 'TL_account_updateStatus', account: 900, field: 'request' })
+    ));
+    assert.strictEqual(offline.strategy, 'default');
+});
+
 test('a switch flipped in the UI takes effect without a reload', () => {
     const state = makeHost();
     const ctx = load(state, 'en-US');

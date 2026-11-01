@@ -196,13 +196,22 @@ ReExteraPlugin.prototype.ghostEnabled = function () {
 // Whether a request of `names` must be dropped. Each part of ghost mode has its
 // own switch, so "do not send online" can be on while "do not read" is off,
 // which is the combination the module's screen offers.
-ReExteraPlugin.prototype.shouldBlock = function (names, kind) {
+//
+// `account.updateStatus` carries both directions: `offline: false` is "I am
+// here", `offline: true` is "I left". A ghost suppresses the first and must let
+// the second through, or the client could not even go offline when it is being
+// backgrounded, and the user would stay visibly online forever — the exact
+// opposite of what the switch promises.
+ReExteraPlugin.prototype.shouldBlock = function (name, kind, request) {
     var ghost = this.ghostEnabled();
     switch (kind) {
     case "typing":
         return ghost && this.flag("ghost_typing", true);
     case "online":
-        return ghost && this.flag("ghost_online", true);
+        if (!ghost || !this.flag("ghost_online", true)) {
+            return false;
+        }
+        return !(request && request.offline === true);
     case "read":
         return ghost && this.flag("ghost_read", true);
     case "read_contents":
@@ -248,8 +257,6 @@ ReExteraPlugin.prototype.on_plugin_load = function () {
     for (var i = 0; i < requests.length; i += 1) {
         this.add_hook(requests[i]);
     }
-
-    this.shadowbanPeer = this.get_setting("re_extera_shadowban_peer", null);
 };
 
 // `pre_request_hook` is where a ghost lives: dropping the request is the whole
@@ -259,7 +266,7 @@ ReExteraPlugin.prototype.pre_request_hook = function (name, account, request) {
     if (kind === null) {
         return HookResult();
     }
-    if (this.shouldBlock(name, kind)) {
+    if (this.shouldBlock(name, kind, request)) {
         this.log("Ghost: dropped " + name);
         return HookResult.cancel();
     }
