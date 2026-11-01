@@ -7,8 +7,10 @@ import ComponentFlow
 import ComponentDisplayAdapters
 import CoreListComponentHost
 import TelegramPresentationData
+import AccountContext
 import ChatMessageItem
 import ChatMessageItemImpl
+import ChatMessageItemCommon
 
 // Adapts a ListViewItemHeader onto CoreList's attachment feature.
 //
@@ -213,6 +215,7 @@ final class CoreListHeaderHostView: UIView, CoreListAttachedItemView {
 
     func update(width: CGFloat, transition: CoreListTransition) -> CGFloat {
         let headerNode: ListViewItemHeaderNode
+        var isNewNode = false
         if let existing = self.headerNode {
             headerNode = existing
         } else {
@@ -229,6 +232,7 @@ final class CoreListHeaderHostView: UIView, CoreListAttachedItemView {
             // live value at `view()` time, so a header built mid-fling starts out correctly flashed
             // rather than hiding itself the moment its first stick distance crosses 0.5.
             headerNode.updateFlashingOnScrolling(self.isFlashingOnScrolling, animated: false)
+            isNewNode = true
         }
 
         // ListViewImpl's own guard (Display/Source/ListView.swift:4137 and :4158): push the new
@@ -256,6 +260,29 @@ final class CoreListHeaderHostView: UIView, CoreListAttachedItemView {
             rightInset: self.rightInset,
             transition: ComponentTransition(transition).containedViewLayoutTransition
         )
+        // A date separator that just arrived is animated by the plugin, on top of the stock fade.
+        // Only a node built in this pass: `update` runs again for every pass that re-measures the
+        // header (a scroll, a side inset, a theme), and replaying the appearance there would re-animate
+        // a separator the user is looking at. ListViewImpl asks at exactly the same point — the
+        // creation branch of `updateItemHeaders` (Display/Source/ListView.swift:4157-4161) — by calling
+        // `animateAdded`, which `ChatMessageDateHeaderNodeImpl` overrides to ask the plugins
+        // (ChatMessageDateHeader.swift:821-832).
+        //
+        // `transition.isImmediate` is excluded for the same reason the row half excludes it: the
+        // first fill of a chat opened without animation builds every node in one pass, and that is
+        // not an arrival the user watches. The transition arrives here from the backend rather than
+        // from this method's parameter — CoreList measures a fresh attachment with `.immediate` by
+        // contract (`attachmentMeasureTransition`), so the parameter says nothing about whether this
+        // pass is an arrival.
+        if isNewNode, (self.backend?.activePassShowsArrivals ?? false), let dateHeader = self.header as? ChatMessageDateHeader, headerNode is ChatMessageDateHeaderNode {
+            PluginInsertionPlayback.play(
+                layer: headerNode.layer,
+                accountId: dateHeader.context.account.id.int64,
+                message: nil,
+                isDate: true,
+                size: size
+            )
+        }
         return size.height
     }
 

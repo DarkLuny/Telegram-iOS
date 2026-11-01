@@ -44,8 +44,17 @@ public final class PluginManager: PluginHost {
     /// Set by the app once the bridge can act on real accounts.
     public var actions: PluginActions?
 
-    /// Called when a plugin's settings should be re-rendered.
-    public var settingsChanged: ((String) -> Void)?
+    /// Fires with the plugin id when a setting was saved, so an open settings page
+    /// can re-read the controls it rendered.
+    ///
+    /// A signal rather than a closure because two pages of the same plugin are on
+    /// screen at once whenever the user opened a nested page: both hold rows from
+    /// that plugin and both have to redraw.
+    private let settingsChangedPipe = ValuePipe<String>()
+
+    public var settingsChanged: Signal<String, NoError> {
+        return self.settingsChangedPipe.signal()
+    }
 
     /// Fires whenever the set of installed/loaded plugins changes, so open
     /// screens rebuild their rows. Every mutation goes through `reloadPlugins` or
@@ -583,7 +592,7 @@ public final class PluginManager: PluginHost {
     public func pluginSetSetting(pluginId: String, key: String, value: Any?, reload: Bool) {
         self.store.setSetting(key, value: value, for: pluginId)
         if reload {
-            self.settingsChanged?(pluginId)
+            self.settingsChangedPipe.putNext(pluginId)
         }
     }
 
@@ -1379,7 +1388,7 @@ public final class PluginManager: PluginHost {
     /// invoked by key, so no closure crosses the bridge.
     public func setSetting(pluginId: String, key: String, value: Any?) {
         self.store.setSetting(key, value: value, for: pluginId)
-        self.settingsChanged?(pluginId)
+        self.settingsChangedPipe.putNext(pluginId)
         // A colour plugin's accent usually lives in a setting, so a change has to
         // reach the theme that was already built. The callback below answers with
         // the new colour; this asks the interface to rebuild and read it. Sent

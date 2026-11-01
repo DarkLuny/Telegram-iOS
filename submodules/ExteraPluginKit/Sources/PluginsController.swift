@@ -283,7 +283,10 @@ public func pluginsController(context: AccountContext) -> ViewController {
 /// settings page. The overlay stays as a fallback for the case where the manager
 /// is on screen without a stack (nothing else presents it, but a plugin can).
 private func pushPluginController(context: AccountContext, from host: PluginsControllerHost, controller: ViewController) {
-    controller.navigationPresentation = .modal
+    // Pushed, not presented: the plugin page joins the same navigation stack the
+    // list lives in, so the bar gets a back arrow from `previousItem` and a
+    // second push from that page keeps appending instead of opening a fresh
+    // modal container. `.modal` here was what made each step its own sheet.
     if let container = host.controller, container.navigationController is NavigationController {
         container.push(controller)
     } else {
@@ -464,6 +467,13 @@ private final class PluginSettingsControllerArguments {
     let openSubPage: (String, String) -> Void
     let reload: () -> Void
     let remove: () -> Void
+    /// The rows were built from the plugin's `create_settings()`, which is only
+    /// re-run when the page is rebuilt. A switch that saves on its own — a
+    /// callback writing a second key, a page whose content depends on another
+    /// switch — would otherwise leave the row showing the old value, so the page
+    /// listens for its own plugin's saves and bumps. Held here so it is disposed
+    /// together with the controller that owns these arguments.
+    private let settingsDisposable: Disposable
 
     init(
         updateValue: @escaping (String, Any?) -> Void,
@@ -471,7 +481,8 @@ private final class PluginSettingsControllerArguments {
         clickRow: @escaping (String, Bool) -> Void,
         openSubPage: @escaping (String, String) -> Void,
         reload: @escaping () -> Void,
-        remove: @escaping () -> Void
+        remove: @escaping () -> Void,
+        settingsDisposable: Disposable
     ) {
         self.updateValue = updateValue
         self.presentSelector = presentSelector
@@ -479,6 +490,11 @@ private final class PluginSettingsControllerArguments {
         self.openSubPage = openSubPage
         self.reload = reload
         self.remove = remove
+        self.settingsDisposable = settingsDisposable
+    }
+
+    deinit {
+        self.settingsDisposable.dispose()
     }
 }
 
@@ -605,6 +621,16 @@ private final class PluginSettingsHost {
 private func pluginSettingsArguments(context: AccountContext, pluginId: String, bump: @escaping () -> Void, host: PluginSettingsHost) -> PluginSettingsControllerArguments {
     let manager = PluginManager.shared
     let store = PluginStore.shared
+    // Only this plugin's saves: a page of another plugin is not affected, and a
+    // rebuild on every save of every plugin would lose the scroll position for
+    // no reason. Delivered on the main queue because `setSetting` can be called
+    // from a callback that the script queue runs.
+    let settingsDisposable = (manager.settingsChanged
+    |> deliverOnMainQueue).start(next: { changedId in
+        if changedId == pluginId {
+            bump()
+        }
+    })
     return PluginSettingsControllerArguments(
         updateValue: { key, value in
             manager.setSetting(pluginId: pluginId, key: key, value: value)
@@ -645,7 +671,8 @@ private func pluginSettingsArguments(context: AccountContext, pluginId: String, 
             store.remove(pluginId: pluginId)
             manager.reloadPlugins()
             bump()
-        }
+        },
+        settingsDisposable: settingsDisposable
     )
 }
 
@@ -692,7 +719,6 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
     }
 
     let controller = ItemListController(context: context, state: signal)
-    controller.navigationPresentation = .modal
     host.controller = controller
     return controller
 }
@@ -742,7 +768,6 @@ private func pluginSubSettingsController(context: AccountContext, pluginId: Stri
     }
 
     let controller = ItemListController(context: context, state: signal)
-    controller.navigationPresentation = .modal
     host.controller = controller
     return controller
 }
@@ -823,6 +848,5 @@ public func pluginLogController(context: AccountContext) -> ViewController {
     }
 
     let controller = ItemListController(context: context, state: signal)
-    controller.navigationPresentation = .modal
     return controller
 }

@@ -6,9 +6,11 @@ import CoreList
 import ComponentFlow
 import ComponentDisplayAdapters
 import CoreListComponentHost
+import AccountContext
 import ChatMessageItem
 import ChatMessageItemImpl
 import ChatMessageItemView
+import ChatMessageItemCommon
 
 // Shared by the chat's diamonds; their existing animation clocks advance this spring on demand.
 // All inputs are user-scroll deltas in screen coordinates, with downward content movement positive.
@@ -109,6 +111,26 @@ final class CoreListChatHistoryBackend: ASDisplayNode, ChatHistoryListViewBacken
     // Internal rather than private: the header adapter in CoreListChatHistoryHeaders.swift
     // enumerates attachments through it. Still invisible outside TelegramUI.
     let coreList: CoreVirtualListView
+
+    /// The transition of the transaction `CoreVirtualListView` is currently applying, and whether
+    /// that transaction wants its arrivals animated at all.
+    ///
+    /// CoreList measures a freshly created attachment with `.immediate` — there is no prior
+    /// layout to animate *from* — which is correct for geometry but erases the one thing a
+    /// newly built date separator needs to know: whether this pass is an arrival at all. The
+    /// header adapter asks here instead, and only this property knows, because the transition
+    /// is a parameter of the transaction rather than of the pass.
+    ///
+    /// Set around `applyChanges` and restored afterwards. A pass CoreList defers for
+    /// re-entrancy therefore sees the default and animates nothing, which is the safe direction
+    /// to be wrong in: a separator is not worth replaying a stale curve on.
+    private(set) var activePassTransition: CoreListTransition = .immediate
+    private(set) var activePassAnimatesInsertions: Bool = false
+
+    /// True while a transaction that actually stages arrivals is building its window.
+    var activePassShowsArrivals: Bool {
+        return !self.activePassTransition.isImmediate && self.activePassAnimatesInsertions
+    }
 
     private let scrollMotion = CoreListChatScrollMotion()
     fileprivate lazy var scrollTiltProvider: (CFTimeInterval) -> Float = { [weak self] time in
@@ -1154,6 +1176,15 @@ final class CoreListChatHistoryBackend: ASDisplayNode, ChatHistoryListViewBacken
         let animatesInsertions = !options.contains(.RequestItemInsertionAnimations)
 
         if structurallyChanged || sizeChanged || scrollTo != nil || additionalScrollDistance != 0.0 {
+            self.activePassTransition = transition
+            // Gated on there being an insert at all: a pass that only scrolls, re-insets or
+            // re-measures can still build a header node (its run scrolled into the window), and that
+            // is not an arrival — the separator was always there, the user just moved to it. The
+            // remaining over-trigger is narrower: a header whose run merely entered the window during
+            // a pass that also inserted something elsewhere. It is bounded and rare, and ListViewImpl
+            // has the same shape (it animates every header node created in an animating pass), so it
+            // is not worth threading identities through the attachment layer for.
+            self.activePassAnimatesInsertions = animatesInsertions && !insertIndicesAndItems.isEmpty
             self.coreList.applyChanges(
                 items: (structurallyChanged || sideInsetsChanged) ? self.entries : nil,
                 newSize: self.currentSize == .zero ? nil : self.currentSize,
@@ -1166,6 +1197,8 @@ final class CoreListChatHistoryBackend: ASDisplayNode, ChatHistoryListViewBacken
                 animatesInsertions: animatesInsertions,
                 transition: transition
             )
+            self.activePassTransition = .immediate
+            self.activePassAnimatesInsertions = false
             // The range reported at the end of this transaction is where the rows are drawn now, before the pass has
             // moved them, and nothing reports it again when a programmatic pass lands (`onVisibleWindowChanged` fires
             // only on user scrolls). Without this report, what an animated jump brings on screen would stay
@@ -1198,10 +1231,59 @@ final class CoreListChatHistoryBackend: ASDisplayNode, ChatHistoryListViewBacken
             previousEntryCount: previousEntryCount,
             options: options
         ) {
+            // A plugin that describes how a row appears replaces the stock travel rather than adding
+            // to it: ListViewImpl leaves `transitionOffset` at zero when `animateInsertion` reports
+            // the plugin played (ChatMessageItemView.swift:750), so the row has exactly one motion.
+            // CoreList's equivalent of that stock travel is the entering-block track below, so a row
+            // the plugin claimed is played here and taken out of the block.
+            //
+            // Only rows the window already built can be claimed: an arriving row that is not loaded
+            // has no layer, and it is off screen, so neither animation would be seen. Every id the
+            // window did NOT claim — not loaded, not a message, no plugin answer — stays in the block,
+            // which is also the whole list when no plugin is installed.
+            //
+            // An immediate transition is not an arrival the user watches (the first fill of a chat
+            // opened without animation, a hole reload), so nothing is played there and every row keeps
+            // the stock path. Same guard `animateInsertedBlock` makes for itself.
+            var stockIdentities = arrivingStableIds
+            if !transition.isImmediate {
+                var claimed: Set<AnyHashable> = []
+                for entry in self.coreList.loadedItemEntries {
+                    guard self.entries.indices.contains(entry.index) else {
+                        continue
+                    }
+                    let stableId = AnyHashable(self.entries[entry.index].stableId)
+                    guard stockIdentities.contains(stableId) else {
+                        continue
+                    }
+                    guard let hostView = entry.view as? CoreListNodeHostView,
+                          let itemNode = hostView.itemNode,
+                          let chatItem = self.entries[entry.index].listItem as? ChatMessageItem,
+                          // `applyChanges` can defer a pass back onto CoreList's scheduler, in
+                          // which case this read still describes the PREVIOUS window while `self.entries`
+                          // is already the new one. Same index, different message — the node's own item
+                          // is what tells the two apart, and a mismatch means "this row is not the one
+                          // arriving", so nothing is played and it stays in the block.
+                          (itemNode as? ChatMessageItemView)?.item === chatItem,
+                          PluginInsertionPlayback.play(
+                              layer: itemNode.layer,
+                              accountId: chatItem.context.account.id.int64,
+                              message: chatItem.message,
+                              isDate: false,
+                              size: itemNode.bounds.size
+                          ) else {
+                        continue
+                    }
+                    claimed.insert(stableId)
+                }
+                if !claimed.isEmpty {
+                    stockIdentities.removeAll { claimed.contains($0) }
+                }
+            }
             // `.beforeBlock` is content order, not screen: index 0 is the NEWEST message and sits at
             // the start of CoreList's content, which the wrapper's π renders at the visual bottom. So
             // travelling forward from before index 0 is the block rising from under the input panel.
-            self.coreList.animateInsertedBlock(identities: arrivingStableIds,
+            self.coreList.animateInsertedBlock(identities: stockIdentities,
                                                origin: .beforeBlock,
                                                transition: transition)
         }

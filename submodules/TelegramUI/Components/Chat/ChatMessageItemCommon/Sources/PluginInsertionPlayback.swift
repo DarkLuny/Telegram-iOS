@@ -71,6 +71,31 @@ public enum PluginInsertionPlayback {
     ///
     /// Returns `false` when there is nothing to play, so the caller can fall back
     /// to the stock appearance.
+    ///
+    /// The layer's own `transform` is treated as a baseline and the plugin's
+    /// matrix composed INSIDE it.
+    ///
+    /// A chat list is drawn rotated: the wrapper (`ChatHistoryListNodeImpl`)
+    /// carries a π rotation and every row node carries its own π, so the two
+    /// compose to upright content — and, crucially, the wrapper's π cancels the
+    /// row's. Writing the animation's endpoint as `baseline ∘ plugin` therefore
+    /// renders on screen as `π ∘ π ∘ plugin` = `plugin` exactly: the plugin's
+    /// numbers end up in the space they were written in, a message's own frame
+    /// on screen, which is also the space Android's `translationX`/`translationY`
+    /// live in.
+    ///
+    /// The baseline cannot be dropped, and it cannot be moved outside either.
+    /// Dropping it replaces the row's π with the plugin's matrix, so the row
+    /// ends up upside down relative to the rest of the chat and stays that way —
+    /// the animation is installed with `removeOnCompletion: false`. Composing
+    /// outside (`plugin ∘ baseline`) would conjugate the plugin through the π,
+    /// which mirrors every offset and every rotation: a style that should rise
+    /// from below the screen would drop in from above, an incoming row that
+    /// should come from the right would come from the left, and a clockwise
+    /// spin would run anticlockwise.
+    ///
+    /// With no rotation the baseline is identity and the composition is the
+    /// plugin's matrices alone.
     @discardableResult
     public static func apply(_ animation: PluginInsertionAnimation, to layer: CALayer, alpha: CGFloat = 1.0) -> Bool {
         let duration = animation.duration / 1000.0
@@ -79,6 +104,7 @@ public enum PluginInsertionPlayback {
         }
         let delay = max(0.0, animation.delay / 1000.0)
         let timing = timingFunction(animation.curve, overshoot: animation.overshoot)
+        let baseline = layer.transform
 
         if let keyframes = animation.rotationKeyframes, keyframes.count >= 2 {
             // A wobble draws a path, not a straight line: one keyframed matrix
@@ -99,7 +125,7 @@ public enum PluginInsertionPlayback {
                 transform = CATransform3DRotate(transform, radians(keyframes[index]), 0.0, 0.0, 1.0)
                 let scale = CGFloat(animation.scaleFromX) + (CGFloat(animation.scaleToX) - CGFloat(animation.scaleFromX)) * progress
                 transform = CATransform3DScale(transform, scale, scale, 1.0)
-                values.append(NSValue(caTransform3D: transform))
+                values.append(NSValue(caTransform3D: CATransform3DConcat(baseline, transform)))
             }
             layer.animateKeyframes(
                 values: values,
@@ -111,8 +137,8 @@ public enum PluginInsertionPlayback {
         } else {
             let matrices = transform(from: animation)
             layer.animateTransform(
-                from: matrices.from,
-                to: matrices.to,
+                from: CATransform3DConcat(baseline, matrices.from),
+                to: CATransform3DConcat(baseline, matrices.to),
                 duration: duration,
                 delay: delay,
                 timingFunction: timing,
