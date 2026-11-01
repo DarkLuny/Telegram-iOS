@@ -140,6 +140,13 @@ func chatHistoryEntriesForView(
         }
     }
     
+    // Asked once, before the loop. `hideMessage` takes an already encoded
+    // message, and encoding every visible row only to be told that no plugin
+    // listens would put a JSON document per row on the list's build path. With
+    // no listener both closures are `nil`/`false` and this file behaves exactly
+    // as stock.
+    let pluginsMayHideMessages = PluginHookPoints.shared.wantsHideMessage?() == true
+
     var count = 0
     loop: for entry in view.entries {
         var message = entry.message.withAppliedEphemeralReplacementMessage()
@@ -217,6 +224,17 @@ func chatHistoryEntriesForView(
             if minAutoremoveOrClearTimeout <= 60 {
                 continue loop
             }
+        }
+
+        // A plugin can hide a row: that is how the re:extera module's shadow ban
+        // and its regex filters reach this client. The check runs after the
+        // built-in skips and before anything is built for the row, so a hidden
+        // message costs one JSON encode and no entry. `hideMessage` is `nil`
+        // when no plugin listens, which is the common case.
+        if pluginsMayHideMessages,
+           let hideMessage = PluginHookPoints.shared.hideMessage,
+           hideMessage(context.account.id.int64, pluginMessageDetailsJSON(message)) {
+            continue loop
         }
         
         var contentTypeHint: ChatMessageEntryContentType = .generic

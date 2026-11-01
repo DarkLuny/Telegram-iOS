@@ -1581,6 +1581,18 @@ var __extera = (function () {
                 copy.key = settingKey(control, i);
                 var stored = bridgeMissing('getSetting')(pluginId, copy.key);
                 copy.value = (stored === null || stored === undefined) ? control['default'] : stored;
+                // A stored switch must reach the screen as a boolean, not as the
+                // number `1`. `UserDefaults` keeps it as a `CFBoolean`, and
+                // JavaScriptCore hands an `NSNumber` to a script as a number, so
+                // a value the user turned on came back as `1` and the row was
+                // rendered with `value as? Bool`, which fails for a number: every
+                // switch showed "off" again after a reload, however many times it
+                // was turned on. Coercing here also makes `=== true` work in a
+                // plugin, which is how a port of `bool(plugin.get_setting(...))`
+                // is usually written.
+                if (control.type === 'switch') {
+                    copy.value = !!copy.value;
+                }
                 copy.has_callbacks = typeof control.on_change === 'function' ||
                     typeof control.on_long_click === 'function';
             }
@@ -1910,6 +1922,11 @@ var __extera = (function () {
                 // dictionary fits the host's payload type. exteraGram hands the hook
                 // the list itself, so unwrap it here.
                 return fn.call(instance, hookName, extra.account, (payload && payload.updates) || []);
+            case 'on_messages_will_be_deleted':
+                // Not a TL update: the host fires this just before it removes
+                // messages the user deleted himself, which the server never
+                // announces. The payload is `{"messages": [...]}`.
+                return fn.call(instance, extra.account, payload);
             default:
                 return fn.call(instance, payload, extra);
             }
@@ -1942,6 +1959,11 @@ var __extera = (function () {
     //   on_message_inserted(account, message, extra)  -> animation object
     //   on_name_colors(account, subject, extra)       -> {main, secondary}
     //   on_message_details(account, message, extra)   -> [{title, value}, ...]
+    //   on_hide_message(account, message, extra)      -> true to drop the row
+    //
+    // `on_messages_will_be_deleted(account, {messages}, extra)` is not a query:
+    // the host fires it just before it removes messages the user deleted
+    // himself, which the server never announces.
 
     function query(event, payloadJSON, contextJSON) {
         var instance = __extera.instance;
@@ -1970,6 +1992,13 @@ var __extera = (function () {
         },
         name: function () { return pluginName; },
         id: function () { return pluginId; },
+        // Whether the plugin instance implements a callback. The host asks this
+        // before building a per-row payload: a chat with a thousand messages
+        // must not turn every one of them into JSON to be told nobody listens.
+        hasHook: function (event) {
+            var instance = __extera.instance;
+            return !!(instance && typeof instance[event] === 'function');
+        },
         bulletin: function (kind, text) {
             bridgeMissing('showBulletin')(pluginId, kind, String(text));
         },

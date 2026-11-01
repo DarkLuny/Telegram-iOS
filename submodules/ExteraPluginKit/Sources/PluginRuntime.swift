@@ -206,6 +206,45 @@ public final class PluginRuntime {
             }
             return manager.dispatchMessageDetails(account: accountId, messageJSON: messageJSON)
         }
+
+        // Asked per row while a chat list is built, and only after
+        // `wantsHideMessage` said a plugin listens: the caller gates the loop
+        // with that one question, so there is no second `hasPluginForHook` here.
+        // Re-asking it per row would double every row's round trip into the
+        // script queue for an answer that cannot change mid-loop.
+        hooks.hideMessage = { accountId, messageJSON in
+            guard manager.hasLoadedPlugins else {
+                return false
+            }
+            return manager.dispatchHideMessage(account: accountId, messageJSON: messageJSON)
+        }
+
+        // Asked once per history view. A chat with a thousand messages must not
+        // encode each of them only to be told nobody listens.
+        hooks.wantsHideMessage = {
+            guard manager.hasLoadedPlugins else {
+                return false
+            }
+            return manager.hasPluginForHook("on_hide_message")
+        }
+
+        // The messages the user deletes himself. The server never announces
+        // them, so this is the only chance a plugin gets to keep them; the
+        // caller asks `wantsMessagesWillBeDeleted` once, before describing any
+        // message, and then hands the description to a detached dispatch.
+        hooks.wantsMessagesWillBeDeleted = {
+            guard manager.hasLoadedPlugins else {
+                return false
+            }
+            return manager.hasMessagesWillBeDeletedHook()
+        }
+
+        hooks.messagesWillBeDeleted = { accountId, messagesJSON in
+            guard manager.hasLoadedPlugins else {
+                return
+            }
+            manager.dispatchMessagesWillBeDeleted(account: accountId, messagesJSON: messagesJSON)
+        }
     }
 
     /// Mirrors exteraGram's `on_app_event`: `START` at launch, then `PAUSE` and

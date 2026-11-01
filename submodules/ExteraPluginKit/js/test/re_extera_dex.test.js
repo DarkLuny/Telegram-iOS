@@ -48,11 +48,19 @@ function makeHost(options) {
         calls,
         settings,
         bulletins: [],
+        alerts: [],
         files: options.files || {},
+        written: [],
+        store: options.store || {},
+        failStore: !!options.failStore,
         actual: options.actual === undefined ? VERSIONS : options.actual,
         actualStatus: options.actualStatus || 200,
         appVersion: options.appVersion === undefined ? APP_VERSION : options.appVersion,
     };
+    const storePath = '/plugins/re_extera_dex/re_extera_store/store.json';
+    if (Object.keys(state.store).length > 0) {
+        state.files[storePath] = JSON.stringify(state.store);
+    }
 
     state.host = {
         calls,
@@ -73,15 +81,36 @@ function makeHost(options) {
             try { payload = JSON.parse(text); } catch (error) { payload = { kind, text }; }
             state.bulletins.push({ kind: payload.kind || kind, text: payload.text, raw: payload });
         },
-        showAlert: () => {},
+        showAlert: (id, json) => {
+            state.alerts.push(JSON.parse(json));
+        },
         dismissAlert: () => {},
         fileOp: (id, op, p, payload) => {
             calls.push(['fileOp', id, op, p, payload]);
-            if (op === 'ensure_dir' || op === 'write_text' || op === 'write_bytes') {
+            if (op === 'ensure_dir') {
+                return 'true';
+            }
+            if (op === 'write_text' || op === 'write_bytes') {
+                if (state.failStore) {
+                    return 'false';
+                }
+                if (op === 'write_text') {
+                    state.written.push(payload);
+                    state.files[p] = payload;
+                }
                 return 'true';
             }
             if (op === 'exists') {
+                if (state.failStore) {
+                    return 'false';
+                }
                 return JSON.stringify(Object.prototype.hasOwnProperty.call(state.files, p));
+            }
+            if (op === 'read_text') {
+                if (state.failStore) {
+                    return 'null';
+                }
+                return JSON.stringify(state.files[p] === undefined ? null : state.files[p]);
             }
             if (op === 'read_bytes') {
                 return JSON.stringify(state.files[p] === undefined ? null : state.files[p]);
@@ -251,7 +280,9 @@ test('the settings screen is ghost mode, with one switch per thing it blocks', (
     const rows = settingsOf(ctx);
     const switches = rows.filter((r) => r.type === 'switch');
     const keys = switches.map((r) => r.key);
-    assert.deepStrictEqual(keys, [
+    // Ghost mode's own switches come first; the history and hiding sections the
+    // module also shipped follow them.
+    assert.deepStrictEqual(keys.slice(0, 6), [
         're_extera_ghost',
         're_extera_ghost_typing',
         're_extera_ghost_online',
@@ -259,16 +290,28 @@ test('the settings screen is ghost mode, with one switch per thing it blocks', (
         're_extera_ghost_read_contents',
         're_extera_ghost_stories',
     ]);
+    assert.deepStrictEqual(keys.slice(6), [
+        're_extera_save_deleted_messages',
+        're_extera_save_manually_deleted',
+        're_extera_save_edits',
+        're_extera_shadowban',
+        're_extera_filters_enabled',
+    ]);
     // No dead rows: every switch has a handler the host can call.
     for (const row of switches) {
         assert.strictEqual(row.has_callbacks, true, row.key);
     }
     // Ghost mode itself ships off; its parts ship on, so enabling the master
-    // switch covers everything the module covered.
+    // switch covers everything the module covered. The two ways of keeping a
+    // deleted message and both hiding switches ship off: they store or hide
+    // data, which is not what a fresh install expects.
     assert.strictEqual(switches[0].value, false);
-    for (const row of switches.slice(1)) {
+    for (const row of switches.slice(1, 6)) {
         assert.strictEqual(row.value, true, row.key);
     }
+    assert.strictEqual(switches[6].value, false);
+    assert.strictEqual(switches[7].value, false);
+    assert.strictEqual(switches[8].value, true);
 
     const ru = makeHost();
     const ruCtx = load(ru, 'ru-RU');
@@ -367,7 +410,207 @@ test('the settings screen shows no bulletin and no dead report row', () => {
     assert.deepStrictEqual(state.bulletins, []);
     const rows = settingsOf(ctx);
     const textRows = rows.filter((r) => r.type === 'text');
-    assert.deepStrictEqual(textRows, [], JSON.stringify(textRows));
+    // The only tappable rows are the two the module had in its own screen: open
+    // the saved history and clear it. Neither is a report about the dex.
+    for (const row of textRows) {
+        assert.strictEqual(row.has_click, true, row.text);
+        assert.ok(['re_extera_view_deleted', 're_extera_clear_deleted'].includes(row.key), row.key);
+    }
+    assert.strictEqual(textRows.length, 2, JSON.stringify(textRows));
+});
+
+test('viewing the history shows both deleted and edited messages, as the module did', () => {
+    const state = makeHost({
+        settings: { re_extera_save_deleted_messages: true },
+        store: {
+            deleted_keys: [
+                { peer_id: 5, id: 10, date: 100, text: 'gone', is_out: false, media_kind: 'none' },
+                { peer_id: 5, id: 11, date: 200, text: '', is_out: true, media_kind: 'photo' },
+            ],
+            edits: [
+                { peer_id: 5, id: 20, date: 300, text: 'rewritten', is_out: false, media_kind: 'none' },
+            ],
+        },
+    });
+    const ctx = load(state, 'en-US');
+    const row = settingsOf(ctx).find((r) => r.key === 're_extera_view_deleted');
+    ctx.__extera.invokeSettingCallback(row.key, 'click', 'null');
+    assert.strictEqual(state.alerts.length, 1, JSON.stringify(state.alerts));
+    const alert = state.alerts[0];
+    assert.strictEqual(alert.title, 'Edited and deleted messages');
+    // Newest first inside each part, both parts present, and a media-only entry
+    // is marked rather than shown as an empty line.
+    assert.ok(alert.message.includes('Deleted messages'), alert.message);
+    assert.ok(alert.message.includes('Edited messages'), alert.message);
+    assert.ok(alert.message.indexOf('#11') < alert.message.indexOf('#10'), alert.message);
+    assert.ok(alert.message.includes('[photo]'), alert.message);
+    assert.ok(alert.message.includes('(outgoing)'), alert.message);
+    assert.ok(alert.message.includes('rewritten'), alert.message);
+});
+
+test('a deleted message survives the delete update', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    const message = {
+        _: 'message',
+        id: 77,
+        peer_id: { _: 'peerUser', user_id: 4242 },
+        from_id: { _: 'peerUser', user_id: 4242 },
+        date: 1700000000,
+        message: 'hello there',
+        media_kind: 'none',
+    };
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: message, pts: 1, pts_count: 1 }), JSON.stringify({
+        name: 'updateNewMessage', tlName: 'TL_updateNewMessage', account: 900, field: 'update',
+    }));
+    assert.strictEqual(state.written.length, 1, 'one write');
+    let store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].text, 'hello there');
+    assert.strictEqual(store.deleted_keys[0].peer_id, 4242);
+
+    // The delete carries only the id; the saved copy is what is left.
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ messages: [77] }), JSON.stringify({
+        name: 'updateDeleteMessages', tlName: 'TL_updateDeleteMessages', account: 900, field: 'update',
+    }));
+    store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.deleted_keys[0].deleted, true);
+});
+
+test('a message the user deletes himself is kept, without any update arriving', () => {
+    // The case that made "save deleted messages" look broken on iOS: deleting
+    // your own message never produces `updateDeleteMessages`, and the message
+    // never arrived as `updateNewMessage` either, so the plugin is told right
+    // before the client removes it. The module had its own switch for this
+    // ("Сохранять сообщения удаленные вручную"); `save_deleted_messages` alone
+    // must not be enough.
+    const state = makeHost({ settings: { re_extera_save_manually_deleted: true } });
+    const ctx = load(state, 'en-US');
+    const payload = JSON.stringify({
+        messages: [{
+            id: 91,
+            peer_id: 4242,
+            date: 1700000123,
+            text: 'my own words',
+            sender_id: 7,
+            is_out: true,
+            media_kind: 'none',
+        }],
+    });
+    ctx.__extera.runHook('on_messages_will_be_deleted', payload, JSON.stringify({
+        name: 'messages', account: 900, field: 'update',
+    }));
+    assert.strictEqual(state.written.length, 1, 'one write');
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].id, 91);
+    assert.strictEqual(store.deleted_keys[0].peer_id, 4242);
+    assert.strictEqual(store.deleted_keys[0].text, 'my own words');
+    assert.strictEqual(store.deleted_keys[0].is_out, true);
+});
+
+test('the two deletion switches stay independent, as in the module', () => {
+    // Only the remote switch is on: a message someone else deleted is kept, and
+    // one the user deleted himself is not.
+    const remoteOnly = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const remoteCtx = load(remoteOnly, 'en-US');
+    remoteCtx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        messages: [{ id: 1, peer_id: 2, date: 3, text: 'mine', is_out: true, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.deepStrictEqual(remoteOnly.written, [], 'the own-deletion switch is off');
+
+    const ownOnly = makeHost({ settings: { re_extera_save_manually_deleted: true } });
+    const ownCtx = load(ownOnly, 'en-US');
+    ownCtx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 8, peer_id: { _: 'peerUser', user_id: 3 }, message: 'theirs', date: 9 },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    assert.deepStrictEqual(ownOnly.written, [], 'the remote switch is off');
+});
+
+test('a locally deleted message is not stored twice when it also arrived as an update', () => {
+    const state = makeHost({
+        settings: { re_extera_save_deleted_messages: true, re_extera_save_manually_deleted: true },
+    });
+    const ctx = load(state, 'en-US');
+    const base = { _: 'message', id: 12, peer_id: { _: 'peerUser', user_id: 5 }, date: 4, message: 'once' };
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: base }), JSON.stringify({
+        name: 'updateNewMessage', account: 900, field: 'update',
+    }));
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        messages: [{ id: 12, peer_id: 5, date: 4, text: 'once', sender_id: 5, is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+});
+
+test('nothing is stored while saving is off', () => {
+    const state = makeHost();
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 5, peer_id: { _: 'peerChat', chat_id: 9 }, message: 'x', date: 1 },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        messages: [{ id: 6, peer_id: 9, date: 2, text: 'y', is_out: true, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.deepStrictEqual(state.written, []);
+});
+
+test('an edit replaces the saved text instead of adding a row', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    const base = { _: 'message', id: 3, peer_id: { _: 'peerUser', user_id: 1 }, date: 10 };
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: { ...base, message: 'first' } }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: { ...base, message: 'second' } }), JSON.stringify({ name: 'updateEditMessage', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.edits.length, 1);
+    assert.strictEqual(store.edits[0].text, 'second');
+});
+
+test('a shadow-banned sender is hidden and everyone else is not', () => {
+    const state = makeHost({
+        settings: { re_extera_shadowban: true },
+        store: { shadowban_users: [{ peer_id: 4242, hide_messages: true }] },
+    });
+    const ctx = load(state, 'en-US');
+    assert.strictEqual(ctx.__extera.query('on_hide_message', JSON.stringify({ sender_id: 4242, text: 'hi' }), JSON.stringify({ account: 900 })), '{"value":true}');
+    assert.strictEqual(ctx.__extera.query('on_hide_message', JSON.stringify({ sender_id: 1, text: 'hi' }), JSON.stringify({ account: 900 })), '{"value":false}');
+});
+
+test('a regex filter hides a matching message and ignores a broken one', () => {
+    const state = makeHost({
+        settings: { re_extera_filters_enabled: true },
+        store: { regex_filters: [{ pattern: 'spam\\d+', flags: 'i' }, { pattern: '([unclosed' }] },
+    });
+    const ctx = load(state, 'en-US');
+    assert.strictEqual(ctx.__extera.query('on_hide_message', JSON.stringify({ text: 'SPAM42 here' }), JSON.stringify({ account: 900 })), '{"value":true}');
+    assert.strictEqual(ctx.__extera.query('on_hide_message', JSON.stringify({ text: 'ordinary' }), JSON.stringify({ account: 900 })), '{"value":false}');
+});
+
+test('the hiding hooks do nothing while their switches are off', () => {
+    const state = makeHost({
+        store: {
+            shadowban_users: [{ peer_id: 77, hide_messages: true }],
+            regex_filters: [{ pattern: '.*' }],
+        },
+    });
+    const ctx = load(state, 'en-US');
+    assert.strictEqual(ctx.__extera.query('on_hide_message', JSON.stringify({ sender_id: 77, text: 'x' }), JSON.stringify({ account: 900 })), '{"value":false}');
+});
+
+test('the history hooks are subscribed even when the store cannot be read', () => {
+    const state = makeHost({ failStore: true });
+    load(state, 'en-US');
+    const hooks = state.calls.filter((c) => c[0] === 'addHook').map((c) => c[2]);
+    for (const name of ['updateNewMessage', 'updateEditMessage', 'updateDeleteMessages']) {
+        assert.ok(hooks.includes(name), name + ' missing from ' + JSON.stringify(hooks));
+    }
+});
+
+test('the local delete hook is implemented, and the host can tell', () => {
+    const state = makeHost();
+    const ctx = load(state, 'en-US');
+    // The host asks this once per delete before describing any message.
+    assert.strictEqual(ctx.__extera.hasHook('on_messages_will_be_deleted'), true);
 });
 
 test('loading never downloads the dex and says why once', () => {

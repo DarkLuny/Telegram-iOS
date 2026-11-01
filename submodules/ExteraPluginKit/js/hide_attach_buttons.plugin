@@ -124,12 +124,19 @@ class HideAttachButtonsPlugin extends BasePlugin {
     }
 
     // The keys the user switched off, expanded to iOS button keys.
+    //
+    // The check is for truth, not for `=== true`, because that is what the
+    // original did: `_hide_on` in the Android module is `bool(plugin.get_setting(
+    // f"hide_{key}", False))`. A stored switch comes back from the host as a
+    // `CFBoolean` bridged by JavaScriptCore as `1`, so an identity test would read
+    // "off" for every switch the user had turned on and nothing would ever be
+    // hidden.
     hiddenKeys() {
         var hidden = {};
         var names = hiddenByName();
         for (var name in names) {
             if (Object.prototype.hasOwnProperty.call(names, name) &&
-                HideAttachButtonsPlugin.g(names[name], false) === true) {
+                HideAttachButtonsPlugin.g(names[name], false)) {
                 hidden[name] = true;
             }
         }
@@ -143,7 +150,7 @@ class HideAttachButtonsPlugin extends BasePlugin {
             return null;
         }
         var hidden = this.hiddenKeys();
-        var hideBots = HideAttachButtonsPlugin.g("hide_all_bots", false) === true;
+        var hideBots = !!HideAttachButtonsPlugin.g("hide_all_bots", false);
         var result = [];
         for (var i = 0; i < keys.length; i++) {
             var key = String(keys[i]);

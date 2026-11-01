@@ -10,6 +10,13 @@ private enum EphemeralDeleteMessageRequest {
 }
 
 func _internal_deleteMessagesInteractively(account: Account, messageIds: [MessageId], type: InteractiveMessagesDeletionType, deleteAllInGroup: Bool = false) -> Signal<Void, NoError> {
+    // Asked before the transaction, not inside it: deciding "does a plugin
+    // listen" reaches into the script queue, and holding a postbox transaction
+    // across that would block every reader of the database behind plugin code.
+    // The answer cannot change between the two statements and a delete, so one
+    // question up front is enough.
+    let wantsDeletedMessageHook = PluginHookPoints.shared.messagesWillBeDeleted != nil
+        && (PluginHookPoints.shared.wantsMessagesWillBeDeleted?() ?? true)
     return account.postbox.transaction { transaction -> [EphemeralDeleteMessageRequest] in
         var ephemeralRequests: [EphemeralDeleteMessageRequest] = []
         for messageId in messageIds where messageId.namespace == Namespaces.Message.EphemeralLocal || messageId.namespace == Namespaces.Message.WelcomeMessageCloud {
@@ -34,6 +41,23 @@ func _internal_deleteMessagesInteractively(account: Account, messageIds: [Messag
 
             if let inputUser {
                 ephemeralRequests.append(.message(peer: inputPeer, receiverId: inputUser, id: messageId.id))
+            }
+        }
+
+        // The last moment a message the user deleted still exists. A delete he
+        // performs himself never comes back from the server as
+        // `updateDeleteMessages`, and the message never arrived as
+        // `updateNewMessage` either — sending it answers
+        // `updateShortSentMessage`, of which only the `pts` is applied — so a
+        // plugin that keeps deleted messages has neither half. The Android
+        // module hooked this same point (`DeleteMessages` /
+        // `MarkMessagesAsDeletedInternal`) for the same reason. Remote deletes
+        // still arrive as updates and are handled there, so they are not
+        // described twice.
+        if wantsDeletedMessageHook, let willBeDeleted = PluginHookPoints.shared.messagesWillBeDeleted {
+            let described = messageIds.compactMap { transaction.getMessage($0) }.map(pluginMessageDetailsJSON)
+            if !described.isEmpty {
+                willBeDeleted(account.id.int64, "{\"messages\":[" + described.joined(separator: ",") + "]}")
             }
         }
 

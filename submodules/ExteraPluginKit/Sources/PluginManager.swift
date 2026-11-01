@@ -373,6 +373,29 @@ public final class PluginManager: PluginHost {
         return self.hasRequestHook(name: name)
     }
 
+    /// Tells plugins that messages are about to be deleted from this device.
+    ///
+    /// Detached like the update hooks and for the same reason: this runs inside
+    /// a postbox transaction, and plugin JavaScript must never take the locks a
+    /// transaction holds. Nothing a plugin answers can reach the caller.
+    public func dispatchMessagesWillBeDeleted(account: Int64, messagesJSON: String) {
+        self.jsQueue.async { [weak self] in
+            guard let self = self else {
+                return
+            }
+            var payload = self.parseJSONObject(messagesJSON) ?? [:]
+            _ = self.dispatch(pluginEvent: "on_messages_will_be_deleted", hookName: "messages", account: account, payload: &payload)
+        }
+    }
+
+    /// Whether any plugin implements `on_messages_will_be_deleted`.
+    ///
+    /// Asked once per delete before any message is described; see
+    /// `PluginHookPoints.wantsMessagesWillBeDeleted`.
+    public func hasMessagesWillBeDeletedHook() -> Bool {
+        return self.hasPluginForHook("on_messages_will_be_deleted")
+    }
+
     /// Mirror of `on_send_message_hook`. Runs for every plugin that asked for it.
     public func dispatchSendMessage(account: Int64, params: inout [String: Any]) -> HookOutcome {
         return self.dispatch(pluginEvent: "on_send_message_hook", hookName: "send", account: account, payload: &params)
@@ -474,6 +497,14 @@ public final class PluginManager: PluginHost {
         let plugins = self.loaded.values.filter { plugin in
             if pluginEvent == "on_send_message_hook" {
                 return plugin.wantsSendMessageHook
+            }
+            if pluginEvent == "on_messages_will_be_deleted" {
+                // Not a TL update, so there is no constructor name to register
+                // against: the callback's presence is the subscription. The
+                // caller asked `hasMessagesWillBeDeletedHook` before paying for
+                // the payload, and a plugin without the callback answers
+                // "default" immediately in `runHook`.
+                return true
             }
             return PluginManager.pluginWants(plugin, hookName: hookName)
         }.sorted { $0.loadIndex < $1.loadIndex }
@@ -1107,6 +1138,48 @@ public final class PluginManager: PluginHost {
             }
         }
         return nil
+    }
+
+    /// Whether a plugin wants a message row hidden.
+    ///
+    /// Asked per row while the list is built, so it has to stay cheap when no
+    /// plugin listens: the caller checks `hasPluginForHook` before building the
+    /// message JSON. The first plugin that answers `true` wins — hiding a row is
+    /// not a value two plugins can negotiate.
+    public func dispatchHideMessage(account: Int64, messageJSON: String) -> Bool {
+        let context: [String: Any] = ["account": account]
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_hide_message", payloadJSON: messageJSON, context: context) else {
+                continue
+            }
+            if let visible = answer as? Bool {
+                return visible
+            }
+            // An object answer is accepted too, so a plugin can say why it hid a
+            // row without the runtime having to know the reason's shape.
+            if let dictionary = answer as? [String: Any], (dictionary["hide"] as? Bool) == true {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether any plugin implements an appearance callback such as `on_hide_message`.
+    ///
+    /// Runs the bootstrap's `hasHook`, which answers whether the plugin instance
+    /// has the method. Called once per history view, never per row, so
+    /// synchronizing onto the script queue is affordable; touching a `JSContext`
+    /// from the caller's thread would not be.
+    public func hasPluginForHook(_ event: String) -> Bool {
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.callJS(plugin: plugin, function: "__extera.hasHook", arguments: [event]) else {
+                continue
+            }
+            if answer == "true" {
+                return true
+            }
+        }
+        return false
     }
 
     /// Extra rows for the message-details screen, in plugin and item order.
