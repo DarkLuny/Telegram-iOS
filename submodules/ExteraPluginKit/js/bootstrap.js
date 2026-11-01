@@ -944,7 +944,18 @@ var __extera = (function () {
 
     // --- HookResult -------------------------------------------------------
 
+    // `HookResult` is a constructor, but exteraGram's own examples write
+    // `HookResult()` as often as `HookResult(strategy=...)`, and every other
+    // builder in this runtime (`Switch`, `Text`, `Header`) returns its object
+    // without `new`. Calling it without `new` used to throw on
+    // `this.strategy = ...`, which made a plugin's hook fail silently after the
+    // dispatcher had already swallowed the exception: the hook looked subscribed
+    // and never did anything. Returning the instance from a plain call fixes
+    // that, and `new HookResult(...)` keeps working.
     function HookResult(options) {
+        if (!(this instanceof HookResult)) {
+            return new HookResult(options);
+        }
         options = options || {};
         this.strategy = options.strategy || HookStrategy.DEFAULT;
         this.request = options.request !== undefined ? options.request : null;

@@ -142,6 +142,32 @@ test('pre_request_hook can cancel', () => {
     assert.strictEqual(ctx.__extera.normalizeResult(r, 'request').strategy, 'cancel');
 });
 
+test('HookResult works without new, the way every other builder does', () => {
+    const host = makeHost();
+    const ctx = runPlugin(`
+        class P extends BasePlugin {
+            pre_request_hook(name, account, request) {
+                if (name === "TL_messages_setTyping") {
+                    // exteraGram's own examples call this without new. It used
+                    // to throw here, and the dispatcher swallowed the exception:
+                    // the hook looked registered and never cancelled anything.
+                    return HookResult();
+                }
+                return HookResult({ strategy: HookStrategy.CANCEL });
+            }
+        }
+        var __plugin_instance__ = __extera.register(P);
+    `, host);
+    assert.strictEqual(
+        ctx.__extera.runHook('pre_request_hook', '{}', JSON.stringify({ name: 'messages.setTyping', tlName: 'TL_messages_setTyping', account: 900, field: 'request' })),
+        '{"strategy":"default"}'
+    );
+    assert.strictEqual(
+        ctx.__extera.runHook('pre_request_hook', '{}', JSON.stringify({ name: 'messages.readHistory', tlName: 'TL_messages_readHistory', account: 900, field: 'request' })),
+        '{"strategy":"cancel"}'
+    );
+});
+
 test('add_hook forwards match_substring to the host', () => {
     const host = makeHost();
     const ctx = runPlugin(`

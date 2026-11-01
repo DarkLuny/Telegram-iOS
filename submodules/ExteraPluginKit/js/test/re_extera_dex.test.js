@@ -2,10 +2,11 @@
  * Runs js/re_extera_dex.plugin through the real bootstrap against a fake __host,
  * with a fake `actual.json`.
  *
- * The plugin exists on Android to load a Dalvik module, which cannot happen here.
- * What this test pins down is the half that does work and the honesty of the
- * other half: the version lookup picks the same entry the Python did, the settings
- * row reports it, and nothing claims to have started or downloaded a dex.
+ * The Android plugin loads a Dalvik module and that module contains the actual
+ * features. What this test pins down is the part of that module which can be
+ * expressed as client hooks — ghost mode — plus the honesty of the rest: the
+ * version lookup still answers, nothing is downloaded, and no switch exists that
+ * cannot do what it says.
  */
 const fs = require('fs');
 const path = require('path');
@@ -60,7 +61,7 @@ function makeHost(options) {
         setSetting: (id, key, value) => { settings[key] = value; return true; },
         exportSettings: () => ({ ...settings }),
         importSettings: (id, values) => { Object.assign(settings, values); },
-        addHook: () => {},
+        addHook: (id, name, sub) => calls.push(['addHook', id, name, sub]),
         addOnSendMessageHook: () => {},
         addMenuItem: () => 'item',
         removeMenuItem: () => {},
@@ -142,10 +143,14 @@ function clickSettingsRow(ctx) {
     ctx.__extera.invokeSettingCallback(row.key, 'click', 'null');
 }
 
-// The row is a caption, so nothing taps it any more. `open_settings` still exists
-// because a ported caller may reach it, and this is what such a caller does.
-function callOpenSettings(ctx) {
-    ctx.__extera.instance.open_settings();
+// Runs one request hook the way the runtime does: payload plus the context that
+// carries both spellings of the name.
+function hookOf(ctx, name) {
+    return JSON.parse(ctx.__extera.runHook(
+        'pre_request_hook',
+        JSON.stringify({ peer: 'inputPeerUser', action: 'sendMessageTypingAction' }),
+        JSON.stringify({ name: name, tlName: 'TL_' + name.replace(/\./g, '_'), account: 900, field: 'request' })
+    ));
 }
 
 function logText(state) {
@@ -240,48 +245,110 @@ test('a failing version list reports the transport error, not a crash', () => {
     assert.ok(logText(state).includes('Error fetching version info'));
 });
 
-test('the settings row is one caption with a translated label', () => {
+test('the settings screen is ghost mode, with one switch per thing it blocks', () => {
     const state = makeHost();
     const ctx = load(state, 'en-US');
     const rows = settingsOf(ctx);
-    assert.strictEqual(rows.length, 1);
-    assert.strictEqual(rows[0].type, 'text');
-    assert.strictEqual(rows[0].key, 'open_settings');
-    assert.strictEqual(rows[0].text, 're:extera module');
-    // A caption, not a button: a tap has nothing to do here for the module's own
-    // screen, and the row only explains what the module is.
-    assert.strictEqual(rows[0].has_click, false);
-    assert.ok(rows[0].subtext.includes('dex'), rows[0].subtext);
+    const switches = rows.filter((r) => r.type === 'switch');
+    const keys = switches.map((r) => r.key);
+    assert.deepStrictEqual(keys, [
+        're_extera_ghost',
+        're_extera_ghost_typing',
+        're_extera_ghost_online',
+        're_extera_ghost_read',
+        're_extera_ghost_read_contents',
+        're_extera_ghost_stories',
+    ]);
+    // No dead rows: every switch has a handler the host can call.
+    for (const row of switches) {
+        assert.strictEqual(row.has_callbacks, true, row.key);
+    }
+    // Ghost mode itself ships off; its parts ship on, so enabling the master
+    // switch covers everything the module covered.
+    assert.strictEqual(switches[0].value, false);
+    for (const row of switches.slice(1)) {
+        assert.strictEqual(row.value, true, row.key);
+    }
 
     const ru = makeHost();
     const ruCtx = load(ru, 'ru-RU');
-    assert.strictEqual(settingsOf(ruCtx)[0].text, 'Модуль re:extera');
+    assert.strictEqual(settingsOf(ruCtx).filter((r) => r.type === 'switch')[0].text, 'Режим призрака');
 });
 
-test('tapping the row shows no bulletin; the lookup writes to the log instead', () => {
+test('with ghost mode off nothing is cancelled', () => {
     const state = makeHost();
     const ctx = load(state, 'en-US');
-    const before = state.bulletins.length;
-    clickSettingsRow(ctx);
-    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
-    callOpenSettings(ctx);
-    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
-    const text = logText(state);
-    assert.ok(text.includes('has no settings screen'), text);
-    assert.ok(text.includes('13.1.1'), text);
-    assert.ok(text.includes('13110'), text);
+    for (const name of ['messages.setTyping', 'account.updateStatus', 'messages.readHistory', 'stories.readStories']) {
+        assert.strictEqual(hookOf(ctx, name).strategy, 'default', name);
+    }
 });
 
-test('a lookup with no build for this version logs that instead of bridging a bulletin', () => {
-    const state = makeHost({ appVersion: '11.0.0' });
+test('ghost mode cancels typing, online, read and story requests', () => {
+    const state = makeHost({ settings: { re_extera_ghost: true } });
     const ctx = load(state, 'en-US');
-    const before = state.bulletins.length;
-    clickSettingsRow(ctx);
-    callOpenSettings(ctx);
-    assert.strictEqual(state.bulletins.length, before, JSON.stringify(state.bulletins));
-    const text = logText(state);
-    assert.ok(text.includes('11.0.0'), text);
-    assert.ok(text.includes('no build'), text);
+    const cancelled = [
+        'messages.setTyping',
+        'messages.setEncryptedTyping',
+        'account.updateStatus',
+        'messages.readHistory',
+        'channels.readHistory',
+        'messages.readMessageContents',
+        'channels.readMessageContents',
+        'stories.readStories',
+    ];
+    for (const name of cancelled) {
+        assert.strictEqual(hookOf(ctx, name).strategy, 'cancel', name);
+    }
+    // The TL spelling the runtime actually passes is understood too.
+    assert.strictEqual(
+        ctx.__extera.runHook('pre_request_hook', '{}', JSON.stringify({ tlName: 'TL_messages_setTyping', name: 'messages.setTyping', account: 900, field: 'request' })),
+        '{"strategy":"cancel"}'
+    );
+    // And an unrelated request passes through untouched.
+    assert.strictEqual(hookOf(ctx, 'messages.sendMessage').strategy, 'default');
+});
+
+test('each part of ghost mode can be turned off on its own', () => {
+    const state = makeHost({
+        settings: {
+            re_extera_ghost: true,
+            re_extera_ghost_typing: false,
+            re_extera_ghost_stories: false,
+        },
+    });
+    const ctx = load(state, 'en-US');
+    assert.strictEqual(hookOf(ctx, 'messages.setTyping').strategy, 'default');
+    assert.strictEqual(hookOf(ctx, 'stories.readStories').strategy, 'default');
+    // The parts that were left on still fire.
+    assert.strictEqual(hookOf(ctx, 'account.updateStatus').strategy, 'cancel');
+    assert.strictEqual(hookOf(ctx, 'messages.readHistory').strategy, 'cancel');
+});
+
+test('a switch flipped in the UI takes effect without a reload', () => {
+    const state = makeHost();
+    const ctx = load(state, 'en-US');
+    assert.strictEqual(hookOf(ctx, 'messages.setTyping').strategy, 'default');
+    ctx.__extera.invokeSettingCallback('re_extera_ghost', 'change', JSON.stringify({ value: true }));
+    assert.strictEqual(state.settings.re_extera_ghost, true);
+    assert.strictEqual(hookOf(ctx, 'messages.setTyping').strategy, 'cancel');
+});
+
+test('every request the ghost covers is subscribed at load', () => {
+    const state = makeHost();
+    load(state, 'en-US');
+    const hooks = state.calls.filter((c) => c[0] === 'addHook').map((c) => c[2]);
+    for (const name of ['messages.setTyping', 'account.updateStatus', 'messages.readHistory', 'stories.readStories']) {
+        assert.ok(hooks.includes(name), name + ' missing from ' + JSON.stringify(hooks));
+    }
+});
+
+test('the settings screen shows no bulletin and no dead report row', () => {
+    const state = makeHost();
+    const ctx = load(state, 'en-US');
+    assert.deepStrictEqual(state.bulletins, []);
+    const rows = settingsOf(ctx);
+    const textRows = rows.filter((r) => r.type === 'text');
+    assert.deepStrictEqual(textRows, [], JSON.stringify(textRows));
 });
 
 test('loading never downloads the dex and says why once', () => {
@@ -325,10 +392,12 @@ test('start_from_bytes and show_settings answer without pretending', () => {
 test('an unknown app version is reported instead of guessed', () => {
     const state = makeHost({ appVersion: 'Unknown' });
     const ctx = load(state, 'en-US');
-    callOpenSettings(ctx);
     assert.deepStrictEqual(state.bulletins, [], JSON.stringify(state.bulletins));
+    let answered = 'unset';
+    ctx.__extera.instance.loader.fetch_version_info((info) => { answered = info; });
+    assert.strictEqual(answered, null);
     const text = logText(state);
-    assert.ok(text.includes('unknown'), text);
+    assert.ok(text.includes('did not answer'), text);
 });
 
 test('unloading stops the loader and logs it', () => {
