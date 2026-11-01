@@ -227,7 +227,22 @@ var STORY_REQUESTS = ["stories.readStories"];
 // it arrives, because a delete update carries only its id: by then the text is
 // gone from the client's own database. `updateEditMessage` overwrites the copy
 // so the saved entry matches what the user last saw.
-var UPDATE_HOOKS = ["updateNewMessage", "updateEditMessage", "updateDeleteMessages"];
+//
+// Channels and supergroups are not a variant of the plain updates: Telegram
+// sends `updateNewChannelMessage`, `updateEditChannelMessage` and
+// `updateDeleteChannelMessages` as separate constructors, and the client's own
+// state machine handles them in different branches. A plugin that watched only
+// the three plain names therefore never saw a single message from a channel,
+// which is why saving worked in private chats and nowhere else.
+var UPDATE_HOOKS = [
+    "updateNewMessage",
+    "updateNewChannelMessage",
+    "updateEditMessage",
+    "updateEditChannelMessage",
+    "updateDeleteMessages",
+    "updateDeleteChannelMessages",
+    "updateDeleteScheduledMessages"
+];
 
 // The module's local store. Android kept an SQLite database (`deleted_keys`),
 // which iOS has no counterpart for; one JSON file per account is the same idea
@@ -514,22 +529,44 @@ ReExteraPlugin.prototype.findRemembered = function (peerId, messageId) {
 // The module's `ProcessDeletedMessages`: a delete update names only message ids,
 // so the peer is the one the hook was fired for when the update does not carry
 // one. It keeps what was already saved and marks it deleted.
-ReExteraPlugin.prototype.processDeletedMessages = function (account, messageIds) {
+//
+// `peerId` is optional on purpose. `updateDeleteMessages` carries no peer at
+// all (its ids are the client's global ones), while
+// `updateDeleteChannelMessages` names a `channel_id`; and the scheduled-delete
+// update names a `peer`. Matching on the id alone marked the same id in every
+// chat, so a delete in one dialog silently crossed out an unrelated saved
+// message in another. When the update knows the peer, it is used as a second
+// key; when it does not, the id alone is all there is, which is the old
+// behaviour.
+ReExteraPlugin.prototype.processDeletedMessages = function (account, messageIds, peerId) {
     if (!this.saveRemoteDeletionsEnabled()) {
         return;
     }
+    if (!Array.isArray(messageIds) || messageIds.length === 0) {
+        return;
+    }
+    var peer = (peerId === undefined || peerId === null) ? null : Number(peerId);
+    if (peer === 0) {
+        peer = null;
+    }
+    var matches = function (entry) {
+        if (peer !== null && Number(entry.peer_id) !== peer) {
+            return false;
+        }
+        return true;
+    };
     var store = this.readStore();
     var changed = false;
     for (var i = 0; i < messageIds.length; i += 1) {
         var id = Number(messageIds[i]);
         for (var j = 0; j < store.edits.length; j += 1) {
-            if (store.edits[j].id === id && !store.edits[j].deleted) {
+            if (store.edits[j].id === id && !store.edits[j].deleted && matches(store.edits[j])) {
                 store.edits[j].deleted = true;
                 changed = true;
             }
         }
         for (var k = 0; k < store.deleted_keys.length; k += 1) {
-            if (store.deleted_keys[k].id === id && !store.deleted_keys[k].deleted) {
+            if (store.deleted_keys[k].id === id && !store.deleted_keys[k].deleted && matches(store.deleted_keys[k])) {
                 store.deleted_keys[k].deleted = true;
                 changed = true;
             }
@@ -610,49 +647,92 @@ function peerKey(peer) {
     return 0;
 }
 
+// `channel_id` is a bare number, not a `Peer` object, so it needs the same
+// namespace encoding `peerKey` applies: a channel's peer id is its id plus
+// `2 * 2^32`. Returns 0 when the update carries none.
+function channelPeerKey(channelId) {
+    if (typeof channelId !== "number" || !isFinite(channelId) || channelId === 0) {
+        return 0;
+    }
+    return channelId + 2 * 4294967296;
+}
+
+// The message a `...ChannelMessage` update carries is described exactly like the
+// one a plain update carries, so both go through this: the TL object has to have
+// its `peer_id` flattened before the store sees it, because the store keeps the
+// number `pluginMessageDetailsJSON` reports.
+ReExteraPlugin.prototype.rememberFromUpdate = function (messageObject, edited) {
+    if (!messageObject || typeof messageObject !== "object") {
+        return;
+    }
+    var peer = peerKey(messageObject.peer_id);
+    if (peer) {
+        messageObject.peer_id = peer;
+    }
+    // A TL message spells the direction `out`, while the flattened form uses
+    // `is_out`. The store keeps `is_out`, so the TL spelling is translated here
+    // instead of being lost: an own message was saved as incoming before.
+    if (messageObject.out !== undefined && messageObject.is_out === undefined) {
+        messageObject.is_out = !!messageObject.out;
+    }
+    // `from_id` is optional in the schema, so `pluginJSONValue` hands an absent
+    // one over as `null` rather than leaving the key out. Compared against
+    // `undefined` alone, that null became peer 0 and the author was lost.
+    var from = messageObject.from_id;
+    if (from !== undefined && from !== null) {
+        messageObject.from_id = peerKey(from);
+    } else {
+        delete messageObject.from_id;
+    }
+    // A channel post has no `from_id`: the channel itself is the author. The
+    // module recorded it as `sender_id` so a ported filter still has a value,
+    // but that fallback belongs to channels only — a private message with no
+    // author (an anonymous admin, a deleted account) really has none, and
+    // inventing the chat there would make a shadow ban on the chat hide itself.
+    var isChannelPeer = peer >= 2 * 4294967296 && peer < 3 * 4294967296;
+    if (isChannelPeer && messageObject.sender_id === undefined && messageObject.from_id === undefined) {
+        messageObject.sender_id = peer;
+    }
+    if (edited) {
+        if (this.flag("save_edits", true)) {
+            this.rememberMessage(messageObject, true);
+        }
+        return;
+    }
+    if (this.saveRemoteDeletionsEnabled()) {
+        this.rememberMessage(messageObject, false);
+    }
+};
+
 ReExteraPlugin.prototype.on_update_hook = function (name, account, update) {
     var normalized = String(name || "").replace(/^TL_/, "");
     if (!update || typeof update !== "object") {
         return;
     }
-    if (normalized === "updateNewMessage") {
-        var message = update.message;
-        if (!message || typeof message !== "object") {
-            return;
-        }
-        // The runtime describes `peer_id` as its TL object; the store keeps the
-        // number, which is also what the message details screen reports.
-        var peerId = peerKey(message.peer_id);
-        if (peerId) {
-            message.peer_id = peerId;
-        }
-        if (message.from_id !== undefined && typeof message.from_id === "object") {
-            message.from_id = peerKey(message.from_id);
-        }
-        if (this.saveRemoteDeletionsEnabled()) {
-            this.rememberMessage(message, false);
-        }
+    if (normalized === "updateNewMessage" || normalized === "updateNewChannelMessage") {
+        this.rememberFromUpdate(update.message, false);
         return;
     }
-    if (normalized === "updateEditMessage") {
-        var edited = update.message;
-        if (!edited || typeof edited !== "object") {
-            return;
-        }
-        if (peerKey(edited.peer_id)) {
-            edited.peer_id = peerKey(edited.peer_id);
-        }
-        if (this.flag("save_edits", true)) {
-            this.rememberMessage(edited, true);
-        }
+    if (normalized === "updateEditMessage" || normalized === "updateEditChannelMessage") {
+        this.rememberFromUpdate(update.message, true);
         return;
     }
-    if (normalized === "updateDeleteMessages" || normalized === "updateDeleteScheduledMessages") {
-        var ids = update.messages;
-        if (!Array.isArray(ids)) {
-            return;
-        }
-        this.processDeletedMessages(account, ids);
+    if (normalized === "updateDeleteChannelMessages") {
+        // The only delete update that names its peer. Without it the ids would
+        // be matched across every chat.
+        this.processDeletedMessages(account, update.messages, channelPeerKey(update.channel_id));
+        return;
+    }
+    if (normalized === "updateDeleteScheduledMessages") {
+        // Scheduled messages live in their own namespace and are named by a
+        // `peer` object rather than a channel id, so the peer comes from there.
+        this.processDeletedMessages(account, update.messages, peerKey(update.peer));
+        return;
+    }
+    if (normalized === "updateDeleteMessages") {
+        // No peer in this constructor: the ids are global and the client resolves
+        // them itself. Matching by id alone is all that is possible here.
+        this.processDeletedMessages(account, update.messages, null);
     }
 };
 

@@ -601,9 +601,98 @@ test('the history hooks are subscribed even when the store cannot be read', () =
     const state = makeHost({ failStore: true });
     load(state, 'en-US');
     const hooks = state.calls.filter((c) => c[0] === 'addHook').map((c) => c[2]);
-    for (const name of ['updateNewMessage', 'updateEditMessage', 'updateDeleteMessages']) {
+    // Channels are not a variant of the plain updates but separate constructors,
+    // so a plugin that watched only the plain names never saw a channel message.
+    for (const name of [
+        'updateNewMessage', 'updateNewChannelMessage',
+        'updateEditMessage', 'updateEditChannelMessage',
+        'updateDeleteMessages', 'updateDeleteChannelMessages',
+        'updateDeleteScheduledMessages',
+    ]) {
         assert.ok(hooks.includes(name), name + ' missing from ' + JSON.stringify(hooks));
     }
+});
+
+test('a message in a channel is saved with its own peer id', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    // A supergroup/channel is peer namespace 2, so its peer id is channel_id + 2 * 2^32.
+    const channelId = 1234;
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 55, peer_id: { _: 'peerChannel', channel_id: channelId }, date: 20, message: 'in a channel' },
+        pts: 5, pts_count: 1,
+    }), JSON.stringify({ name: 'updateNewChannelMessage', account: 900, field: 'update' }));
+    assert.strictEqual(state.written.length, 1, 'a channel message is stored');
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys.length, 1);
+    assert.strictEqual(store.deleted_keys[0].peer_id, channelId + 2 * 4294967296);
+    assert.strictEqual(store.deleted_keys[0].text, 'in a channel');
+});
+
+test('a channel delete marks only the channel it named', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    const channelId = 77;
+    const channelPeer = channelId + 2 * 4294967296;
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 9, peer_id: { _: 'peerChannel', channel_id: channelId }, date: 1, message: 'channel copy' },
+    }), JSON.stringify({ name: 'updateNewChannelMessage', account: 900, field: 'update' }));
+    // Same id in a private chat: an unrelated message that must survive.
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 9, peer_id: { _: 'peerUser', user_id: 4242 }, date: 2, message: 'private copy' },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ channel_id: channelId, messages: [9] }), JSON.stringify({
+        name: 'updateDeleteChannelMessages', tlName: 'TL_updateDeleteChannelMessages', account: 900, field: 'update',
+    }));
+    const store = JSON.parse(state.written[state.written.length - 1]);
+    const byPeer = {};
+    for (const entry of store.deleted_keys) {
+        byPeer[entry.peer_id] = entry;
+    }
+    assert.strictEqual(byPeer[channelPeer].deleted, true, 'the channel copy is marked');
+    assert.strictEqual(byPeer[4242].deleted, undefined, 'the private copy with the same id is untouched');
+});
+
+test('a channel edit replaces the saved text', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    const channelId = 5;
+    const base = { _: 'message', id: 61, peer_id: { _: 'peerChannel', channel_id: channelId }, date: 3 };
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: { ...base, message: 'before' } }), JSON.stringify({
+        name: 'updateNewChannelMessage', account: 900, field: 'update',
+    }));
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({ message: { ...base, message: 'after' } }), JSON.stringify({
+        name: 'updateEditChannelMessage', account: 900, field: 'update',
+    }));
+    const store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.edits.length, 1);
+    assert.strictEqual(store.edits[0].text, 'after');
+    assert.strictEqual(store.edits[0].peer_id, channelId + 2 * 4294967296);
+});
+
+test('a scheduled delete uses the peer the update carries', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 300, peer_id: { _: 'peerUser', user_id: 8 }, date: 4, message: 'scheduled' },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        peer: { _: 'peerUser', user_id: 8 }, messages: [300],
+    }), JSON.stringify({ name: 'updateDeleteScheduledMessages', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[state.written.length - 1]);
+    assert.strictEqual(store.deleted_keys[0].deleted, true);
+});
+
+test('the TL_ spelling of a channel update is understood too', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 12, peer_id: { _: 'peerChannel', channel_id: 3 }, date: 5, message: 'tl name' },
+    }), JSON.stringify({ name: 'TL_updateNewChannelMessage', account: 900, field: 'update' }));
+    assert.strictEqual(state.written.length, 1);
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys[0].text, 'tl name');
 });
 
 test('the local delete hook is implemented, and the host can tell', () => {
@@ -667,6 +756,25 @@ test('unloading stops the loader and logs it', () => {
     const ctx = load(state);
     ctx.__extera.callLifecycleJSON('on_plugin_unload', '{}');
     assert.ok(logText(state).includes('re:extera: plugin unloaded'));
+});
+
+test('a TL message keeps its direction and drops a null author', () => {
+    // `pluginJSONValue` describes a message from the schema: the direction is
+    // `out`, and an absent `from_id` arrives as `null` rather than missing. Both
+    // spellings have to be handled, or an own message is stored as incoming and
+    // the author becomes peer 0.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: {
+            _: 'message', flags: 2, out: true, id: 400, peer_id: { _: 'peerUser', user_id: 21 },
+            from_id: null, date: 6, message: 'mine',
+        },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    const store = JSON.parse(state.written[0]);
+    assert.strictEqual(store.deleted_keys[0].is_out, true, 'out is translated to is_out');
+    assert.strictEqual(store.deleted_keys[0].peer_id, 21);
+    assert.strictEqual(store.deleted_keys[0].sender_id, 0, 'no author means no sender, not peer 0');
 });
 
 let failed = 0;
