@@ -1328,7 +1328,9 @@ public final class PluginManager: PluginHost {
     /// place the row among the live messages, and a zero would put every broken
     /// entry at the very bottom of the chat.
     private func storedMessage(from object: [String: Any], peerId: Int64) -> PluginStoredMessage? {
-        guard let id = (object["id"] as? NSNumber)?.intValue, id != 0 else {
+        // `messageId` is `Int32` on the wire, so it is read as one here rather
+        // than widened to `Int` and narrowed back at the call.
+        guard let id = (object["id"] as? NSNumber)?.int32Value, id != 0 else {
             return nil
         }
         let timestamp = (object["date"] as? NSNumber)?.int32Value ?? 0
