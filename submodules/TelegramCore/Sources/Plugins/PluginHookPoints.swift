@@ -119,6 +119,22 @@ public final class PluginHookPoints {
     /// call on every chat the user opens.
     public var wantsDeletedMessages: (() -> Bool)?
 
+    /// Asks a plugin to forget the copies it kept for the given messages.
+    ///
+    /// A saved row is not in the database, so the delete path cannot drop it on
+    /// its own: the copy in the plugin's store is the row, and only the plugin
+    /// can drop it. The UI calls this with the ids it is about to remove, then
+    /// rebuilds the list, which is what makes a saved row disappear when the
+    /// user selects it and deletes it like any other message.
+    ///
+    /// `peerId` and each id are Postbox's own numbers, the same ones the rows
+    /// carry (`peerId.toInt64()` and `MessageId.id`).
+    public var forgetDeletedMessages: ((_ accountId: Int64, _ peerId: Int64, _ messageIds: [Int32]) -> Void)?
+
+    /// Whether any plugin can forget saved copies, so the delete path can skip
+    /// the call when nothing listens.
+    public var canForgetDeletedMessages: (() -> Bool)?
+
     // MARK: - Appearance
     //
     // The four hooks below are not network interception: they answer "what should

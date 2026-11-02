@@ -1038,6 +1038,45 @@ ReExteraPlugin.prototype.on_deleted_messages = function (account, payload) {
     return rows;
 };
 
+// `on_forget_deleted_messages` — the user selected a saved copy in the chat and
+// deleted it. The row is not in Telegram's database, so the client cannot drop
+// it: it asks here, and the copy is removed from the store. `deleted_keys` is
+// what `on_deleted_messages` reads, so dropping the entry here is the same as
+// deleting the row; `invalidateRowCache` makes the next build stop answering
+// with it. `edits` is untouched — an edited message is a live message, not a
+// deleted row, and the chat never draws it as one.
+ReExteraPlugin.prototype.on_forget_deleted_messages = function (account, payload) {
+    if (!payload || typeof payload !== "object") {
+        return;
+    }
+    var peerId = Number(payload.peer_id === undefined ? 0 : payload.peer_id);
+    var ids = payload.message_ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return;
+    }
+    var wanted = {};
+    for (var i = 0; i < ids.length; i += 1) {
+        wanted[Number(ids[i])] = true;
+    }
+    var store = this.readStore();
+    var kept = [];
+    var removed = 0;
+    for (var j = 0; j < store.deleted_keys.length; j += 1) {
+        var entry = store.deleted_keys[j];
+        if (Number(entry.peer_id) === peerId && wanted[Number(entry.id)] === true) {
+            removed += 1;
+            continue;
+        }
+        kept.push(entry);
+    }
+    if (removed === 0) {
+        return;
+    }
+    store.deleted_keys = kept;
+    this.writeStore();
+    this.log("Forgot " + removed + " saved message(s) in " + peerId);
+};
+
 // --- profile / menu ---------------------------------------------------------
 
 // One line of the deleted/edited screen: the peer, the message id, and the text

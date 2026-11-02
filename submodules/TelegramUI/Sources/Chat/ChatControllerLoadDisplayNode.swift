@@ -1757,18 +1757,32 @@ extension ChatControllerImpl {
         }, deleteSelectedMessages: { [weak self] sourceView in
             if let strongSelf = self {
                 if let messageIds = strongSelf.presentationInterfaceState.interfaceState.selectionState?.selectedIds, !messageIds.isEmpty {
-                    strongSelf.messageContextDisposable.set((strongSelf.context.sharedContext.chatAvailableMessageActions(engine: strongSelf.context.engine, accountPeerId: strongSelf.context.account.peerId, messageIds: messageIds, keepUpdated: false)
+                    // A saved copy is not in the database, so
+                    // `chatAvailableMessageActions` offers nothing for it and the
+                    // ordinary path would fall through to the cache suggestion.
+                    // When the selection holds such a row the plugin is asked to
+                    // forget it here, and only the live ids left over go on to the
+                    // normal action sheet.
+                    let savedCopyIds = strongSelf.chatDisplayNode.historyNode.savedCopyMessageIds(among: messageIds)
+                    if !savedCopyIds.isEmpty {
+                        strongSelf.forgetSavedCopies(savedCopyIds)
+                    }
+                    let liveMessageIds = messageIds.subtracting(savedCopyIds)
+                    if liveMessageIds.isEmpty {
+                        return
+                    }
+                    strongSelf.messageContextDisposable.set((strongSelf.context.sharedContext.chatAvailableMessageActions(engine: strongSelf.context.engine, accountPeerId: strongSelf.context.account.peerId, messageIds: liveMessageIds, keepUpdated: false)
                     |> deliverOnMainQueue).startStrict(next: { actions in
                         if let strongSelf = self, !actions.options.isEmpty {
                             if let banAuthor = actions.banAuthor {
-                                strongSelf.presentBanMessageOptions(accountPeerId: strongSelf.context.account.peerId, author: banAuthor, messageIds: messageIds, options: actions.options)
+                                strongSelf.presentBanMessageOptions(accountPeerId: strongSelf.context.account.peerId, author: banAuthor, messageIds: liveMessageIds, options: actions.options)
                             } else if !actions.banAuthors.isEmpty {
-                                strongSelf.presentMultiBanMessageOptions(accountPeerId: strongSelf.context.account.peerId, authors: actions.banAuthors, messageIds: messageIds, options: actions.options)
+                                strongSelf.presentMultiBanMessageOptions(accountPeerId: strongSelf.context.account.peerId, authors: actions.banAuthors, messageIds: liveMessageIds, options: actions.options)
                             } else {
                                 if actions.options.intersection([.deleteLocally, .deleteGlobally]).isEmpty {
                                     strongSelf.presentClearCacheSuggestion()
                                 } else {
-                                    strongSelf.presentDeleteMessageOptions(messageIds: messageIds, options: actions.options, contextController: nil, sourceView: sourceView, completion: { _ in })
+                                    strongSelf.presentDeleteMessageOptions(messageIds: liveMessageIds, options: actions.options, contextController: nil, sourceView: sourceView, completion: { _ in })
                                 }
                             }
                         }
@@ -1879,7 +1893,18 @@ extension ChatControllerImpl {
             }
             
             let messageIds = Set(messages.map { $0.id })
-            self.messageContextDisposable.set((self.context.sharedContext.chatAvailableMessageActions(engine: self.context.engine, accountPeerId: self.context.account.peerId, messageIds: messageIds, keepUpdated: false)
+            // A saved copy is not in the database: react on it before the action
+            // lookup, which would find nothing and drop the request silently.
+            let savedCopyIds = self.chatDisplayNode.historyNode.savedCopyMessageIds(among: messageIds)
+            if !savedCopyIds.isEmpty {
+                self.forgetSavedCopies(savedCopyIds)
+            }
+            let liveMessageIds = messageIds.subtracting(savedCopyIds)
+            if liveMessageIds.isEmpty {
+                completion(.dismissWithoutContent)
+                return
+            }
+            self.messageContextDisposable.set((self.context.sharedContext.chatAvailableMessageActions(engine: self.context.engine, accountPeerId: self.context.account.peerId, messageIds: liveMessageIds, keepUpdated: false)
             |> deliverOnMainQueue).startStrict(next: { [weak self] actions in
                 guard let self, !actions.options.isEmpty else {
                     return
@@ -1932,10 +1957,10 @@ extension ChatControllerImpl {
                             guard let self else {
                                 return
                             }
-                            self.presentBanMessageOptions(accountPeerId: self.context.account.peerId, author: banAuthor, messageIds: messageIds, options: actions.options)
+                            self.presentBanMessageOptions(accountPeerId: self.context.account.peerId, author: banAuthor, messageIds: liveMessageIds, options: actions.options)
                         })
                     } else {
-                        self.presentBanMessageOptions(accountPeerId: self.context.account.peerId, author: banAuthor, messageIds: messageIds, options: actions.options)
+                        self.presentBanMessageOptions(accountPeerId: self.context.account.peerId, author: banAuthor, messageIds: liveMessageIds, options: actions.options)
                         completion(.default)
                     }
                 } else {
@@ -1948,10 +1973,10 @@ extension ChatControllerImpl {
                         }
                     }
                     if isAction && (actions.options == .deleteGlobally || actions.options == .deleteLocally) {
-                        let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(messageIds), type: actions.options == .deleteLocally ? .forLocalPeer : .forEveryone).startStandalone()
+                        let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(liveMessageIds), type: actions.options == .deleteLocally ? .forLocalPeer : .forEveryone).startStandalone()
                         completion(.dismissWithoutContent)
                     } else if (messages.first?.flags.isSending ?? false) {
-                        let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(messageIds), type: .forEveryone, deleteAllInGroup: true).startStandalone()
+                        let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(liveMessageIds), type: .forEveryone, deleteAllInGroup: true).startStandalone()
                         completion(.dismissWithoutContent)
                     } else {
                         if actions.options.intersection([.deleteLocally, .deleteGlobally]).isEmpty {
@@ -1959,13 +1984,13 @@ extension ChatControllerImpl {
                             completion(.default)
                         } else {
                             var isScheduled = false
-                            for id in messageIds {
+                            for id in liveMessageIds {
                                 if Namespaces.Message.allScheduled.contains(id.namespace) {
                                     isScheduled = true
                                     break
                                 }
                             }
-                            self.presentDeleteMessageOptions(messageIds: messageIds, options: isScheduled ? [.deleteLocally] : actions.options, contextController: contextController, completion: completion)
+                            self.presentDeleteMessageOptions(messageIds: liveMessageIds, options: isScheduled ? [.deleteLocally] : actions.options, contextController: contextController, completion: completion)
                         }
                     }
                 }

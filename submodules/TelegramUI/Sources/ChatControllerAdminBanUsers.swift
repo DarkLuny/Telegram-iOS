@@ -419,6 +419,22 @@ extension ChatControllerImpl {
     }
         
     func beginDeleteMessagesWithUndo(messageIds: Set<EngineMessage.Id>, type: InteractiveMessagesDeletionType) {
+        // A row that is a saved copy exists only in the list — the plugin's store
+        // is the message. The database has nothing to delete and the engine would
+        // no-op, so these ids are handed to the plugin and dropped from the set
+        // that goes to `deleteMessagesInteractively`. The list rebuilds after the
+        // call and the row is gone, which reads as the row having been deleted
+        // like any other message.
+        let savedCopyIds = self.chatDisplayNode.historyNode.savedCopyMessageIds(among: messageIds)
+        var liveMessageIds = messageIds
+        if !savedCopyIds.isEmpty {
+            liveMessageIds.subtract(savedCopyIds)
+            self.forgetSavedCopies(savedCopyIds)
+        }
+        if liveMessageIds.isEmpty {
+            return
+        }
+
         var deleteImmediately = false
         if case .forEveryone = type {
             deleteImmediately = true
@@ -427,21 +443,21 @@ extension ChatControllerImpl {
         } else if case .peer(self.context.account.peerId) = self.chatLocation {
             deleteImmediately = true
         }
-        
+
         if deleteImmediately {
-            let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(messageIds), type: type).startStandalone()
+            let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(liveMessageIds), type: type).startStandalone()
             return
         }
-        
-        self.chatDisplayNode.historyNode.ignoreMessageIds = Set(messageIds)
-        
-        let undoTitle = self.presentationData.strings.Chat_MessagesDeletedToast_Text(Int32(messageIds.count))
+
+        self.chatDisplayNode.historyNode.ignoreMessageIds = liveMessageIds
+
+        let undoTitle = self.presentationData.strings.Chat_MessagesDeletedToast_Text(Int32(liveMessageIds.count))
         self.present(UndoOverlayController(presentationData: self.context.sharedContext.currentPresentationData.with { $0 }, content: .removedChat(context: self.context, title: NSAttributedString(string: undoTitle), text: nil), elevatedLayout: false, position: .top, action: { [weak self] value in
             guard let self else {
                 return false
             }
             if value == .commit {
-                let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(messageIds), type: type).startStandalone()
+                let _ = self.context.engine.messages.deleteMessagesInteractively(messageIds: Array(liveMessageIds), type: type).startStandalone()
                 return true
             } else if value == .undo {
                 self.chatDisplayNode.historyNode.ignoreMessageIds = Set()
@@ -449,6 +465,37 @@ extension ChatControllerImpl {
             }
             return false
         }), in: .current)
+    }
+
+    /// Asks the plugins to forget the saved copies behind these rows, then asks
+    /// the chat to rebuild so the rows leave the list.
+    ///
+    /// The row is not in the database, so the rebuild alone would not remove it:
+    /// the plugin has to drop the copy first, and the rebuild after that reads a
+    /// store that no longer answers with the row. The store write happens on the
+    /// plugin's own queue, so the rebuild is queued after a turn of the main
+    /// queue rather than run inline against a store that is still being written.
+    func forgetSavedCopies(_ messageIds: [EngineMessage.Id]) {
+        guard !messageIds.isEmpty, let peerId = self.chatLocation.peerId else {
+            return
+        }
+        guard PluginHookPoints.shared.canForgetDeletedMessages?() == true,
+              let forgetDeletedMessages = PluginHookPoints.shared.forgetDeletedMessages else {
+            return
+        }
+        let ids = messageIds.map { $0.id }
+        forgetDeletedMessages(self.context.account.id.int64, peerId.toInt64(), ids)
+
+        // `withoutSelectionState` drops the saved rows from the selection and is
+        // what makes the list rebuild through the ordinary interface-state path.
+        Queue.mainQueue().after(0.05) { [weak self] in
+            guard let self else {
+                return
+            }
+            self.updateChatPresentationInterfaceState(animated: true, interactive: true, { state in
+                return state.updatedInterfaceState { $0.withoutSelectionState() }
+            })
+        }
     }
     
     func presentDeleteMessageOptions(messageIds: Set<EngineMessage.Id>, options: ChatAvailableMessageActionOptions, contextController: ContextControllerProtocol?, sourceView: UIView? = nil, completion: @escaping (ContextMenuActionResult) -> Void) {

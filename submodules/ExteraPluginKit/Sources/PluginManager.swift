@@ -47,6 +47,11 @@ public final class PluginManager: PluginHost {
     /// the flag above.
     private var cachedDeletedMessagesHook: Bool?
 
+    /// Cached answer to "does any plugin implement `on_forget_deleted_messages`",
+    /// the callback that drops a copy when the user deletes its row. Warmed and
+    /// cleared exactly like the flags above.
+    private var cachedForgetDeletedMessagesHook: Bool?
+
     /// Why a plugin on disk did not load, keyed by id. Kept so the list screen can
     /// say so instead of showing the plugin as merely disabled.
     private var failures: [String: String] = [:]
@@ -258,6 +263,7 @@ public final class PluginManager: PluginHost {
         self.invalidateHookCaches()
         _ = self.messagesWillBeDeletedHookAvailable()
         _ = self.deletedMessagesHookAvailable()
+        _ = self.forgetDeletedMessagesHookAvailable()
 
         // The theme, the peer-name palette and the settings rows were all built
         // before this point: plugin scripts are evaluated after the first frame,
@@ -296,6 +302,7 @@ public final class PluginManager: PluginHost {
         self.menuItems.removeAll()
         self.cachedMessagesWillBeDeletedHook = nil
         self.cachedDeletedMessagesHook = nil
+        self.cachedForgetDeletedMessagesHook = nil
         self.lock.unlock()
     }
 
@@ -1253,6 +1260,7 @@ public final class PluginManager: PluginHost {
         self.lock.lock()
         self.cachedMessagesWillBeDeletedHook = nil
         self.cachedDeletedMessagesHook = nil
+        self.cachedForgetDeletedMessagesHook = nil
         self.lock.unlock()
     }
 
@@ -1292,8 +1300,7 @@ public final class PluginManager: PluginHost {
     /// row the user's own switch asked to keep. A duplicate of the same
     /// `(peer, id)` is collapsed, because two copies of one message would be two
     /// identical rows.
-    public func dispatchDeletedMessages(account: Int64, peerId: Int64) -> [PluginStoredMessage] {
-        let context: [String: Any] = ["account": account, "peer": peerId]
+    public func dispatchDeletedMessages(account: Int64, peerId: Int64) -> [PluginStoredMessage] {        let context: [String: Any] = ["account": account, "peer": peerId]
         let payload = self.jsonText(["peer_id": peerId])
         var result: [PluginStoredMessage] = []
         var seen = Set<String>()
@@ -1319,6 +1326,48 @@ public final class PluginManager: PluginHost {
         // others; the caller merges by index, so the order here is only what a
         // reader of the payload would expect.
         return result.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Whether any plugin can forget saved copies.
+    ///
+    /// Read by the delete path on the main queue, so it answers from the flag
+    /// warmed while the script queue is held rather than calling into script.
+    public var canForgetDeletedMessagesHookCached: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.cachedForgetDeletedMessagesHook ?? false
+    }
+
+    /// The uncached form, which runs plugin JavaScript on the script queue.
+    public func forgetDeletedMessagesHookAvailable() -> Bool {
+        self.lock.lock()
+        if let cached = self.cachedForgetDeletedMessagesHook {
+            self.lock.unlock()
+            return cached
+        }
+        self.lock.unlock()
+        let answer = self.hasPluginForHook("on_forget_deleted_messages")
+        self.lock.lock()
+        self.cachedForgetDeletedMessagesHook = answer
+        self.lock.unlock()
+        return answer
+    }
+
+    /// Tells the plugins to forget the copies they kept for the given messages.
+    ///
+    /// A saved row exists only in the plugin's store, so the client cannot drop
+    /// it: it asks here and then rebuilds the list. Every plugin that listens is
+    /// told — a copy can live in more than one store — and the answer is ignored,
+    /// because forgetting is not a value two plugins negotiate.
+    public func dispatchForgetDeletedMessages(account: Int64, peerId: Int64, messageIds: [Int32]) {
+        guard !messageIds.isEmpty else {
+            return
+        }
+        let context: [String: Any] = ["account": account, "peer": peerId]
+        let payload = self.jsonText(["peer_id": peerId, "message_ids": messageIds])
+        for plugin in self.pluginsInLoadOrder {
+            _ = self.queryValue(plugin: plugin, event: "on_forget_deleted_messages", payloadJSON: payload, context: context)
+        }
     }
 
     /// One stored row, or `nil` when the plugin's answer cannot describe a

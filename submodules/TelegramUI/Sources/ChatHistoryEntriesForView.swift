@@ -994,6 +994,17 @@ func chatHistoryEntriesForView(
                 var attributes = ChatMessageEntryAttributes(rank: nil, isContact: false, contentTypeHint: .generic, updatingMedia: nil, isPlaying: false, isCentered: false, authorStoryStats: nil, displayContinueThreadFooter: false, pinToTop: false)
                 attributes.isDeleted = true
 
+                // Selectable like any other row: the user has to be able to pick
+                // a saved copy and delete it. Otherwise the row is drawn and
+                // nothing can be done with it. Outside selection mode the row
+                // shows `.none`, exactly as a live message does.
+                let selection: ChatHistoryMessageSelection
+                if let selectedMessages {
+                    selection = .selectable(selected: selectedMessages.contains(messageId), num: nil)
+                } else {
+                    selection = .none
+                }
+
                 var insertAtPosition = entries.count
                 for i in 0 ..< entries.count {
                     if entries[i].index > message.index {
@@ -1001,7 +1012,7 @@ func chatHistoryEntriesForView(
                         break
                     }
                 }
-                entries.insert(.MessageEntry(message, presentationData, true, nil, .none, attributes), at: insertAtPosition)
+                entries.insert(.MessageEntry(message, presentationData, true, nil, selection, attributes), at: insertAtPosition)
             }
         }
     }

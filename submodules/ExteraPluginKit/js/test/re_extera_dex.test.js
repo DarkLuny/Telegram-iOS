@@ -957,6 +957,68 @@ test('an edit is not answered as a deleted row', () => {
     assert.deepStrictEqual(askDeleted(ctx, 400), []);
 });
 
+// --- forgetting a saved copy -------------------------------------------------
+//
+// The user selected a saved row in the chat and deleted it. The row is not in
+// Telegram's database, so the client asks the plugin to drop its copy; the next
+// `on_deleted_messages` must not answer with it. An entry in another chat, or an
+// id that was not asked about, must stay.
+
+function forget(ctx, peerId, ids) {
+    ctx.__extera.query(
+        'on_forget_deleted_messages',
+        JSON.stringify({ peer_id: peerId, message_ids: ids }),
+        JSON.stringify({ account: 900, peer: peerId })
+    );
+}
+
+function saveDeleted(ctx, peerId, id, text) {
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id, peer_id: peerId, date: 1700000000 + id, text, sender_id: peerId, is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+}
+
+test('a forgotten copy stops being answered as a deleted row', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    saveDeleted(ctx, 800, 701, 'one');
+    saveDeleted(ctx, 800, 702, 'two');
+
+    assert.strictEqual(askDeleted(ctx, 800).length, 2);
+
+    forget(ctx, 800, [701]);
+
+    const rows = askDeleted(ctx, 800);
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].id, 702, 'only the forgotten one is gone');
+});
+
+test('forgetting leaves another chat and other ids untouched', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    saveDeleted(ctx, 800, 701, 'a');
+    saveDeleted(ctx, 801, 701, 'b');
+
+    forget(ctx, 800, [701]);
+
+    assert.deepStrictEqual(askDeleted(ctx, 800), []);
+    const other = askDeleted(ctx, 801);
+    assert.strictEqual(other.length, 1);
+    assert.strictEqual(other[0].id, 701, 'the same id in another chat stays');
+});
+
+test('an empty or malformed forget payload changes nothing', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    saveDeleted(ctx, 800, 701, 'one');
+
+    ctx.__extera.query('on_forget_deleted_messages', JSON.stringify({ peer_id: 800, message_ids: [] }), JSON.stringify({ account: 900, peer: 800 }));
+    ctx.__extera.query('on_forget_deleted_messages', 'null', JSON.stringify({ account: 900, peer: 800 }));
+
+    assert.strictEqual(askDeleted(ctx, 800).length, 1);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try {

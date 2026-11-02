@@ -273,6 +273,24 @@ public final class PluginRuntime {
             return manager.dispatchDeletedMessages(account: accountId, peerId: peerId)
         }
 
+        // Forgetting a saved copy when the user deletes its row. A saved row is
+        // not in the database, so the delete path cannot drop it; it asks here
+        // and the list rebuilds without the row. `canForgetDeletedMessages` reads
+        // the flag warmed at load, so the delete path never runs script itself.
+        hooks.canForgetDeletedMessages = {
+            guard manager.hasLoadedPlugins else {
+                return false
+            }
+            return manager.canForgetDeletedMessagesHookCached
+        }
+
+        hooks.forgetDeletedMessages = { accountId, peerId, messageIds in
+            guard manager.hasLoadedPlugins else {
+                return
+            }
+            manager.dispatchForgetDeletedMessages(account: accountId, peerId: peerId, messageIds: messageIds)
+        }
+
         // The screenshots switch (RFS). Applied once, at startup and whenever a
         // setting changes, rather than per screen: the answer flips one flag in
         // the layer primitive that every protected layer goes through.

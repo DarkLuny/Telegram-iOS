@@ -4089,6 +4089,39 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
             }
         }
     }
+
+    /// The ids among `ids` that belong to a saved copy a plugin kept, rather than
+    /// to a live message.
+    ///
+    /// A saved row is in the list only: the message is no longer in the database,
+    /// so `chatAvailableMessageActions` offers nothing for it and the ordinary
+    /// delete path would silently do nothing. The delete path asks here first and
+    /// hands these ids to the plugin, which is the only thing that can drop the
+    /// copy. Answered off `filteredEntries`, where such a row already carries
+    /// `attributes.isDeleted`.
+    public func savedCopyMessageIds(among ids: Set<EngineMessage.Id>) -> [EngineMessage.Id] {
+        guard !ids.isEmpty, let historyView = self.historyView else {
+            return []
+        }
+        var result = Set<EngineMessage.Id>()
+        for entry in historyView.filteredEntries {
+            switch entry {
+            case let .MessageEntry(message, _, _, _, _, attributes):
+                if attributes.isDeleted, ids.contains(message.id) {
+                    result.insert(message.id)
+                }
+            case let .MessageGroupEntry(_, messages, _):
+                for (message, _, _, attributes, _) in messages {
+                    if attributes.isDeleted, ids.contains(message.id) {
+                        result.insert(message.id)
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return Array(result)
+    }
     
     private func updateMaxVisibleReadIncomingMessageIndex(_ index: MessageIndex) {
         self.maxVisibleIncomingMessageIndex.set(index)
