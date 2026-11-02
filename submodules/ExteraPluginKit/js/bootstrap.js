@@ -2200,11 +2200,11 @@ var __extera = (function () {
             }
             var before = hook && typeof hook.beforeHookedMethod === 'function' ? hook.beforeHookedMethod : null;
             var after = hook && typeof hook.afterHookedMethod === 'function' ? hook.afterHookedMethod : null;
-            var beforeToken = holdCallback(before ? function (receiver, argsJSON) {
-                return __extera.runSwizzleHook(before, receiver, argsJSON);
+            var beforeToken = holdCallback(before ? function (receiver, argsJSON, resultJSON) {
+                return __extera.runSwizzleHook(before, receiver, argsJSON, resultJSON);
             } : null);
-            var afterToken = holdCallback(after ? function (receiver, argsJSON) {
-                return __extera.runSwizzleHook(after, receiver, argsJSON);
+            var afterToken = holdCallback(after ? function (receiver, argsJSON, resultJSON) {
+                return __extera.runSwizzleHook(after, receiver, argsJSON, resultJSON);
             } : null);
             // A filter names the classes a broad hook applies to; with one hook
             // per named class here, the filter is accepted and the single class
@@ -2219,8 +2219,13 @@ var __extera = (function () {
         },
         // Called by the host from a swizzled method. `fn` is the plugin's
         // `beforeHookedMethod`/`afterHookedMethod`; it gets a fresh param, and
-        // the result it set comes back as a JSON value the host applies.
-        runSwizzleHook: function (fn, receiver, argsJSON) {
+        // the result it set comes back as JSON text the host applies.
+        //
+        // `resultJSON` is the original method's return value, present only for an
+        // `after` hook — Xposed hands that to `afterHookedMethod` through
+        // `param.getResult()`, so a plugin that only wants to observe the result
+        // can read it, and one that wants to replace it calls `setResult`.
+        runSwizzleHook: function (fn, receiver, argsJSON, resultJSON) {
             var args;
             try {
                 args = argsJSON ? JSON.parse(argsJSON) : [];
@@ -2229,6 +2234,18 @@ var __extera = (function () {
             }
             var param = __exteraHookParam(args);
             param.thisObject = receiver;
+            if (resultJSON !== undefined && resultJSON !== null) {
+                try {
+                    param.setResult(JSON.parse(resultJSON));
+                } catch (error) {
+                    param.setResult(resultJSON);
+                }
+                // The value came from the method, not from the plugin: it is
+                // readable through `getResult()` but must not count as a
+                // replacement, or every `after` hook would freeze the result it
+                // merely looked at.
+                param.__state__.hasResult = false;
+            }
             try {
                 fn.call(param, param);
             } catch (error) {
@@ -2240,12 +2257,12 @@ var __extera = (function () {
             return param._hasResult() ? JSON.stringify(param.getResult()) : null;
         },
         // The host calls this entry point, by name, from `PluginSwizzle`.
-        runSwizzleCallback: function (token, receiver, argsJSON) {
+        runSwizzleCallback: function (token, receiver, argsJSON, resultJSON) {
             var fn = heldCallbacks[token];
             if (typeof fn !== 'function') {
                 return null;
             }
-            return fn(receiver, argsJSON);
+            return fn(receiver, argsJSON, resultJSON);
         },
         // --- runtime class construction (DexMaker's shape) ----------------
         //
@@ -2285,7 +2302,18 @@ var __extera = (function () {
                         // override reaches `this`.
                         return tokens[selector].apply(receiver, args);
                     });
-                    specs.push({ selector: selector, token: token });
+                    // `fn.length` is how many arguments the plugin declared, and
+                    // it is what the host needs: the C ABI of a method added to a
+                    // class is decided by the caller, so a block that reads two
+                    // arguments from a one-argument method takes a register the
+                    // caller never wrote. The declaration is the only thing here
+                    // that knows the real arity.
+                    var declared = typeof fn.length === 'number' ? fn.length : 0;
+                    specs.push({
+                        selector: selector,
+                        token: token,
+                        argumentCount: declared > 2 ? 2 : declared,
+                    });
                 }
             }
             var name = host().buildClass(pluginId, String(superclassName), JSON.stringify(specs));

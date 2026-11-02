@@ -20,10 +20,12 @@ import JavaScriptCore
 ///
 /// What is the same: the class really exists in the runtime, is a real subclass,
 /// and its methods really call the plugin. What is different: only methods whose
-/// signature is "receiver, up to two object arguments, object return" can be
-/// added, because that is the block ABI the runtime accepts here. A method that
-/// needs a struct argument, a primitive return or a variadic call is reported,
-/// not silently added with a wrong ABI.
+/// signature is "receiver, zero to two object arguments, object return" can be
+/// added, because that is the block ABI the runtime accepts here, and the arity
+/// is taken from the JavaScript function the plugin supplied — the only place
+/// that knows how many arguments the method is called with. A method that needs a
+/// struct argument, a primitive return or a variadic call is reported, not
+/// silently added with a wrong ABI.
 ///
 /// The generated classes are owned by the plugin that asked for them and are
 /// never freed: `objc_disposeClassPair` on a class that something still
@@ -39,11 +41,12 @@ final class PluginClassProxy {
     private var created: [String: String] = [:]
     private var counter = 0
 
-    /// One method to add: the selector and the token of the JavaScript callback
-    /// that implements it.
+    /// One method to add: the selector, the token of the JavaScript callback that
+    /// implements it, and how many arguments that callback declared.
     struct MethodSpec {
         let selector: String
         let token: String
+        let argumentCount: Int
     }
 
     enum BuildError: Error, CustomStringConvertible {
@@ -89,29 +92,53 @@ final class PluginClassProxy {
         for method in methods {
             let selector = NSSelectorFromString(method.selector)
             let token = method.token
-            // The block ABI the runtime accepts for a method added this way:
-            // the receiver, then the arguments, returning an object. A selector
-            // whose real signature differs is added with this shape anyway, and
-            // a mismatch is the plugin's to report — the same latitude DexMaker
-            // gives when the declared types do not match.
-            let block: @convention(block) (AnyObject, AnyObject?, AnyObject?) -> AnyObject? = { receiver, arg0, arg1 in
-                let receiverDescription = String(describing: receiver)
-                let argsJSON = PluginClassProxy.encodeArgs([arg0, arg1])
-                var result: AnyObject?
-                PluginManager.shared.runOnJSQueueAndWait {
-                    if let value = PluginClassProxy.call(context: context, token: token, receiver: receiverDescription, argsJSON: argsJSON),
-                       !value.isUndefined, !value.isNull {
-                        result = value.toObject() as AnyObject?
-                    }
+            // The block ABI the runtime accepts for a method added this way is
+            // "receiver, N object arguments, object return". `N` has to be what
+            // the plugin's callback declared: a block that reads two arguments
+            // from a one-argument method still runs, but it reads a register the
+            // caller never wrote, and the value it forwards to the plugin is
+            // whatever happened to be there.
+            let implementation: IMP
+            let types: String
+            switch method.argumentCount {
+            case 0:
+                let block: @convention(block) (AnyObject) -> AnyObject? = { receiver in
+                    return PluginClassProxy.callAndWait(context: context, token: token, receiver: receiver, arguments: [])
                 }
-                return result
+                implementation = imp_implementationWithBlock(block)
+                types = "@@:"
+            case 1:
+                let block: @convention(block) (AnyObject, AnyObject?) -> AnyObject? = { receiver, arg0 in
+                    return PluginClassProxy.callAndWait(context: context, token: token, receiver: receiver, arguments: [arg0])
+                }
+                implementation = imp_implementationWithBlock(block)
+                types = "@@:@"
+            default:
+                let block: @convention(block) (AnyObject, AnyObject?, AnyObject?) -> AnyObject? = { receiver, arg0, arg1 in
+                    return PluginClassProxy.callAndWait(context: context, token: token, receiver: receiver, arguments: [arg0, arg1])
+                }
+                implementation = imp_implementationWithBlock(block)
+                types = "@@:@@"
             }
-            let implementation = imp_implementationWithBlock(block)
-            // `class_addMethod` wants a C string of type encodings; the Swift
-            // string has to be handed over inside its own scope.
-            let types = "v@:@@"
+            // `class_addMethod` wants a C string of type encodings, so the Swift
+            // string is handed over inside its own scope. The return is `@`, not
+            // `v`: a method declared as returning nothing makes the runtime drop
+            // the object the plugin built, and the caller then reads the return
+            // register uninitialised.
+            //
+            // It answers false when the class already implements the selector —
+            // which is the normal case for an override, since the superclass's
+            // method is what the plugin wants to replace. Adding then does
+            // nothing at all and the plugin's method is never called, so the
+            // failure path replaces instead.
+            var added = false
             types.withCString { encodings in
-                class_addMethod(subclass, selector, implementation, encodings)
+                added = class_addMethod(subclass, selector, implementation, encodings)
+            }
+            if !added {
+                types.withCString { encodings in
+                    class_replaceMethod(subclass, selector, implementation, encodings)
+                }
             }
         }
 
@@ -154,6 +181,22 @@ final class PluginClassProxy {
         return "__ExteraProxy_\(stem)_\(value)"
     }
 
+    private static func callAndWait(context: JSContext, token: String, receiver: AnyObject, arguments: [AnyObject?]) -> AnyObject? {
+        let receiverDescription = String(describing: receiver)
+        let argsJSON = PluginClassProxy.encodeArgs(arguments)
+        var result: AnyObject?
+        var didReturn = false
+        PluginManager.shared.runOnJSQueueAndWait {
+            guard let value = PluginClassProxy.call(context: context, token: token, receiver: receiverDescription, argsJSON: argsJSON),
+                  let parsed = PluginClassProxy.decodeResult(value) else {
+                return
+            }
+            result = parsed
+            didReturn = true
+        }
+        return didReturn ? result : nil
+    }
+
     private static func call(context: JSContext, token: String, receiver: String, argsJSON: String) -> JSValue? {
         guard let runner = context.objectForKeyedSubscript("__extera")?.objectForKeyedSubscript("runSwizzleCallback"), !runner.isUndefined else {
             return nil
@@ -162,7 +205,29 @@ final class PluginClassProxy {
         // to the plugin function, which is called with the receiver and the
         // arguments. One token map serves both, because both are "call this
         // plugin function from the runtime".
-        return runner.call(withArguments: [token, receiver, argsJSON])
+        return runner.call(withArguments: [token, receiver, argsJSON, NSNull()])
+    }
+
+    /// The JSON a plugin method's return value became, back as a real object.
+    ///
+    /// `runSwizzleCallback` answers with JSON text, and handing that text to the
+    /// caller would make a method declared to return an array return the string
+    /// `"[]"`. A parsed `null` is a legitimate `nil` return, so it is not the same
+    /// as "the plugin returned nothing".
+    private static func decodeResult(_ value: JSValue) -> AnyObject?? {
+        guard !value.isUndefined, !value.isNull else {
+            return nil
+        }
+        guard let json = value.toString(), let data = json.data(using: .utf8) else {
+            return nil
+        }
+        if let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            if parsed is NSNull {
+                return .some(nil)
+            }
+            return .some(parsed as AnyObject)
+        }
+        return .some(json as AnyObject)
     }
 
     private static func encodeArgs(_ args: [AnyObject?]) -> String {

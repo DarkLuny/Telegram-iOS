@@ -860,7 +860,19 @@ public final class PluginManager: PluginHost {
                 guard let selector = entry["selector"] as? String, let token = entry["token"] as? String else {
                     continue
                 }
-                specs.append(PluginClassProxy.MethodSpec(selector: selector, token: token))
+                // The plugin's declared arity, which the bootstrap read from the
+                // function's `length`. Missing means "no arguments", the safe
+                // default: a block that reads a register the caller did not write
+                // is worse than one that ignores an argument.
+                let argumentCount: Int
+                if let count = entry["argumentCount"] as? Int {
+                    argumentCount = max(0, min(count, 2))
+                } else if let count = entry["argumentCount"] as? NSNumber {
+                    argumentCount = max(0, min(count.intValue, 2))
+                } else {
+                    argumentCount = 0
+                }
+                specs.append(PluginClassProxy.MethodSpec(selector: selector, token: token, argumentCount: argumentCount))
             }
         }
         do {

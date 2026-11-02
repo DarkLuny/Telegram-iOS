@@ -1,8 +1,6 @@
 import Foundation
 import SwiftSignalKit
-import TelegramCore
 import Postbox
-import LocalizedPeerData
 
 /// Reads for the plugin runtime's controller proxies.
 ///
@@ -18,7 +16,16 @@ import LocalizedPeerData
 /// drop-in, and it is the honest version of "the controller returns something".
 ///
 /// Lives in TelegramCore for the same reason `PluginProxyAccess` does:
-/// `ExteraPluginKit` must not import Postbox or the engine.
+/// `ExteraPluginKit` must not import Postbox or the engine. That is also why the
+/// entry points take an `Account` rather than an `AccountContext`: `AccountContext`
+/// lives in a module that depends on this one, so naming it here would be a cycle,
+/// and everything used below (`engine`, `postbox`) hangs off `Account` anyway.
+///
+/// Titles come from `EnginePeer.debugDisplayTitle` rather than
+/// `LocalizedPeerData`'s `displayTitle(strings:displayOrder:)`. That module depends
+/// on TelegramCore too, so importing it here is the same cycle, and the only thing
+/// it added was sorting the two halves of a person's name — which the client's own
+/// diagnostics already do without a presentation-data lookup.
 public enum PluginControllerAccess {
     /// A peer's profile, flattened to data rather than an `EnginePeer`.
     ///
@@ -95,15 +102,14 @@ public enum PluginControllerAccess {
     }
 
     /// The peer behind a numeric id, or nil when nothing is cached for it.
-    public static func peerInfo(context: AccountContext, peerId: Int64) -> Signal<PeerInfo?, NoError> {
+    public static func peerInfo(account: Account, peerId: Int64) -> Signal<PeerInfo?, NoError> {
         let peer = PluginControllerAccess.peerId(from: peerId)
-        let strings = context.sharedContext.currentPresentationData.with { $0 }.strings
-        return context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: peer))
+        return TelegramEngine(account: account).data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: peer))
         |> map { enginePeer -> PeerInfo? in
             guard let enginePeer = enginePeer else {
                 return nil
             }
-            return PluginControllerAccess.summarize(enginePeer, peerId: peerId, strings: strings)
+            return PluginControllerAccess.summarize(enginePeer, peerId: peerId)
         }
     }
 
@@ -113,21 +119,27 @@ public enum PluginControllerAccess {
     /// the result matches what the chat screen shows, including a chat whose
     /// history is not fully loaded yet. `limit` is clamped: a plugin asking for a
     /// thousand messages gets a page the UI itself would never build.
-    public static func chatMessages(context: AccountContext, peerId: Int64, limit: Int) -> Signal<[MessageSummary], NoError> {
+    ///
+    /// The anchor is `.upperBound` — the newest end of the history — because the
+    /// caller wants the tail of the chat, not the beginning of it.
+    public static func chatMessages(account: Account, peerId: Int64, limit: Int) -> Signal<[MessageSummary], NoError> {
         let count = max(1, min(limit, 200))
         let peer = PluginControllerAccess.peerId(from: peerId)
         let key: PostboxViewKey = .historyView(PostboxViewKey.HistoryView(
             peerId: peer,
-            namespace: Namespaces.Message.Cloud,
-            tag: .all,
             threadId: nil,
-            minId: nil,
-            maxId: nil,
-            earlier: false,
-            count: count,
-            clipView: false
+            clipHoles: false,
+            trackHoles: false,
+            anchor: .upperBound,
+            // `tag` is a filter, not a namespace selector: `.tag(.all)` would keep
+            // only media messages, because `MessageTags.all` is the media tag set
+            // and plain text carries none. `nil` is "no tag filter".
+            tag: nil,
+            appendMessagesFromTheSameGroup: false,
+            namespaces: .just(Set([Namespaces.Message.Cloud])),
+            count: count
         ))
-        return context.account.postbox.combinedView(keys: [key])
+        return account.postbox.combinedView(keys: [key])
         |> take(1)
         |> map { views -> [MessageSummary] in
             guard let view = views.views[key] as? MessageHistoryView else {
@@ -141,7 +153,7 @@ public enum PluginControllerAccess {
 
     // MARK: - Conversion
 
-    private static func summarize(_ enginePeer: EnginePeer, peerId: Int64, strings: PresentationStrings) -> PeerInfo {
+    private static func summarize(_ enginePeer: EnginePeer, peerId: Int64) -> PeerInfo {
         var firstName: String?
         var lastName: String?
         var isBot = false
@@ -155,7 +167,7 @@ public enum PluginControllerAccess {
         return PeerInfo(
             id: peerId,
             kind: PluginControllerAccess.kind(of: enginePeer),
-            title: enginePeer.displayTitle(strings: strings, displayOrder: strings.nameDisplayOrder),
+            title: enginePeer.debugDisplayTitle,
             username: enginePeer.addressName,
             firstName: firstName,
             lastName: lastName,
@@ -174,10 +186,10 @@ public enum PluginControllerAccess {
         var isAction = false
         for media in message.media {
             switch media {
-            case let .image(_, _, _):
+            case _ as TelegramMediaImage:
                 hasMedia = true
                 mediaKind = "photo"
-            case let .file(file):
+            case let file as TelegramMediaFile:
                 hasMedia = true
                 if file.isVideo {
                     mediaKind = "video"
@@ -188,10 +200,10 @@ public enum PluginControllerAccess {
                 } else {
                     mediaKind = "document"
                 }
-            case .webPage:
+            case _ as TelegramMediaWebpage:
                 hasMedia = true
                 mediaKind = "webpage"
-            case .poll:
+            case _ as TelegramMediaPoll:
                 hasMedia = true
                 mediaKind = "poll"
             case is TelegramMediaAction:
@@ -245,35 +257,18 @@ public enum PluginControllerAccess {
 
     /// The `PeerId` a plugin's numeric id names.
     ///
-    /// The client's own coding puts users in the `peer` namespace with a positive
-    /// id, basic groups with a small negative one, and channels below
-    /// `-1000000000000`. Rebuilding the namespace from the sign is what makes a
-    /// value that came out of one hook usable in another.
+    /// The number on the wire is `PeerId.toInt64()` — the packed form the client
+    /// itself uses for storage and for every other bridge (`PluginMessageDetails`
+    /// reports peer ids the same way, `PluginMessage` parses them the same way).
+    /// It is *not* Telegram's own `-100…` channel marking: a value a plugin got
+    /// from a hook has to be usable in a send, so it round-trips through the same
+    /// codec rather than being reinterpreted by sign.
     static func peerId(from value: Int64) -> PeerId {
-        if value > 0 {
-            return PeerId(namespace: Namespaces.Peer.CloudUser, id: PeerId.Id._internalFromInt64Value(value))
-        } else if value > -1000000000000 {
-            return PeerId(namespace: Namespaces.Peer.CloudGroup, id: PeerId.Id._internalFromInt64Value(value))
-        } else {
-            // `-100xxxxxxxxxx` carries the channel id after the marker; the
-            // namespace stores the bare negative id.
-            let channel = value + 1000000000000
-            return PeerId(namespace: Namespaces.Peer.CloudChannel, id: PeerId.Id._internalFromInt64Value(channel))
-        }
+        return PeerId(value)
     }
 
     /// The signed numeric id a plugin sees for a peer.
     static func numericId(of peerId: PeerId) -> Int64 {
-        let raw = peerId.id._internalGetInt64Value()
-        switch peerId.namespace {
-        case Namespaces.Peer.CloudUser:
-            return raw
-        case Namespaces.Peer.CloudGroup:
-            return raw
-        case Namespaces.Peer.CloudChannel:
-            return -1000000000000 + raw
-        default:
-            return raw
-        }
+        return peerId.toInt64()
     }
 }

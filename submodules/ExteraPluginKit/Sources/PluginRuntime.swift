@@ -881,7 +881,7 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             self.startBridge { completed in
-                return PluginControllerAccess.peerInfo(context: context, peerId: peerId).start(next: { info in
+                return PluginControllerAccess.peerInfo(account: context.account, peerId: peerId).start(next: { info in
                     PluginManager.shared.resolveBridgeCallback(
                         pluginId: pluginId,
                         token: callbackToken,
@@ -901,7 +901,7 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             self.startBridge { completed in
-                return PluginControllerAccess.chatMessages(context: context, peerId: peerId, limit: limit).start(next: { messages in
+                return PluginControllerAccess.chatMessages(account: context.account, peerId: peerId, limit: limit).start(next: { messages in
                     PluginManager.shared.resolveBridgeCallback(
                         pluginId: pluginId,
                         token: callbackToken,
