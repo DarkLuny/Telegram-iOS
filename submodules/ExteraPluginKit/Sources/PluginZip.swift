@@ -197,7 +197,7 @@ final class PluginZip {
         case 0:
             return payload
         case 8:
-            return PluginZip.inflate(payload, expectedSize: entry.uncompressedSize)
+            return PluginZip.inflateRaw(payload, expectedSize: entry.uncompressedSize)
         default:
             return nil
         }
@@ -363,7 +363,12 @@ final class PluginZip {
 
     /// Raw-deflate decompression. `expectedSize` sizes the buffer; the stream's
     /// own end marker still decides how much actually came out.
-    private static func inflate(_ input: Data, expectedSize: Int) -> Data? {
+    ///
+    /// Named `inflateRaw` rather than `inflate` because a static member with that
+    /// name shadows zlib's own `inflate` inside this type: the call below would
+    /// resolve to this method, which takes a different signature, and the
+    /// compiler reports the instance method rather than the C function.
+    private static func inflateRaw(_ input: Data, expectedSize: Int) -> Data? {
         guard !input.isEmpty else {
             return expectedSize == 0 ? Data() : nil
         }

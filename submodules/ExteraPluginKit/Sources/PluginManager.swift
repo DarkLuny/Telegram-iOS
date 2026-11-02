@@ -117,7 +117,10 @@ public final class PluginManager: PluginHost {
     /// Xposed hook does too: the hooked method does not proceed until the hook
     /// returns.
     public func runOnJSQueueAndWait(_ body: () -> Void) {
-        _ = self.withJSQueue(body)
+        // No `_ =` here: `withJSQueue` is generic over the body's return type, so
+        // with a `Void` body it returns `Void`, and discarding a `Void` result is
+        // an error under `-warnings-as-errors` rather than a no-op.
+        self.withJSQueue(body)
     }
 
     /// Like `withJSQueue` but never blocks the caller.

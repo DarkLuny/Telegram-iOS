@@ -87,17 +87,17 @@ public enum PluginElyx {
             // to find out rather than failing the install.
             if let refmapPath = archive.firstPath(named: refmapNames),
                let refmapText = archive.contents(of: refmapPath),
-               let refmap = try? PluginYAML(text: refmapText).root,
+               let refmap = PluginYAML.mapping(text: refmapText),
                let pointer = refmap["metainfo"] as? String,
                let metainfoText = archive.contents(of: pointer),
-               let metainfo = try? PluginYAML(text: metainfoText).root,
+               let metainfo = PluginYAML.mapping(text: metainfoText),
                let id = metainfo["id"] as? String {
                 return id
             }
             throw ElyxError.missingMetainfo
         }
         guard let text = archive.contents(of: metainfoPath),
-              let metainfo = try? PluginYAML(text: text).root else {
+              let metainfo = PluginYAML.mapping(text: text) else {
             throw ElyxError.metainfoInvalid("it does not parse as YAML")
         }
         guard let id = metainfo["id"] as? String, !id.isEmpty else {
@@ -115,7 +115,8 @@ public enum PluginElyx {
         guard let archive = PluginZip(url: url) else {
             throw ElyxError.notAnArchive
         }
-        guard let root = try archive.projectRoot() else {
+        let projectRoot = try archive.projectRoot()
+        guard projectRoot != nil else {
             throw ElyxError.noProjectRoot
         }
 
@@ -130,11 +131,9 @@ public enum PluginElyx {
 
         var refmap: [String: Any] = [:]
         if let refmapName = refmapNames.first(where: { archive.contains(path: $0) }) {
-            let text = (try? String(contentsOf: diskPath(refmapName), encoding: .utf8)) ?? ""
-            refmap = (try? PluginYAML(text: text).root) ?? [:]
+            refmap = PluginYAML.mapping(contentsOf: diskPath(refmapName)) ?? [:]
         } else if let refmapPath = archive.firstPath(named: refmapNames) {
-            let text = (try? String(contentsOf: diskPath(refmapPath), encoding: .utf8)) ?? ""
-            refmap = (try? PluginYAML(text: text).root) ?? [:]
+            refmap = PluginYAML.mapping(contentsOf: diskPath(refmapPath)) ?? [:]
         }
 
         let metainfoPath = (refmap["metainfo"] as? String)
@@ -144,13 +143,13 @@ public enum PluginElyx {
             throw ElyxError.missingMetainfo
         }
         let metainfoText = (try? String(contentsOf: diskPath(metainfoPath), encoding: .utf8)) ?? ""
-        guard let metainfo = try? PluginYAML(text: metainfoText).root else {
+        guard let metainfo = PluginYAML.mapping(text: metainfoText) else {
             throw ElyxError.metainfoInvalid("it does not parse as YAML")
         }
         guard let id = metainfo["id"] as? String, !id.isEmpty else {
             throw ElyxError.metainfoInvalid("id is required")
         }
-        guard let _ = metainfo["name"] as? String else {
+        guard metainfo["name"] is String else {
             throw ElyxError.metainfoInvalid("name is required")
         }
 

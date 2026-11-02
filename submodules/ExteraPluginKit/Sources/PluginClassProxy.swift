@@ -82,7 +82,7 @@ final class PluginClassProxy {
         self.lock.unlock()
 
         var subclass: AnyClass?
-        name.withCString { cName in
+        name.withCString { cName -> Void in
             subclass = objc_allocateClassPair(superclass, cName, 0)
         }
         guard let subclass = subclass else {
@@ -132,12 +132,12 @@ final class PluginClassProxy {
             // nothing at all and the plugin's method is never called, so the
             // failure path replaces instead.
             var added = false
-            types.withCString { encodings in
+            types.withCString { encodings -> Void in
                 added = class_addMethod(subclass, selector, implementation, encodings)
             }
             if !added {
-                types.withCString { encodings in
-                    class_replaceMethod(subclass, selector, implementation, encodings)
+                types.withCString { encodings -> Void in
+                    _ = class_replaceMethod(subclass, selector, implementation, encodings)
                 }
             }
         }
