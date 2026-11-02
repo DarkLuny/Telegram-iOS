@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>exteraGram plugins on iOS — runtime documentation</title>
+<meta name="description" content="A JavaScriptCore plugin runtime for Telegram iOS that follows the exteraGram plugin SDK by name and shape.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+<a class="brand" href="index.html">extera<span>iOS</span></a>
+<nav class="topnav">
+<a href="index.html" class="active">Overview</a>
+<a href="api.html">API reference</a>
+<a href="https://github.com/DarkLuny/tg-ipa">GitHub</a>
+</nav>
+</header>
+<main class="landing">
+<section class="hero">
+<h1>Plugins for Telegram&nbsp;iOS,<br>in the shape of exteraGram.</h1>
+<p class="lede">A plugin runtime built into a sideloaded IPA. It reads the same plugin files, exposes the same names, and runs them on JavaScriptCore instead of Python — so the plugins people already wrote for Android mostly work without being rewritten.</p>
+<div class="hero-actions">
+<a class="button primary" href="api.html">Read the API</a>
+<a class="button" href="https://github.com/DarkLuny/tg-ipa">Repository</a>
+</div>
+</section>
+
+<section class="cards">
+<div class="card">
+<h3>Same file, same names</h3>
+<p><code>__id__</code>, <code>BasePlugin</code>, <code>add_hook</code>, <code>create_settings</code>, <code>HookResult</code>: a plugin ported from the SDK keeps its metadata block, its hook registrations and its settings tree.</p>
+</div>
+<div class="card">
+<h3>Installed from a chat</h3>
+<p>A <code>.plugin</code> file opened in the client offers to install itself. Nothing is baked into the binary, so the IPA can be re-signed without losing plugins: they live in the app's own documents directory.</p>
+</div>
+<div class="card">
+<h3>Real surfaces, not stubs</h3>
+<p>HTTP verbs, proxies, swizzled Objective-C methods, runtime class construction, URL intents, settings sub-pages, deleted-message retention: these run against the app's own objects. Android-only parts log instead of pretending.</p>
+</div>
+</section>
+
+<section class="prose">
+<h2>What runs</h2>
+<p>Each plugin is evaluated in its own <code>JSContext</code>, in this order: the bootstrap, then the plugin body, then a finalise step. Nothing is shared between plugins except the host bridges, and every value that crosses into Swift is a JSON string.</p>
+<p>One queue serialises all script work. A plugin that blocks it blocks the others, which is why network and file work belongs in <code>run_on_queue</code>.</p>
+
+<h2>Install</h2>
+<ol>
+<li>Build or download <code>Telegram-13.1.1-sideload.ipa</code>.</li>
+<li>Install it with Sideloadly and a free Apple ID. The bundle id is unique to this build, so it installs beside the App Store client.</li>
+<li>Open a <code>.plugin</code> file in any chat and accept the install prompt, or use <em>Settings → Plugins → Install</em>.</li>
+<li>Enable the plugin with the switch in the plugin list. Disabling it unloads the script and restores every hook it installed.</li>
+</ol>
+
+<h2>What a plugin looks like</h2>
+<div class="code-block"><span class="code-lang">js</span><pre><code class="language-js">var __id__ = "hello_world";
+var __name__ = "Hello World";
+var __version__ = "1.0.0";
+
+class HelloWorldPlugin extends BasePlugin {
+    on_plugin_load() {
+        this.add_hook("messages.setTyping");
+        this.log("loaded");
+    }
+
+    pre_request_hook(name, account, request) {
+        this.log(name);
+        return new HookResult();
+    }
+}
+
+var Plugin = HelloWorldPlugin;</code></pre></div>
+
+<h2>Where it differs</h2>
+<p>JavaScriptCore is not Python, and iOS is not Android. Two kinds of difference are worth knowing before porting:</p>
+<ul>
+<li><strong>Python syntax.</strong> A file whose body is Python is refused with a message saying so, rather than half-loaded. The metadata block, the plugin class and the settings tree carry over; the language does not.</li>
+<li><strong>Android-only surfaces.</strong> Field access by name, MVEL conditions, bundled wheels and Java-proxy generators have no counterpart. They are present, they log the reason, and a plugin's own guard takes the safe branch instead of the handler never firing.</li>
+</ul>
+<p>The full list, with what is real and what only logs, is section&nbsp;19 of the reference.</p>
+
+<h2>Reference</h2>
+<p>Twenty-three sections covering the file format, metadata, lifecycle, hooks, hook results, menu items, settings, storage, sending, multi-account, schedulers, HTTP, proxy, text formatting, bulletins, files, appearance hooks, deleted messages, logging, controller proxies, intents, a porting checklist and the host bridge.</p>
+<p><a class="button primary" href="api.html">Open the API reference</a></p>
+</section>
+</main>
+<footer class="site-footer">
+<p>Sideload build of Telegram&nbsp;iOS 13.1.1. Runtime API level 1.4.5.0.</p>
+</footer>
+</body>
+</html>

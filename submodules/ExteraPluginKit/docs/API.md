@@ -246,9 +246,6 @@ all restored when plugins unload, so a removed plugin's block cannot keep runnin
 `hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
 property with no `@objc` cannot be reached by name — and log rather than guess.
 
-`hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
-property with no `@objc` cannot be reached by name — and log rather than guess.
-
 ---
 
 ## 4. HookResult, HookStrategy
@@ -365,8 +362,11 @@ Notes:
   get `{key, getKey()}` — there is no Android `View` here, so the row's key
   stands in for it. A plugin that only logs or runs its own logic is unaffected.
 - `create_sub_fragment()` returning another list opens a nested page.
-- `link_alias` is accepted for shape; copyable deeplinks per row are not
-  implemented.
+- `link_alias` on a `Text`/`Custom` row with no `on_click` opens the screen the
+  alias names: `plugins` is the one alias that resolves (it opens the plugin
+  list). Any other alias is logged, because iOS has no settings-key deeplinks to
+  route it to. A row with its own `on_click` keeps it; `link_alias` is the
+  fallback, as in the SDK.
 - The Android-only fields of `Custom` (`item`, `view`, `factory`,
   `factory_args`) are accepted and ignored; the renderer draws a row from
   `text`/`subtext` and calls `on_click`. `SimpleSettingFactory` exists so a
@@ -462,20 +462,21 @@ client_utils.get_selected_account();
 `send_document`, `send_video`, `send_audio`, `send_message`, `edit_message`, plus
 `get_account()`.
 
-### Приложение: два известных расхождения
+### Two names that are not global
 
-Два имени, которые SDK выставляет на верхнем уровне, здесь доступны только
-через модульный объект. Это осознанно не «исправлено» в документе, потому что
-и то, и другое — реальное поведение сборки, и плагин, написанный по SDK,
-наткнётся на него:
+Two names the SDK puts at the top level are reachable here only through their
+module object. This is not "fixed" in the document, because it is what the build
+actually does and a plugin written against the SDK will hit it:
 
-- `parse_text` — глобально **нет**. Есть `client_utils.parse_text(...)` и
-  `extera_utils.text_formatting.parse_text(...)`. Строка `var p = parse_text(...)`
-  из доков exteraGram бросит `ReferenceError`.
-- `SimpleSettingFactory` — глобально **нет**. Есть
-  `ui.settings.SimpleSettingFactory(...)` (то же, что `__extera.api.SimpleSettingFactory`).
+- `parse_text` — **not** a global. Use `client_utils.parse_text(...)` or
+  `extera_utils.text_formatting.parse_text(...)`. The SDK's `var p = parse_text(...)`
+  line throws `ReferenceError` here.
+- `SimpleSettingFactory` — **not** a global. Use
+  `ui.settings.SimpleSettingFactory(...)` (the same object as
+  `__extera.api.SimpleSettingFactory`).
 
-`BasePlugin` и настройки — реальные глобалы, с ними порт работает без правок.
+`BasePlugin` and the settings controls are real globals, so a port works on them
+without edits.
 
 ---
 

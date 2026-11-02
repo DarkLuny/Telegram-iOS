@@ -1,0 +1,56 @@
+name: Publish API docs
+
+# Builds the documentation site from submodules/ExteraPluginKit/docs/API.md and
+# deploys it to GitHub Pages.
+#
+# The Markdown file is the only source. docs/site/build.js renders it; there is
+# no hand-kept copy of the reference in HTML, so a page can never describe an API
+# that the code no longer has.
+
+on:
+  push:
+    branches: [sideload]
+    paths:
+      - submodules/ExteraPluginKit/docs/API.md
+      - docs/site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Render the site
+        run: node docs/site/build.js docs/site/public
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/site/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
