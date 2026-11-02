@@ -287,8 +287,8 @@ private func pushPluginController(context: AccountContext, from host: PluginsCon
     // list lives in, so the bar gets a back arrow from `previousItem` and a
     // second push from that page keeps appending instead of opening a fresh
     // modal container. `.modal` here was what made each step its own sheet.
-    if let container = host.controller, container.navigationController is NavigationController {
-        container.push(controller)
+    if let container = host.controller, let stack = container.navigationController {
+        stack.pushViewController(controller, animated: true)
     } else {
         context.sharedContext.presentGlobalController(controller, nil)
     }
@@ -503,7 +503,7 @@ private final class PluginSettingsControllerArguments {
 /// Shared by the plugin's own page and by any page opened from it, so a nested
 /// page renders exactly like the top level. `startIndex` only shifts the stable
 /// ids, which have to stay unique (and ascending) within one list.
-private func pluginControlEntries(controls: [PluginManager.SettingsControl], startIndex: Int) -> [PluginSettingsEntry] {
+private func pluginControlEntries(controls: [PluginManager.SettingsControl], startIndex: Int, subControls: (String) -> [PluginManager.SettingsControl]) -> [PluginSettingsEntry] {
     var entries: [PluginSettingsEntry] = []
     var index = startIndex
     for control in controls {
@@ -552,11 +552,19 @@ private func pluginControlEntries(controls: [PluginManager.SettingsControl], sta
             ))
         case "text", "custom":
             // Three shapes reach here: a row that opens another page, a row that
-            // runs a callback, and a plain caption. `has_sub_fragment` wins,
-            // because exteraGram's builder asks for the page on tap and would
-            // otherwise have its click dropped.
+            // runs a callback, and a plain caption. The page question is answered
+            // by asking the plugin for the page itself rather than by trusting
+            // `has_sub_fragment`: that flag is built by the bootstrap, and when it
+            // is missing the row silently degrades to a caption and the tap does
+            // nothing, which is indistinguishable from "the section does not
+            // open". Asking costs one script call per keyed caption row, which is
+            // what the tap would have cost anyway.
             let title = control.text ?? control.subtext ?? ""
-            if control.hasSubFragment, let key = control.key {
+            var opensPage = control.hasSubFragment
+            if !opensPage, let key = control.key, !control.hasClick, !control.hasLongClick {
+                opensPage = !subControls(key).isEmpty
+            }
+            if opensPage, let key = control.key {
                 // Says which rows the renderer recognised as pages. Without this
                 // line a row that silently became a caption is indistinguishable
                 // from a page that failed to open, and the two have nothing in
@@ -587,7 +595,7 @@ private func pluginControlEntries(controls: [PluginManager.SettingsControl], sta
     return entries
 }
 
-private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], loadError: String?) -> [PluginSettingsEntry] {
+private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], loadError: String?, subControls: (String) -> [PluginManager.SettingsControl]) -> [PluginSettingsEntry] {
     var entries: [PluginSettingsEntry] = []
     if let loadError = loadError {
         // A plugin that did not load has no settings to show, and saying only
@@ -595,7 +603,7 @@ private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], lo
         entries.append(.note(index: 0, text: "This plugin failed to load: \(loadError)"))
     }
 
-    let controlEntries = pluginControlEntries(controls: controls, startIndex: entries.count)
+    let controlEntries = pluginControlEntries(controls: controls, startIndex: entries.count, subControls: subControls)
     entries.append(contentsOf: controlEntries)
     if controlEntries.isEmpty && loadError == nil {
         entries.append(.empty)
@@ -605,8 +613,8 @@ private func pluginSettingsEntries(controls: [PluginManager.SettingsControl], lo
     return entries
 }
 
-private func pluginSubSettingsEntries(controls: [PluginManager.SettingsControl]) -> [PluginSettingsEntry] {
-    let entries = pluginControlEntries(controls: controls, startIndex: 0)
+private func pluginSubSettingsEntries(controls: [PluginManager.SettingsControl], subControls: (String) -> [PluginManager.SettingsControl]) -> [PluginSettingsEntry] {
+    let entries = pluginControlEntries(controls: controls, startIndex: 0, subControls: subControls)
     if entries.isEmpty {
         return [.empty]
     }
@@ -671,11 +679,17 @@ private func pluginSettingsArguments(context: AccountContext, pluginId: String, 
             // push onto. The line tells them apart on a sideloaded build, where
             // there is no debugger to ask.
             let presented = host.controller
-            let hasStack = (presented?.navigationController is NavigationController)
-            PluginLog.write(pluginId: pluginId, text: "openSubPage: key=\(key) host=\(presented != nil ? "live" : "gone") stack=\(hasStack ? "yes" : "no")")
+            let stack = presented?.navigationController
+            PluginLog.write(pluginId: pluginId, text: "openSubPage: key=\(key) host=\(presented != nil ? "live" : "gone") stack=\(stack != nil ? "yes" : "no")")
             let page = pluginSubSettingsController(context: context, pluginId: pluginId, parentKey: key, title: title)
-            if let presented = presented, hasStack {
-                presented.push(page)
+            if let stack = stack {
+                // Any `UINavigationController` will do, not only the app's own
+                // `NavigationController`: the plugin list is also reachable
+                // through a plain one (a `link_alias` row opens it inside a
+                // `UINavigationController` presented over the window), and
+                // demanding the app's subclass sent every tap on a section in
+                // that screen to the overlay instead of onto the stack.
+                stack.pushViewController(page, animated: true)
             } else {
                 // No stack to push onto: the list is either not on screen any
                 // more or was opened in an overlay. Falling back to the global
@@ -730,7 +744,8 @@ public func pluginSettingsController(context: AccountContext, pluginId: String) 
             presentationData: ItemListPresentationData(presentationData),
             entries: pluginSettingsEntries(
                 controls: manager.settings(for: pluginId),
-                loadError: summary?.loadError
+                loadError: summary?.loadError,
+                subControls: { key in manager.subSettings(for: pluginId, parentKey: key) }
             ),
             style: .blocks,
             animateChanges: true
@@ -783,7 +798,10 @@ private func pluginSubSettingsController(context: AccountContext, pluginId: Stri
         )
         let listState = ItemListNodeState(
             presentationData: ItemListPresentationData(presentationData),
-            entries: pluginSubSettingsEntries(controls: manager.subSettings(for: pluginId, parentKey: parentKey)),
+            entries: pluginSubSettingsEntries(
+                controls: manager.subSettings(for: pluginId, parentKey: parentKey),
+                subControls: { key in manager.subSettings(for: pluginId, parentKey: key) }
+            ),
             style: .blocks,
             animateChanges: true
         )

@@ -662,7 +662,14 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             let controller = pluginsController(context: context)
-            let navigation = UINavigationController(rootViewController: controller)
+            // The app's own `NavigationController`, not a bare one: the plugin
+            // list's sections and the log screen are pushed onto whatever stack
+            // this controller lands in, and the app's subclass is what draws the
+            // back button and the theme. A plain `UINavigationController` showed
+            // the list but left the section rows without a stack to open on.
+            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+            let navigation = NavigationController(mode: .single, theme: NavigationControllerTheme(presentationTheme: presentationData.theme))
+            navigation.setViewControllers([controller], animated: false)
             navigation.modalPresentationStyle = .formSheet
             sharedContext.applicationBindings.presentNativeController(navigation)
         }
