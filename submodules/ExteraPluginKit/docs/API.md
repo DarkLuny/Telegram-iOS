@@ -213,15 +213,38 @@ hook_utils.find_class("SomeClass").hook("someSelector:", hook);
 `getResult`, `getObjectExtra(key)`, `setObjectExtra(key, value)`.
 
 What can be hooked: an Objective-C method that already exists on a class the app
-has loaded. What cannot: a Swift method not exposed with `@objc` (there is no such
-selector to find), a C function, and anything that would have to exist before the
-plugin runs. A class or selector that resolves to nothing is reported in the log,
-never created. A method whose real signature is not "receiver, up to two object
-arguments, object return" is still swizzled, but its arguments arrive as that
-two-object slice, which is what the SDK's `args` list is on Android too.
+has loaded, taking zero, one or two object arguments, returning an object or
+nothing. What cannot: a Swift method not exposed with `@objc` (there is no such
+selector to find), a C function, a method taking a struct or a primitive, and
+anything that would have to exist before the plugin runs. A class or selector
+that resolves to nothing is reported in the log, never created.
+
+A signature outside that set is refused with a reason rather than installed —
+`hook("foo:")` on a method that takes a `CGFloat` answers null and logs the type
+encoding. Swizzling it with a block that returns an object would not crash
+immediately; it would corrupt the return value of every call, which is a much
+worse bug to find later. The block is dispatched at the arity the method
+actually has, so a zero-argument method is not handed two uninitialised
+registers.
+
+The callbacks run in Xposed's order, and the original is always called unless a
+hook replaced the result:
+
+- `beforeHookedMethod(param)` — runs first. `param.setResult(x)` skips the
+  original and becomes the method's return value. Returning nothing lets the
+  original run.
+- the original implementation.
+- `afterHookedMethod(param)` — runs with `param.getResult()` set to what the
+  original returned. Reading it changes nothing; `setResult` there replaces it.
+
+`setResult` values cross the bridge as JSON, so an array arrives as an array and
+`null` arrives as `nil`, not as the strings `"[]"` and `"null"`.
 
 Hooks are installed once per class+selector (a second install is a no-op) and are
 all restored when plugins unload, so a removed plugin's block cannot keep running.
+
+`hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
+property with no `@objc` cannot be reached by name — and log rather than guess.
 
 `hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
 property with no `@objc` cannot be reached by name — and log rather than guess.
@@ -830,9 +853,9 @@ than pretending:
 |---|---|
 | `hook_utils.find_class` | **real**: resolves a loaded Objective-C class and returns a handle that can `.hook(selector, hook)`. Unknown names return `null`. |
 | `hook_utils.get_private_field` / `set_private_field` / static variants | log and return `null` / `false`; a Swift property not exposed with `@objc` cannot be reached by name |
-| Xposed-style `MethodHook` / `HookFilter`, `find_class(...).hook(...)` | **real** on Objective-C methods: the host swizzles the selector and calls `before`/`after` with a `param` carrying `getArgs`/`setResult`/`getResult`/`setObjectExtra`. A hook that sets a result replaces the method's return. |
+| Xposed-style `MethodHook` / `HookFilter`, `find_class(...).hook(...)` | **real** on Objective-C methods: the host swizzles the selector, runs `before`, calls the original unless `before` replaced the result, then runs `after` with `getResult()` set. A signature it cannot forward (struct/primitive args, primitive return) is refused with the type encoding, not installed with a wrong ABI. |
 | `intents.IntentsManager` | **real**: `new_global_before_handler` / `new_global_after_handler` match opened URLs by scheme/host/path/query and run by ascending priority; a before-handler returning `true` stops the URL from opening. `send`/`startActivity` log and return `false`. |
-| `extera_utils.classes.jclassbuilder` / `makeInstance` | **real**: builds an Objective-C subclass at runtime (`objc_allocateClassPair` + `class_addMethod`) and instantiates it. Only the "receiver, ≤2 object args, object return" ABI is representable. |
+| `extera_utils.classes.jclassbuilder` / `makeInstance` | **real**: builds an Objective-C subclass at runtime (`objc_allocateClassPair` + `class_addMethod`, or `class_replaceMethod` for a method the superclass already implements) and instantiates it. The arity comes from the JavaScript function the plugin supplied; only "receiver, ≤2 object args, object return" is representable. |
 | `extera_utils.classes` decorators (`java_subclass`, `joverride`, `jmethod`, …) | identity functions that record the declaration for `jclassbuilder` |
 | `client_utils.get_messages_controller` / `get_contacts_controller` / `get_user_config` / `get_media_data_controller` / `get_notifications_settings` / `get_queue_by_name` | **real** proxies over host bridges (see §20) |
 | `client_utils.get_last_fragment`, `get_account_instance`, `get_connections_manager`, `send_request`, and the other controller getters | return `null` and log once, so a plugin's own guard takes the safe branch |
@@ -877,8 +900,12 @@ plugin's own `send_text` and is fire-and-forget, like the SDK's send.
 controller, and answers `{ok: false}`. `get_notifications_settings().get` answers
 peer-profile data, which is what a plugin reads it for.
 
-A peer id is the signed numeric id used everywhere else: positive for a user,
-small negative for a basic group, `-100…` for a channel.
+A peer id on the bridge is `PeerId.toInt64()` — the client's own packed form, the
+same number `pluginMessageDetailsJSON` reports and `send_message` expects. It is
+**not** Telegram's `-100…` channel marking: that is a Bot API convention the
+client never uses internally, and a peer id read from a hook has to be usable in
+a send, so both directions go through the same codec and round-trip. Pass a peer
+id you got from a hook back into any bridge call unchanged.
 
 ---
 
