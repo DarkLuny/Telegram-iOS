@@ -25,6 +25,14 @@ public struct ChatMessageEntryAttributes: Equatable {
     /// of the album entry it becomes. The entry keeps that identity, so the album replaces it in place
     /// rather than as a new row (a row held where it was scrolled to would otherwise be lost).
     public var groupStableId: Int64?
+    /// Set on a row that is not a live message but the copy a plugin kept after
+    /// the message was deleted.
+    ///
+    /// The row exists only in the list: the message itself is no longer in the
+    /// database, so nothing else about it can be asked. This flag is what draws
+    /// the deleted marker, and it is also how the UI can tell such a row from a
+    /// message that simply has no text yet.
+    public var isDeleted: Bool
     
     public init(rank: CachedChannelAdminRank?, isContact: Bool, contentTypeHint: ChatMessageEntryContentType, updatingMedia: ChatUpdatingMessageMedia?, isPlaying: Bool, isCentered: Bool, authorStoryStats: EnginePeerStoryStats?, displayContinueThreadFooter: Bool, pinToTop: Bool, isGiftMessageComposerPreview: Bool = false) {
         self.rank = rank
@@ -38,6 +46,7 @@ public struct ChatMessageEntryAttributes: Equatable {
         self.pinToTop = pinToTop
         self.isGiftMessageComposerPreview = isGiftMessageComposerPreview
         self.groupStableId = nil
+        self.isDeleted = false
     }
     
     public init() {
@@ -52,6 +61,7 @@ public struct ChatMessageEntryAttributes: Equatable {
         self.pinToTop = false
         self.isGiftMessageComposerPreview = false
         self.groupStableId = nil
+        self.isDeleted = false
     }
 }
 

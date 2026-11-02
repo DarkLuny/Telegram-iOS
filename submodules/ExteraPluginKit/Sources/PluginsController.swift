@@ -557,6 +557,11 @@ private func pluginControlEntries(controls: [PluginManager.SettingsControl], sta
             // otherwise have its click dropped.
             let title = control.text ?? control.subtext ?? ""
             if control.hasSubFragment, let key = control.key {
+                // Says which rows the renderer recognised as pages. Without this
+                // line a row that silently became a caption is indistinguishable
+                // from a page that failed to open, and the two have nothing in
+                // common: one is a bridge problem, the other a navigation one.
+                PluginLog.write(pluginId: "plugins-ui", text: "subpage row: key=\(key) title=\(title)")
                 entries.append(.subPage(index: index, key: key, title: title, subtitle: control.subtext))
             } else if let key = control.key, control.hasClick || control.hasLongClick {
                 // A list row only reports a tap, so a `on_long_click`-only row
@@ -661,7 +666,22 @@ private func pluginSettingsArguments(context: AccountContext, pluginId: String, 
             manager.invokeSettingClick(pluginId: pluginId, key: key, long: long)
         },
         openSubPage: { key, title in
-            host.controller?.push(pluginSubSettingsController(context: context, pluginId: pluginId, parentKey: key, title: title))
+            // Two separate failures look identical from the outside: the tap
+            // never reaches this closure, or it does and there is no stack to
+            // push onto. The line tells them apart on a sideloaded build, where
+            // there is no debugger to ask.
+            let presented = host.controller
+            let hasStack = (presented?.navigationController is NavigationController)
+            PluginLog.write(pluginId: pluginId, text: "openSubPage: key=\(key) host=\(presented != nil ? "live" : "gone") stack=\(hasStack ? "yes" : "no")")
+            let page = pluginSubSettingsController(context: context, pluginId: pluginId, parentKey: key, title: title)
+            if let presented = presented, hasStack {
+                presented.push(page)
+            } else {
+                // No stack to push onto: the list is either not on screen any
+                // more or was opened in an overlay. Falling back to the global
+                // overlay still shows the page; it just has no back arrow.
+                context.sharedContext.presentGlobalController(page, nil)
+            }
         },
         reload: {
             manager.reloadPlugins()
@@ -744,6 +764,9 @@ private func pluginSubSettingsController(context: AccountContext, pluginId: Stri
     // A nested page may itself open a page, so it gets its own host.
     let host = PluginSettingsHost()
     let arguments = pluginSettingsArguments(context: context, pluginId: pluginId, bump: bump, host: host)
+
+    let subControls = manager.subSettings(for: pluginId, parentKey: parentKey)
+    PluginLog.write(pluginId: pluginId, text: "subpage built: key=\(parentKey) controls=\(subControls.count)")
 
     let signal = combineLatest(
         context.sharedContext.presentationData,

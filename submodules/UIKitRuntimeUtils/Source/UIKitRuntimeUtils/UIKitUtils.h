@@ -39,6 +39,20 @@ NSObject * _Nullable makeColorMatrixFilter();
 void setLayerDisableScreenshots(CALayer * _Nonnull layer, bool disableScreenshots);
 bool getLayerDisableScreenshots(CALayer * _Nonnull layer);
 
+/// Turns the screenshot protection off for every layer, for good.
+///
+/// `setLayerDisableScreenshots` refuses to protect a layer while this is on, so a
+/// screen that asks for protection after the switch was flipped is left
+/// unprotected too. This is the closest iOS has to clearing `FLAG_SECURE` from
+/// the window: there is no per-window flag to rewrite, only this one funnel that
+/// every protected layer in the app goes through.
+///
+/// Layers protected *before* the switch was flipped keep their marking; the
+/// caller is expected to clear them itself (see `getLayerDisableScreenshots`),
+/// which is what the plugin's sweep does when the switch is turned on.
+void setAllowScreenshotsOverride(bool allow);
+bool getAllowScreenshotsOverride(void);
+
 void setLayerContentsMaskMode(CALayer * _Nonnull layer, bool maskMode);
 
 void setMonochromaticEffectImpl(UIView * _Nonnull view, bool isEnabled);

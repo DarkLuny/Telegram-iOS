@@ -884,6 +884,128 @@ func chatHistoryEntriesForView(
         }
     }
     
+    // Rows a plugin kept after the message was deleted.
+    //
+    // The message is gone from the database, so the list cannot be asked for it;
+    // the plugin's own copy is the only source. The row is built here, marked
+    // `isDeleted` so the date/status line draws the marker, and placed by its
+    // original timestamp among the live rows.
+    //
+    // Only the loaded window is filled: a saved message older than `earlierId`
+    // is not in the list yet, and inserting it at the top would put a row from
+    // months ago above the messages the user actually scrolled to. Once the
+    // window reaches it, the next build inserts it in place.
+    if !isMusicPlaylist, location.threadId == nil, let peerId = location.peerId, !view.isLoading,
+       PluginHookPoints.shared.wantsDeletedMessages?() == true,
+       let deletedMessages = PluginHookPoints.shared.deletedMessages {
+        let storedMessages = deletedMessages(context.account.id.int64, peerId.toInt64())
+        if !storedMessages.isEmpty {
+            // A saved copy of a message that is still in the chat would be a
+            // second, identical row. Compared by raw id rather than by
+            // `MessageId`: a live message is in the cloud namespace and the
+            // saved row is placed in the local one.
+            var liveMessageIds = Set<Int32>()
+            for entry in view.entries where entry.message.id.peerId == peerId {
+                liveMessageIds.insert(entry.message.id.id)
+            }
+
+            for storedMessage in storedMessages {
+                // A copy with neither text nor a media marker has nothing to
+                // show: an empty bubble would read as a message that was never
+                // sent. The plugin's own list drops such an entry too.
+                let displayText: String
+                if !storedMessage.text.isEmpty {
+                    displayText = storedMessage.text
+                } else if let mediaKind = storedMessage.mediaKind {
+                    // The plugin keeps a marker, not the file, so a deleted
+                    // photo cannot be shown again. This is the same placeholder
+                    // its deleted-messages screen used.
+                    displayText = "[" + mediaKind + "]"
+                } else {
+                    continue
+                }
+                let messageId = MessageId(peerId: peerId, namespace: Namespaces.Message.Local, id: storedMessage.messageId)
+                if liveMessageIds.contains(storedMessage.messageId) {
+                    continue
+                }
+                let index = MessageIndex(id: messageId, timestamp: storedMessage.timestamp)
+                if let earlierId = view.earlierId, index < earlierId {
+                    continue
+                }
+                if let laterId = view.laterId, index > laterId {
+                    continue
+                }
+
+                var author: Peer?
+                if let senderId = storedMessage.senderId, senderId != 0 {
+                    let senderPeerId = PeerId(senderId)
+                    if let peer = cachedPeerDataPeers[senderPeerId] {
+                        author = peer
+                    } else if let chatPeer, chatPeer.id == senderPeerId {
+                        author = chatPeer
+                    }
+                }
+                var peers = SimpleDictionary<PeerId, Peer>()
+                if let chatPeer {
+                    peers[chatPeer.id] = chatPeer
+                }
+                if let author {
+                    peers[author.id] = author
+                }
+
+                // The same id derivation `MessageUtils` uses: it only has to
+                // stay put inside one run, which is how a scroll position
+                // survives a rebuild.
+                var hasher = Hasher()
+                hasher.combine(storedMessage.messageId)
+                hasher.combine(peerId)
+                let hashValue = Int64(hasher.finalize())
+                let first = UInt32((hashValue >> 32) & 0xffffffff)
+                let second = UInt32(hashValue & 0xffffffff)
+                let stableId = first &+ second
+
+                let message = Message(
+                    stableId: stableId,
+                    stableVersion: 0,
+                    id: messageId,
+                    globallyUniqueId: nil,
+                    groupingKey: nil,
+                    groupInfo: nil,
+                    threadId: nil,
+                    timestamp: storedMessage.timestamp,
+                    flags: storedMessage.isOutgoing ? [] : [.Incoming],
+                    tags: [],
+                    globalTags: [],
+                    localTags: [],
+                    customTags: [],
+                    forwardInfo: nil,
+                    author: author,
+                    text: displayText,
+                    attributes: [],
+                    media: [],
+                    peers: peers,
+                    associatedMessages: SimpleDictionary<MessageId, Message>(),
+                    associatedMessageIds: [],
+                    associatedMedia: [:],
+                    associatedThreadInfo: nil,
+                    associatedStories: [:]
+                )
+
+                var attributes = ChatMessageEntryAttributes(rank: nil, isContact: false, contentTypeHint: .generic, updatingMedia: nil, isPlaying: false, isCentered: false, authorStoryStats: nil, displayContinueThreadFooter: false, pinToTop: false)
+                attributes.isDeleted = true
+
+                var insertAtPosition = entries.count
+                for i in 0 ..< entries.count {
+                    if entries[i].index > message.index {
+                        insertAtPosition = i
+                        break
+                    }
+                }
+                entries.insert(.MessageEntry(message, presentationData, true, nil, .none, attributes), at: insertAtPosition)
+            }
+        }
+    }
+
     if isMusicPlaylist && entries.count == 1 {
         return ([], currentState)
     }

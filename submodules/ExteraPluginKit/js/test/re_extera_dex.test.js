@@ -875,6 +875,88 @@ test('a message saved from an update is not marked deleted', () => {
     assert.strictEqual(store.deleted_keys[0].deleted, undefined);
 });
 
+// --- rows left in the chat --------------------------------------------------
+//
+// `on_deleted_messages` is what the host asks when it builds a chat: the saved
+// copy of a message that is no longer in the database. Only entries the plugin
+// itself marked `deleted` may be answered, and only for the chat it asked about,
+// or a live message would be drawn twice.
+
+function askDeleted(ctx, peerId) {
+    const answer = ctx.__extera.query(
+        'on_deleted_messages',
+        JSON.stringify({ peer_id: peerId }),
+        JSON.stringify({ account: 900, peer: peerId })
+    );
+    return JSON.parse(answer).value;
+}
+
+test('a deleted copy is answered for the chat it belongs to', () => {
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id: 700, peer_id: 800, date: 1700000700, text: 'bye', sender_id: 800, is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+
+    const rows = askDeleted(ctx, 800);
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].id, 700);
+    assert.strictEqual(rows[0].date, 1700000700);
+    assert.strictEqual(rows[0].text, 'bye');
+    assert.strictEqual(rows[0].is_out, false);
+    assert.strictEqual(rows[0].sender_id, 800);
+
+    assert.deepStrictEqual(askDeleted(ctx, 801), [], 'another chat gets nothing');
+});
+
+test('a message only seen alive is not answered as a deleted row', () => {
+    // `deleted_keys` doubles as the sighting log, so the filter is `deleted`.
+    // Without it every message that ever passed through an update would come
+    // back as a second, identical row.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 302, peer_id: { _: 'peerUser', user_id: 400 }, message: 'alive', date: 1700000302 },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+
+    assert.deepStrictEqual(askDeleted(ctx, 400), []);
+});
+
+test('the deleted rows are answered only while a save switch is on', () => {
+    // A saved row is the plugin's feature, so turning its switch off has to take
+    // the row out of the chat too — not only stop new ones from being kept.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_messages_will_be_deleted', JSON.stringify({
+        remote: true,
+        messages: [{ id: 701, peer_id: 800, date: 1700000701, text: 'bye', is_out: false, media_kind: 'none' }],
+    }), JSON.stringify({ name: 'messages', account: 900, field: 'update' }));
+    assert.strictEqual(askDeleted(ctx, 800).length, 1);
+
+    ctx.__extera.instance.set_setting('re_extera_save_deleted_messages', false);
+    assert.deepStrictEqual(askDeleted(ctx, 800), []);
+
+    ctx.__extera.instance.set_setting('re_extera_save_manually_deleted', true);
+    assert.strictEqual(askDeleted(ctx, 800).length, 1, 'the other switch still covers the store');
+});
+
+test('an edit is not answered as a deleted row', () => {
+    // An edited message is still in the chat. Its saved copy lives under
+    // `edits`, and answering it here would add a row for a message the user
+    // can already see.
+    const state = makeHost({ settings: { re_extera_save_deleted_messages: true, re_extera_save_edits: true } });
+    const ctx = load(state, 'en-US');
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 303, peer_id: { _: 'peerUser', user_id: 400 }, message: 'first', date: 1700000303 },
+    }), JSON.stringify({ name: 'updateNewMessage', account: 900, field: 'update' }));
+    ctx.__extera.runHook('on_update_hook', JSON.stringify({
+        message: { _: 'message', id: 303, peer_id: { _: 'peerUser', user_id: 400 }, message: 'second', date: 1700000304 },
+    }), JSON.stringify({ name: 'updateEditMessage', account: 900, field: 'update' }));
+
+    assert.deepStrictEqual(askDeleted(ctx, 400), []);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try {

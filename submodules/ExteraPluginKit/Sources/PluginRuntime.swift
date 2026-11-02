@@ -24,6 +24,11 @@ public final class PluginRuntime {
 
     private var foregroundDisposable: Disposable?
     private var lifecycleDisposable: Disposable?
+    /// Keeps the screenshot switch (RFS) in step with the plugins.
+    private var screenshotOverrideDisposable: Disposable?
+    /// The answer last applied, so a rebuild that changed nothing does not walk
+    /// the window tree again. `nil` until the first apply.
+    private var screenshotOverrideApplied: Bool?
     /// The context `activate` last ran for.
     ///
     /// Launch reaches `activate` once, but the app delegate's launch signal is
@@ -248,6 +253,107 @@ public final class PluginRuntime {
                 return
             }
             manager.dispatchMessagesWillBeDeleted(account: accountId, messagesJSON: messagesJSON)
+        }
+
+        // Rows a plugin kept after the message was deleted. Asked once per
+        // history view and only when `wantsDeletedMessages` said a plugin keeps
+        // copies: a chat with a thousand messages must not run script for a
+        // plugin that never stored anything.
+        hooks.wantsDeletedMessages = {
+            guard manager.hasLoadedPlugins else {
+                return false
+            }
+            return manager.deletedMessagesHookCached
+        }
+
+        hooks.deletedMessages = { accountId, peerId in
+            guard manager.hasLoadedPlugins else {
+                return []
+            }
+            return manager.dispatchDeletedMessages(account: accountId, peerId: peerId)
+        }
+
+        // The screenshots switch (RFS). Applied once, at startup and whenever a
+        // setting changes, rather than per screen: the answer flips one flag in
+        // the layer primitive that every protected layer goes through.
+        //
+        // The initial apply has to run on the main queue and after the plugins
+        // have loaded — protection is requested while the first frame is built,
+        // which is before `startLoading` gets to run the scripts. `PluginManager`
+        // already pushes an appearance-changed event once its load finished, and
+        // that is the signal this reads.
+        self.screenshotOverrideDisposable?.dispose()
+        self.screenshotOverrideDisposable = (PluginHookPoints.shared.appearanceChanged
+        |> deliverOnMainQueue).start(next: { [weak self] in
+            self?.applyScreenshotOverride()
+        })
+    }
+
+    /// Reads every plugin's answer to "allow screenshots" and applies the result.
+    ///
+    /// Runs on the main queue: the answer decides what the next
+    /// `setLayerDisableScreenshots` call does, and clearing the layers that were
+    /// already protected means walking the window tree.
+    private func applyScreenshotOverride() {
+        let manager = PluginManager.shared
+        guard manager.hasLoadedPlugins else {
+            // No plugin, or every plugin was just unloaded: put the stock
+            // behaviour back, or a removed plugin would keep the screenshots
+            // allowed for the rest of the session.
+            self.setScreenshotOverride(false, clearProtected: false)
+            return
+        }
+        let account = self.actions.primaryAccountId
+        let allowed = manager.dispatchAllowScreenshots(account: account)
+        self.setScreenshotOverride(allowed, clearProtected: allowed)
+    }
+
+    /// Applies the answer, and clears the layers that were protected before it.
+    ///
+    /// A layer marked earlier keeps its marking: the flag only stops *future*
+    /// requests from taking effect. Turning the switch on therefore has to walk
+    /// what is on screen and unmark it, or the chat the user is looking at would
+    /// stay uncapturable until it is rebuilt. Turning it off only removes the
+    /// flag: the screens the app rebuilds mark themselves again, and re-marking
+    /// every layer in the tree would protect views that are not media at all.
+    ///
+    /// The sweep runs only when the answer changes, not on every appearance
+    /// rebuild: once the flag is on, no new layer is marked, so there is nothing
+    /// left to clear and walking the tree again would cost a full pass per theme
+    /// change for no effect.
+    private func setScreenshotOverride(_ allowed: Bool, clearProtected: Bool) {
+        if self.screenshotOverrideApplied == allowed {
+            return
+        }
+        self.screenshotOverrideApplied = allowed
+        setScreenshotsAllowedGlobally(allowed)
+        guard clearProtected else {
+            return
+        }
+        // `UIApplication.shared.windows` is deprecated, and this target builds with
+        // warnings as errors; the scenes are the supported route and they also
+        // cover a second, non-key window (an overlay one).
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else {
+                continue
+            }
+            for window in windowScene.windows {
+                Self.clearScreenshotProtection(in: window.layer)
+            }
+        }
+    }
+
+    /// Unmarks every protected layer below `layer`, depth first.
+    ///
+    /// `setScreenshotProtection` is cheap for an unmarked layer (one associated
+    /// object read), so walking everything is simpler and safer than trying to
+    /// find the media nodes among it.
+    private static func clearScreenshotProtection(in layer: CALayer) {
+        if isScreenshotProtected(layer) {
+            setScreenshotProtection(layer, false)
+        }
+        for sublayer in layer.sublayers ?? [] {
+            clearScreenshotProtection(in: sublayer)
         }
     }
 

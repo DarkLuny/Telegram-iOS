@@ -99,6 +99,26 @@ public final class PluginHookPoints {
     /// path the user did not ask for. `nil` means nothing asks at all.
     public var wantsMessagesWillBeDeleted: (() -> Bool)?
 
+    /// Messages a plugin kept after they were deleted, for one chat.
+    ///
+    /// A message the user deletes is erased from the database, so the row is
+    /// rebuilt here from the copy the plugin stored. `peerId` is Postbox's
+    /// `PeerId.toInt64()`, the same number `pluginMessageDetailsJSON` reports as
+    /// `peer_id`, and the answer is the rows that still belong in the chat,
+    /// oldest first.
+    ///
+    /// The rows are not in the database: they exist only in the list, which is
+    /// why the entries carrying them are marked `isDeleted` and the date/status
+    /// node draws the marker. `nil` means nothing keeps copies at all.
+    public var deletedMessages: ((_ accountId: Int64, _ peerId: Int64) -> [PluginStoredMessage])?
+
+    /// Whether any plugin keeps deleted messages for a chat.
+    ///
+    /// Asked once per history view, before the row loop, for the same reason as
+    /// `wantsHideMessage`: a plugin that keeps nothing must not cost a script
+    /// call on every chat the user opens.
+    public var wantsDeletedMessages: (() -> Bool)?
+
     // MARK: - Appearance
     //
     // The four hooks below are not network interception: they answer "what should
@@ -208,6 +228,46 @@ public struct PluginDetailItem {
     public init(title: String, value: String) {
         self.title = title
         self.value = value
+    }
+}
+
+/// A message a plugin kept after it was deleted.
+///
+/// Everything here comes from the plugin's own storage rather than from the
+/// database: the message is gone, so the row in the chat has to be built from
+/// this description alone. That is why the text is a plain string with no
+/// entities and no media — the plugin only kept what it could encode into its
+/// JSON file, and a row that pretends to have more than that would show a
+/// message that never existed.
+public struct PluginStoredMessage {
+    /// The peer the message belongs to, as `PeerId.toInt64()`.
+    public let peerId: Int64
+    /// The original message id, which is what makes the row stable across
+    /// rebuilds of the list and keeps a scroll position from jumping.
+    public let messageId: Int32
+    public let timestamp: Int32
+    public let text: String
+    /// What kind of media the message had, when it had no text.
+    ///
+    /// The plugin kept a marker rather than the file itself — it can only store
+    /// what fits in its JSON file — so a deleted photo cannot be shown again.
+    /// Pretending otherwise, with an empty bubble, would read as a message that
+    /// was never sent; the marker says "there was a photo here", which is what
+    /// the module's own deleted-messages screen showed too.
+    public let mediaKind: String?
+    /// The author, when the plugin kept one. `nil` for a message with no author
+    /// (a channel post, a deleted account).
+    public let senderId: Int64?
+    public let isOutgoing: Bool
+
+    public init(peerId: Int64, messageId: Int32, timestamp: Int32, text: String, mediaKind: String?, senderId: Int64?, isOutgoing: Bool) {
+        self.peerId = peerId
+        self.messageId = messageId
+        self.timestamp = timestamp
+        self.text = text
+        self.mediaKind = mediaKind
+        self.senderId = senderId
+        self.isOutgoing = isOutgoing
     }
 }
 

@@ -4,6 +4,11 @@
 
 #import <objc/runtime.h>
 
+// `_Atomic(bool)` for the screenshot switch below. Clang supports C11 atomics in
+// Objective-C, and this file already builds as C11; OSAtomic is deprecated and
+// this target treats warnings as errors.
+#include <stdatomic.h>
+
 #if TARGET_IPHONE_SIMULATOR
 UIKIT_EXTERN float UIAnimationDragCoefficient();
 #endif
@@ -296,7 +301,30 @@ NSObject * _Nullable makeColorMatrixFilter() {
 
 static const void *layerDisableScreenshotsKey = &layerDisableScreenshotsKey;
 
+/// Process-wide "allow screenshots" switch, set by the RFS plugin.
+///
+/// Read on every `setLayerDisableScreenshots` call, which is already how the
+/// secure-text trick is reached, so this costs one load and keeps every existing
+/// call site untouched. Atomic because a screen may mark a layer from a queue
+/// other than the one that flipped the switch.
+static _Atomic(bool) allowScreenshotsOverride = false;
+
+void setAllowScreenshotsOverride(bool allow) {
+    atomic_store(&allowScreenshotsOverride, allow);
+}
+
+bool getAllowScreenshotsOverride(void) {
+    return atomic_load(&allowScreenshotsOverride);
+}
+
 void setLayerDisableScreenshots(CALayer * _Nonnull layer, bool disableScreenshots) {
+    // A plugin that asked for screenshots to be allowed wins over every caller:
+    // the flag is the iOS shape of `Window.addFlags(FLAG_SECURE)`, and clearing it
+    // has to clear it wherever a screen sets it, not only where the plugin knows
+    // to look.
+    if (disableScreenshots && atomic_load(&allowScreenshotsOverride)) {
+        disableScreenshots = false;
+    }
     static UITextField *textField = nil;
     static UIView *secureView = nil;
     static dispatch_once_t onceToken;

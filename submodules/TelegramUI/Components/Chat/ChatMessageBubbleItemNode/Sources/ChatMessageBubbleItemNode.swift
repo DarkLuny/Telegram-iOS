@@ -2729,7 +2729,8 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
                     hasAutoremove: message.isSelfExpiring,
                     canViewReactionList: canViewMessageReactionList(message: EngineMessage(message)),
                     animationCache: item.controllerInteraction.presentationContext.animationCache,
-                    animationRenderer: item.controllerInteraction.presentationContext.animationRenderer
+                    animationRenderer: item.controllerInteraction.presentationContext.animationRenderer,
+                    isDeleted: item.content.firstMessageAttributes.isDeleted
                 ))
                 
                 mosaicStatusSizeAndApply = statusSuggestedWidthAndContinue.1(statusSuggestedWidthAndContinue.0)

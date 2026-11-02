@@ -1,0 +1,169 @@
+/*
+ * Remove Flag Secure — JavaScript port of the exteraGram plugin of the same name.
+ *
+ * The original clears Android's `FLAG_SECURE` from the window and from every view
+ * added to it, so screenshots of secret chats, "one-time" media and channels with
+ * a copy ban become possible. iOS has no such flag: content is excluded from
+ * screenshots per `CALayer`, by one function (`setLayerDisableScreenshots`, the
+ * secure-text-field trick) that every protected layer in the app goes through.
+ *
+ * So this port works one level down from the original: the host asks "should
+ * screenshots be allowed at all", the answer flips that one function, and every
+ * screen that asks for protection — before or after — is left capturable. That
+ * covers each surface the Android plugin hooked, without the plugin having to
+ * name any of them:
+ *
+ *   Window.setFlags / addFlags(FLAG_SECURE)          -> the flag itself
+ *   Window.setAttributes(LayoutParams.FLAG_SECURE)   -> the flag itself
+ *   WindowManagerImpl.addView / updateViewLayout     -> the per-layer marking
+ *   FlagSecureReason.updateWindowSecure              -> the per-layer marking
+ *   FlagSecureReason.isSecuredNow                    -> the flag itself
+ *   SurfaceView.setSecure(true)                       -> video layers
+ *   StoryViewer.allowScreenshots                      -> story layers
+ *   AndroidUtilities.allGlobalViews().clearFlags      -> the host's sweep of
+ *                                                        layers that were already
+ *                                                        marked when the switch
+ *                                                        was turned on
+ *
+ * What is *not* ported, and why:
+ *
+ *   - `Window.clearFlags` and the view-tree walk are how the original applied
+ *     its change to a screen that was already on screen. There is no
+ *     `AndroidUtilities` here; the host does the same sweep with
+ *     `UIApplication.shared.connectedScenes`, which is why the plugin does not
+ *     carry one.
+ *   - The original also let the client's own "screenshot taken" report through
+ *     (it only removed the block, it did not pretend nothing happened). The same
+ *     is true here: a screenshot of a secret chat is still reported to the peer,
+ *     exactly as on Android with this plugin installed.
+ *   - A copy ban (`isCopyProtected`) also hides the copy/share affordances in the
+ *     gallery and the message menu on Android, and the plugin did not restore
+ *     them. Nor does this one: the promise is "you can screenshot", not "the
+ *     content is no longer protected".
+ */
+
+var __id__ = "RFS";
+var __name__ = "Remove Flag Secure";
+var __description__ = "Позволяет делать скриншоты «одноразовых» медиа, секретных чатов и каналов с запретом копирования.";
+var __author__ = "@kvucoplugins";
+var __app_version__ = ">=12.5.1";
+var __category__ = ["privacy", "tools"];
+var __sdk_version__ = ">=1.4.3.3";
+var __icon__ = "kvucoplugins/0";
+var __version__ = "1.1";
+
+// The one switch. The original had no settings at all: installing it was the
+// switch. Keeping the same default means an Android user's expectation — install,
+// screenshots work — holds here, and the plugin list's own on/off toggle is how a
+// user turns the whole thing off.
+var MASTER_KEY = "allow_screenshots";
+
+// Android class names the original hooked, kept for the log line. None of them
+// exists on iOS; the log says what replaced them instead of silently claiming
+// they were hooked.
+var ANDROID_HOOKS = [
+    "android.view.Window.setFlags",
+    "android.view.Window.addFlags",
+    "android.view.Window.setAttributes",
+    "android.view.WindowManagerImpl.addView",
+    "android.view.WindowManagerImpl.updateViewLayout",
+    "org.telegram.messenger.FlagSecureReason.updateWindowSecure",
+    "org.telegram.messenger.FlagSecureReason.isSecuredNow",
+    "android.view.SurfaceView.setSecure",
+    "org.telegram.ui.Stories.StoryViewer.allowScreenshots"
+];
+
+class RemoveFlagSecurePlugin extends BasePlugin {
+    constructor() {
+        super();
+        RemoveFlagSecurePlugin.instance = this;
+    }
+
+    on_plugin_load() {
+        RemoveFlagSecurePlugin.instance = this;
+        // Said once, at load, so a reader of the plugin log knows why the Android
+        // class names above do not appear anywhere else in this file.
+        this.log(
+            "iOS has no FLAG_SECURE; " + ANDROID_HOOKS.length +
+            " Android hook points map onto the per-layer screenshot protection"
+        );
+    }
+
+    on_plugin_unload() {
+        RemoveFlagSecurePlugin.instance = null;
+    }
+
+    // Reads through the instance so a plugin that never loaded answers with the
+    // default instead of throwing, the same shape the other ports use.
+    static g(key, fallback) {
+        var instance = RemoveFlagSecurePlugin.instance;
+        if (!instance) {
+            return fallback;
+        }
+        try {
+            return instance.get_setting(key, fallback);
+        } catch (error) {
+            return fallback;
+        }
+    }
+
+    static enabled() {
+        // A plugin that has been unloaded must answer "no" rather than fall back
+        // to the default: the host asks once more before it notices that nothing
+        // is loaded, and a `true` there would keep screenshots allowed for the
+        // rest of the session.
+        if (!RemoveFlagSecurePlugin.instance) {
+            return false;
+        }
+        // Tested for truth, not `=== true`: a stored switch reaches JavaScript as
+        // `1` on some paths, and an identity test would read "off" for a switch
+        // the user had turned on.
+        return !!RemoveFlagSecurePlugin.g(MASTER_KEY, true);
+    }
+
+    // Asked by the host when it decides what the next protection request does.
+    // Returning `false` — or not implementing this at all — leaves the stock
+    // behaviour in place, which is what a disabled plugin has to look like.
+    on_allow_screenshots(account, payload, extra) {
+        return RemoveFlagSecurePlugin.enabled();
+    }
+
+    create_settings() {
+        return [
+            Header({ text: "Защита от скриншотов" }),
+            Switch({
+                key: MASTER_KEY,
+                text: "Разрешить скриншоты",
+                default: true,
+                subtext: "Секретные чаты, «одноразовые» медиа и каналы с запретом копирования перестают блокировать снимок экрана.",
+                icon: "msg_settings"
+            }),
+            Divider({}),
+            Header({ text: "Что перенесено" }),
+            Text({
+                text: "Флаг окна",
+                subtext: "На Android плагин снимал FLAG_SECURE с окна и со всех добавленных в него view. На iOS блокировка ставится на отдельный слой, и все такие слои помечаются одной функцией — её и выключает переключатель."
+            }),
+            Text({
+                text: "Видео и истории",
+                subtext: "SurfaceView.setSecure и StoryViewer.allowScreenshots защищали видео и истории. Здесь они идут через ту же пометку слоя, поэтому отдельного переключателя не требуют."
+            }),
+            Text({
+                text: "Уже открытый экран",
+                subtext: "Пометка, поставленная до включения плагина, снимается сразу: хост обходит окна приложения. Новые экраны собираются уже без неё."
+            }),
+            Divider({}),
+            Header({ text: "Что не перенесено" }),
+            Text({
+                text: "Запрет копирования",
+                subtext: "На Android он ещё и убирал «копировать» и «переслать» из меню. Здесь этого нет: плагин разрешает снимок экрана, но не отменяет запрет копирования."
+            }),
+            Text({
+                text: "Отчёт о скриншоте",
+                subtext: "Снимок экрана секретного чата по-прежнему отправляется собеседнику — на Android с этим плагином было так же."
+            })
+        ];
+    }
+}
+
+var Plugin = RemoveFlagSecurePlugin;

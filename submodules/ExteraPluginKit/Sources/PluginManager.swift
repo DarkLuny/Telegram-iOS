@@ -42,6 +42,11 @@ public final class PluginManager: PluginHost {
     /// See `messagesWillBeDeletedHookAvailable`.
     private var cachedMessagesWillBeDeletedHook: Bool?
 
+    /// Cached answer to "does any plugin implement `on_deleted_messages`", the
+    /// callback that lists the copies it kept. Warmed and cleared exactly like
+    /// the flag above.
+    private var cachedDeletedMessagesHook: Bool?
+
     /// Why a plugin on disk did not load, keyed by id. Kept so the list screen can
     /// say so instead of showing the plugin as merely disabled.
     private var failures: [String: String] = [:]
@@ -252,6 +257,7 @@ public final class PluginManager: PluginHost {
         // script queue, so the account state never has to run script itself.
         self.invalidateHookCaches()
         _ = self.messagesWillBeDeletedHookAvailable()
+        _ = self.deletedMessagesHookAvailable()
 
         // The theme, the peer-name palette and the settings rows were all built
         // before this point: plugin scripts are evaluated after the first frame,
@@ -289,6 +295,7 @@ public final class PluginManager: PluginHost {
         self.loaded.removeAll()
         self.menuItems.removeAll()
         self.cachedMessagesWillBeDeletedHook = nil
+        self.cachedDeletedMessagesHook = nil
         self.lock.unlock()
     }
 
@@ -1245,7 +1252,131 @@ public final class PluginManager: PluginHost {
     private func invalidateHookCaches() {
         self.lock.lock()
         self.cachedMessagesWillBeDeletedHook = nil
+        self.cachedDeletedMessagesHook = nil
         self.lock.unlock()
+    }
+
+    /// Whether any plugin keeps copies of deleted messages for a chat.
+    ///
+    /// The history list asks this once per build, before the row loop, so it
+    /// must not run script on a queue the list is being built on. It answers
+    /// from a flag warmed while the script queue is held, exactly like
+    /// `messagesWillBeDeletedHookCached`.
+    public var deletedMessagesHookCached: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.cachedDeletedMessagesHook ?? false
+    }
+
+    /// The uncached form, which runs plugin JavaScript on the script queue.
+    public func deletedMessagesHookAvailable() -> Bool {
+        self.lock.lock()
+        if let cached = self.cachedDeletedMessagesHook {
+            self.lock.unlock()
+            return cached
+        }
+        self.lock.unlock()
+        let answer = self.hasPluginForHook("on_deleted_messages")
+        self.lock.lock()
+        self.cachedDeletedMessagesHook = answer
+        self.lock.unlock()
+        return answer
+    }
+
+    /// The messages a plugin kept after they were deleted, for one chat.
+    ///
+    /// The message is gone from the database, so this is the only source the
+    /// list can build the row from. Plugins are asked in load order and the
+    /// answers are concatenated: two plugins can each keep a copy of a different
+    /// message, and dropping one of them because another answered would lose a
+    /// row the user's own switch asked to keep. A duplicate of the same
+    /// `(peer, id)` is collapsed, because two copies of one message would be two
+    /// identical rows.
+    public func dispatchDeletedMessages(account: Int64, peerId: Int64) -> [PluginStoredMessage] {
+        let context: [String: Any] = ["account": account, "peer": peerId]
+        let payload = self.jsonText(["peer_id": peerId])
+        var result: [PluginStoredMessage] = []
+        var seen = Set<String>()
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_deleted_messages", payloadJSON: payload, context: context) else {
+                continue
+            }
+            guard let list = answer as? [Any] else {
+                continue
+            }
+            for entry in list {
+                guard let object = entry as? [String: Any],
+                      let message = self.storedMessage(from: object, peerId: peerId) else {
+                    continue
+                }
+                let key = "\(message.peerId):\(message.messageId)"
+                if seen.insert(key).inserted {
+                    result.append(message)
+                }
+            }
+        }
+        // The list is built newest first in some modes and oldest first in
+        // others; the caller merges by index, so the order here is only what a
+        // reader of the payload would expect.
+        return result.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// One stored row, or `nil` when the plugin's answer cannot describe a
+    /// message a chat row can show.
+    ///
+    /// A missing id or timestamp is refused rather than defaulted: both are what
+    /// place the row among the live messages, and a zero would put every broken
+    /// entry at the very bottom of the chat.
+    private func storedMessage(from object: [String: Any], peerId: Int64) -> PluginStoredMessage? {
+        guard let id = (object["id"] as? NSNumber)?.intValue, id != 0 else {
+            return nil
+        }
+        let timestamp = (object["date"] as? NSNumber)?.int32Value ?? 0
+        guard timestamp > 0 else {
+            return nil
+        }
+        let sender = (object["sender_id"] as? NSNumber)?.int64Value
+        let mediaKind = (object["media_kind"] as? String).flatMap { $0 == "none" || $0.isEmpty ? nil : $0 }
+        return PluginStoredMessage(
+            peerId: peerId,
+            messageId: id,
+            timestamp: timestamp,
+            text: (object["text"] as? String) ?? "",
+            mediaKind: mediaKind,
+            senderId: sender == nil || sender == 0 ? nil : sender,
+            isOutgoing: (object["is_out"] as? Bool) ?? false
+        )
+    }
+
+    /// Whether a plugin wants screenshots allowed for every screen.
+    ///
+    /// The Android original (RFS) cleared `FLAG_SECURE` from the window and from
+    /// every view added to it. iOS has no window flag: protection is per layer,
+    /// and every protected layer is marked through one function, so the answer
+    /// here is applied once to that function instead of to a screen at a time.
+    /// First plugin that answers `true` wins — there is no "half allowed".
+    ///
+    /// Asked on load, on an app event and whenever a setting was saved, never per
+    /// row, so it needs no cached flag.
+    public func dispatchAllowScreenshots(account: Int64?) -> Bool {
+        var context: [String: Any] = [:]
+        if let account = account {
+            context["account"] = account
+        }
+        for plugin in self.pluginsInLoadOrder {
+            guard let answer = self.queryValue(plugin: plugin, event: "on_allow_screenshots", payloadJSON: "null", context: context) else {
+                continue
+            }
+            if let allowed = answer as? Bool, allowed {
+                return true
+            }
+            // A plugin may answer with a reason, the same way `on_hide_message`
+            // may; the shape of the reason is the plugin's business.
+            if let dictionary = answer as? [String: Any], (dictionary["allow"] as? Bool) == true {
+                return true
+            }
+        }
+        return false
     }
 
     /// Extra rows for the message-details screen, in plugin and item order.

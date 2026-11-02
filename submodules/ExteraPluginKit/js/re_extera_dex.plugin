@@ -258,6 +258,12 @@ function ReExteraPlugin() {
     this.loader = null;
     // Cached `store.json`. `null` means "not read yet"; `readStore` fills it.
     this._store = null;
+    // Bumped on every write, so the per-chat row cache below knows when to
+    // rebuild. A chat is rebuilt on every keystroke in the composer and on every
+    // incoming update, so scanning two thousand entries per rebuild for a chat
+    // that has not changed would be work with no visible result.
+    this._storeVersion = 0;
+    this._deletedRowsCache = {};
 }
 
 ReExteraPlugin.prototype = Object.create(BasePlugin.prototype);
@@ -424,11 +430,22 @@ ReExteraPlugin.prototype.writeStore = function () {
         return false;
     }
     try {
-        return !!file_utils.write_file(path, JSON.stringify(this._store));
+        var written = !!file_utils.write_file(path, JSON.stringify(this._store));
+        if (written) {
+            this.invalidateRowCache();
+        }
+        return written;
     } catch (error) {
         this.log("Store write failed: " + error);
         return false;
     }
+};
+
+// Drops the per-chat row cache. Called from every path that changes the store,
+// including the clear action, so a cleared store stops answering rows at once.
+ReExteraPlugin.prototype.invalidateRowCache = function () {
+    this._storeVersion += 1;
+    this._deletedRowsCache = {};
 };
 
 // The module's `save_deleted_messages` / `save_manually_deleted` switches. The
@@ -970,6 +987,58 @@ ReExteraPlugin.prototype.create_settings = function () {
 
     return rows;
 };
+
+// --- rows for the copies left in the chat -----------------------------------
+//
+// The module on Android put the saved message back into the dialog
+// (`DeletedMessagesInChatFragment`, and its `putDeletedMessage` in the message
+// list). Here the host builds the row, because the message is gone from the
+// database and only the plugin knows the copy; this callback is that copy, one
+// chat at a time.
+//
+// Only entries marked `deleted` are answered: `deleted_keys` also holds the
+// messages that merely passed through `updateNewMessage`, and a live message
+// must not be drawn twice. `edits` is deliberately not included — an edited
+// message is still in the chat, so a saved version of it is not a deleted row.
+ReExteraPlugin.prototype.on_deleted_messages = function (account, payload) {
+    var peerId = 0;
+    if (payload && typeof payload === "object") {
+        peerId = Number(payload.peer_id === undefined ? 0 : payload.peer_id);
+    }
+    // Both switches have to be read the same way they are written, or a chat
+    // would show copies the user's own toggles say to drop.
+    if (!this.saveRemoteDeletionsEnabled() && !this.saveOwnDeletionsEnabled()) {
+        return [];
+    }
+    var cacheKey = peerId + "@" + this._storeVersion;
+    var cached = this._deletedRowsCache[cacheKey];
+    if (cached !== undefined) {
+        return cached;
+    }
+    var store = this.readStore();
+    var rows = [];
+    for (var i = 0; i < store.deleted_keys.length; i += 1) {
+        var entry = store.deleted_keys[i];
+        if (entry.deleted !== true) {
+            continue;
+        }
+        if (Number(entry.peer_id) !== peerId) {
+            continue;
+        }
+        rows.push({
+            id: Number(entry.id),
+            date: Number(entry.date || 0),
+            text: entry.text === undefined || entry.text === null ? "" : String(entry.text),
+            media_kind: entry.media_kind === undefined || entry.media_kind === null ? "none" : String(entry.media_kind),
+            sender_id: Number(entry.sender_id || 0),
+            is_out: !!entry.is_out
+        });
+    }
+    this._deletedRowsCache[cacheKey] = rows;
+    return rows;
+};
+
+// --- profile / menu ---------------------------------------------------------
 
 // One line of the deleted/edited screen: the peer, the message id, and the text
 // (or a media marker when the message had none). The module's own adapter showed

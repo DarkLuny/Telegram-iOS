@@ -1960,6 +1960,8 @@ var __extera = (function () {
     //   on_name_colors(account, subject, extra)       -> {main, secondary}
     //   on_message_details(account, message, extra)   -> [{title, value}, ...]
     //   on_hide_message(account, message, extra)      -> true to drop the row
+    //   on_deleted_messages(account, {peer_id}, extra)-> [{id, date, text, ...}]
+    //   on_allow_screenshots(account, null, extra)    -> true to allow them
     //
     // `on_messages_will_be_deleted(account, {messages}, extra)` is not a query:
     // the host fires it just before it removes messages the user deleted

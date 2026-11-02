@@ -28,6 +28,42 @@ public func applySmoothRoundedCorners(_ layer: CALayer) {
     applySmoothRoundedCornersImpl(layer)
 }
 
+// MARK: - Screenshot protection
+//
+// iOS has no `FLAG_SECURE`: content is excluded from screenshots per layer, by
+// the secure-text trick in `setLayerDisableScreenshots`. Every protected layer in
+// the app is marked through that one function, so a plugin that wants screenshots
+// allowed again has to be able to clear the marking everywhere, not only on the
+// screens it knows about. These two are that switch, and `Display` is the module
+// every screen already imports.
+
+/// Excludes `layer` from screenshots (or stops excluding it).
+///
+/// Wraps the runtime primitive so a plugin module can mark and unmark a layer
+/// without depending on `UIKitRuntimeUtils` directly.
+public func setScreenshotProtection(_ layer: CALayer, _ protected: Bool) {
+    setLayerDisableScreenshots(layer, protected)
+}
+
+/// Whether `layer` is currently excluded from screenshots.
+public func isScreenshotProtected(_ layer: CALayer) -> Bool {
+    return getLayerDisableScreenshots(layer)
+}
+
+/// Makes every future protection request a no-op, or stops doing so.
+///
+/// The RFS plugin's whole promise: once this is on, a screen that asks to be
+/// protected is still capturable. Layers already marked keep their marking, which
+/// is why the plugin also walks the window tree and clears them.
+public func setScreenshotsAllowedGlobally(_ allowed: Bool) {
+    setAllowScreenshotsOverride(allowed)
+}
+
+/// Whether protection requests are currently being ignored.
+public func screenshotsAllowedGlobally() -> Bool {
+    return getAllowScreenshotsOverride()
+}
+
 public func dumpViews(_ view: UIView) {
     dumpViews(view, indent: "")
 }
