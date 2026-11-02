@@ -2648,10 +2648,19 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
             })
             return
         }
+        // The plugins' global intent handlers get first look, the way an Xposed
+        // before-hook runs before the original method. A handler that returns
+        // true stops here: the URL is not opened, which is what the Android side
+        // expresses as `param.setResult(true)`.
+        let urlString = url.absoluteString
+        if PluginManager.shared.dispatchUrlIntent(url: urlString) {
+            return
+        }
         guard self.openUrlInProgress != url else {
             return
         }
         self.openUrl(url: url)
+        PluginManager.shared.dispatchUrlIntentAfter(url: urlString)
     }
 
     private func presentWalletUnavailable(in context: AuthorizedApplicationContext) {

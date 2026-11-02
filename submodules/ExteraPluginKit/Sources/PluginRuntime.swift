@@ -647,6 +647,27 @@ private final class PluginActionsImpl: PluginActions {
         }
     }
 
+    /// Opens the plugin list screen, which is what a row with
+    /// `link_alias="plugins"` points at.
+    ///
+    /// The screen is pushed in its own navigation controller and presented over
+    /// the current window, because the row that asked for it is inside a plugin
+    /// settings page that may itself have been presented, and there is no shared
+    /// navigation stack the runtime can reach. Presenting the same list the
+    /// settings entry shows keeps one implementation of the screen.
+    func openPluginSettings() {
+        Queue.mainQueue().async {
+            guard let sharedContext = self.sharedContext,
+                  let context = self.resolve(self.primaryAccountId) else {
+                return
+            }
+            let controller = pluginsController(context: context)
+            let navigation = UINavigationController(rootViewController: controller)
+            navigation.modalPresentationStyle = .formSheet
+            sharedContext.applicationBindings.presentNativeController(navigation)
+        }
+    }
+
     // MARK: - Network and proxy
     //
     // These five bridges are the reason a plugin does not need Python: fetching a
@@ -663,6 +684,48 @@ private final class PluginActionsImpl: PluginActions {
     /// which one failed. A `2xx` answer carries the body, the status and the
     /// lowercased headers.
     func httpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String) {
+        self.performHttp(
+            pluginId: pluginId,
+            method: "GET",
+            url: url,
+            headersJSON: headersJSON,
+            body: nil,
+            timeout: timeout,
+            callbackToken: callbackToken
+        )
+    }
+
+    /// A request with an explicit method and body, for `http.post` and the rest.
+    ///
+    /// `bodyBase64` carries the body because the bridge is text-only and an
+    /// upload is not necessarily UTF-8; a body that does not decode is reported
+    /// to the plugin as a failure rather than sent empty, which would be a
+    /// silently different request.
+    func httpRequest(pluginId: String, method: String, url: String, headersJSON: String, bodyBase64: String?, timeout: Double, callbackToken: String) {
+        var body: Data?
+        if let bodyBase64 = bodyBase64, !bodyBase64.isEmpty {
+            guard let decoded = Data(base64Encoded: bodyBase64) else {
+                PluginManager.shared.resolveBridgeCallback(
+                    pluginId: pluginId,
+                    token: callbackToken,
+                    response: ["ok": false, "error": "the request body is not valid base64"]
+                )
+                return
+            }
+            body = decoded
+        }
+        self.performHttp(
+            pluginId: pluginId,
+            method: method,
+            url: url,
+            headersJSON: headersJSON,
+            body: body,
+            timeout: timeout,
+            callbackToken: callbackToken
+        )
+    }
+
+    private func performHttp(pluginId: String, method: String, url: String, headersJSON: String, body: Data?, timeout: Double, callbackToken: String) {
         var headers: [String: String] = [:]
         if let data = headersJSON.data(using: .utf8),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -674,7 +737,7 @@ private final class PluginActionsImpl: PluginActions {
         }
 
         self.startBridge { completed in
-            return PluginHttpAccess.get(pluginId: pluginId, url: url, headers: headers, timeout: timeout).start(next: { response in
+            return PluginHttpAccess.request(pluginId: pluginId, method: method, url: url, headers: headers, body: body, timeout: timeout).start(next: { response in
                 var result: [String: Any] = [
                     "ok": response.status >= 200 && response.status < 300,
                     "status": response.status,
@@ -802,6 +865,51 @@ private final class PluginActionsImpl: PluginActions {
             token: token,
             response: ["ok": false, "error": error]
         )
+    }
+
+    /// One peer's profile, behind `get_contacts_controller().get_peer(...)`.
+    ///
+    /// `PluginControllerAccess` resolves it off the account's own queues and
+    /// hands back plain values, so nothing engine-shaped crosses into the bridge.
+    /// A peer the client has never seen answers `{"ok": true, "peer": null}`
+    /// rather than an error: "no such peer" is a legitimate answer a plugin
+    /// branches on, not a failure.
+    func peerInfo(pluginId: String, account: Int64?, peerId: Int64, callbackToken: String) {
+        Queue.mainQueue().async {
+            guard let context = self.resolve(account) else {
+                self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+                return
+            }
+            self.startBridge { completed in
+                return PluginControllerAccess.peerInfo(context: context, peerId: peerId).start(next: { info in
+                    PluginManager.shared.resolveBridgeCallback(
+                        pluginId: pluginId,
+                        token: callbackToken,
+                        response: ["ok": true, "peer": info?.json ?? NSNull()]
+                    )
+                }, completed: completed)
+            }
+        }
+    }
+
+    /// The most recent messages of one chat, behind
+    /// `get_messages_controller().get_messages(...)`.
+    func chatMessages(pluginId: String, account: Int64?, peerId: Int64, limit: Int, callbackToken: String) {
+        Queue.mainQueue().async {
+            guard let context = self.resolve(account) else {
+                self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+                return
+            }
+            self.startBridge { completed in
+                return PluginControllerAccess.chatMessages(context: context, peerId: peerId, limit: limit).start(next: { messages in
+                    PluginManager.shared.resolveBridgeCallback(
+                        pluginId: pluginId,
+                        token: callbackToken,
+                        response: ["ok": true, "messages": messages.map { $0.json }]
+                    )
+                }, completed: completed)
+            }
+        }
     }
 
     // MARK: - Bridge lifetime

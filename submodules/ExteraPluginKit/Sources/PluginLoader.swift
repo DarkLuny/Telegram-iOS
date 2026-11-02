@@ -54,6 +54,58 @@ public protocol PluginHost: AnyObject {
     func pluginAppVersion(pluginId: String) -> String
     func pluginSchedule(pluginId: String, delayMilliseconds: Double, token: String)
 
+    /// Reads another source file out of the plugin's own directory, for the
+    /// multi-file loader.
+    ///
+    /// An Elyx project's entry module imports its siblings (`require('./src/x')`),
+    /// and each of those may import more. Returning the text rather than
+    /// evaluating it keeps the recursion in JavaScript, where the module cache,
+    /// the cycle guard and the relative-path resolution already are.
+    ///
+    /// `path` is resolved relative to the plugin's directory; a path that
+    /// escapes it returns nil, so one plugin cannot read another's files or the
+    /// app's container through the loader.
+    func pluginReadModule(pluginId: String, path: String) -> String?
+    /// Opens another screen of the app's own settings, the target of a settings
+    /// row that carries `link_alias`. `alias` is the SDK's screen name
+    /// (`plugins`, `appearance`, ...), not a URL; the host maps it to the screen
+    /// it has and does nothing for a name it does not.
+    func pluginOpenSettingLink(pluginId: String, alias: String)
+    /// Whether a path exists inside the plugin's directory, for the loader to
+    /// try the extensions a bare `require` may leave off.
+    func pluginModuleExists(pluginId: String, path: String) -> Bool
+
+    /// Whether an Objective-C class with this name is loaded. Answers
+    /// `hook_utils.find_class`, so a plugin gets null for a name this build does
+    /// not have instead of a handle that fails later.
+    func pluginClassExists(pluginId: String, className: String) -> Bool
+
+    /// Builds a runtime subclass with the given methods, the iOS shape of
+    /// DexMaker's `jclassbuilder`. `methodsJSON` is an array of
+    /// `{"selector": "...", "token": "c1"}`. Returns the new class's name, or a
+    /// reason string when the superclass is not loaded.
+    func pluginBuildClass(pluginId: String, superclassName: String, methodsJSON: String, context: JSContext) -> String
+    /// Instantiates a class `pluginBuildClass` made, or nil for any other name.
+    func pluginMakeClassInstance(pluginId: String, className: String) -> AnyObject?
+
+    /// Installs an Objective-C hook, the iOS shape of an Xposed hook.
+    ///
+    /// The plugin names a class and a selector; the host resolves them against
+    /// the loaded runtime and swizzles the method, calling the plugin's `before`
+    /// and `after`. Returns nil on success, or a reason string the plugin can
+    /// log when the class or the method is not there. `beforeToken`/`afterToken`
+    /// are the callback tokens `holdCallback` produced, and `context` is the
+    /// plugin's own `JSContext`, which the hook re-enters on the script queue.
+    func pluginInstallSwizzle(
+        pluginId: String,
+        className: String,
+        selector: String,
+        isClassMethod: Bool,
+        beforeToken: String?,
+        afterToken: String?,
+        context: JSContext
+    ) -> String?
+
     // Network and proxy. All five are asynchronous: the answer is delivered by
     // calling `__extera.resolveBridge(token, json)` once the work finishes, so a
     // plugin never blocks the script queue waiting for a socket or a database
@@ -65,6 +117,11 @@ public protocol PluginHost: AnyObject {
     /// `{"ok": true, "status": 200, "text": "...", "headers": {...}}` or
     /// `{"ok": false, "error": "..."}`.
     func pluginHttpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String)
+    /// A request with an explicit method and optional body, the form `http.post`,
+    /// `http.put`, `http.delete` and the rest reach. `bodyBase64` is the request
+    /// body already encoded, because the bridge carries text and an upload may
+    /// not be UTF-8. Answers the same shape as `pluginHttpGet`.
+    func pluginHttpRequest(pluginId: String, method: String, url: String, headersJSON: String, bodyBase64: String?, timeout: Double, callbackToken: String)
     /// The proxy list as `{"ok": true, "servers": [{"link": "tg://...", "kind": "mtproto|web|socks", "host": "...", "port": 443}]}`.
     func pluginProxyList(pluginId: String, callbackToken: String)
     /// Adds every parseable link in `linksJSON`. Answers
@@ -75,6 +132,17 @@ public protocol PluginHost: AnyObject {
     /// The id of the account's own user, which is also the Saved Messages peer.
     /// Answers `{"ok": true, "peer_id": 123}`.
     func pluginOwnPeerId(pluginId: String, account: Int64?, callbackToken: String)
+
+    // Reads behind the `client_utils.get_*` controller proxies. A plugin that
+    // was written against Android's `MessagesController`/`ContactsController`
+    // calls these through our proxy objects instead; the answer is the same kind
+    // of JSON the network bridges use.
+    /// One peer's profile. Answers `{"ok": true, "peer": {...}}` or
+    /// `{"ok": false, "error": "..."}`.
+    func pluginPeerInfo(pluginId: String, account: Int64?, peerId: Int64, callbackToken: String)
+    /// The most recent messages of one chat. Answers
+    /// `{"ok": true, "messages": [...]}`.
+    func pluginChatMessages(pluginId: String, account: Int64?, peerId: Int64, limit: Int, callbackToken: String)
 }
 
 public struct PluginMenuItem {
@@ -521,6 +589,74 @@ public final class PluginLoader {
         }
         hostObject.setObject(schedule as AnyObject, forKeyedSubscript: "schedulePlugin" as NSString)
 
+        // Multi-file loading. The text is returned to JavaScript, which compiles
+        // and caches it; the host only decides whether the path is inside the
+        // plugin's own directory.
+        let readModule: @convention(block) (String, String) -> String? = { id, path in
+            host.pluginReadModule(pluginId: id, path: path)
+        }
+        hostObject.setObject(readModule as AnyObject, forKeyedSubscript: "readModule" as NSString)
+
+        let moduleExists: @convention(block) (String, String) -> Bool = { id, path in
+            host.pluginModuleExists(pluginId: id, path: path)
+        }
+        hostObject.setObject(moduleExists as AnyObject, forKeyedSubscript: "moduleExists" as NSString)
+
+        // The plugin's own directory, so `assets` and `strings` can be resolved
+        // relative to the entry module before the loader knows the layout.
+        let moduleDirectory: @convention(block) (String) -> String = { id in
+            PluginStore.shared.directory(for: id).path
+        }
+        hostObject.setObject(moduleDirectory as AnyObject, forKeyedSubscript: "moduleDirectory" as NSString)
+
+        let openSettingLink: @convention(block) (String, String) -> Void = { id, alias in
+            host.pluginOpenSettingLink(pluginId: id, alias: alias)
+        }
+        hostObject.setObject(openSettingLink as AnyObject, forKeyedSubscript: "openSettingLink" as NSString)
+
+        // The Xposed-shaped hook. The plugin names a class and a selector; the
+        // host swizzles the method and calls back into this same context through
+        // `__extera.runSwizzleCallback`. The context is the one being set up, so
+        // it is captured here rather than looked up later.
+        let installSwizzle: @convention(block) (String, String, String, Bool, String?, String?) -> String? = { id, className, selector, isClassMethod, beforeToken, afterToken in
+            host.pluginInstallSwizzle(
+                pluginId: id,
+                className: className,
+                selector: selector,
+                isClassMethod: isClassMethod,
+                beforeToken: beforeToken,
+                afterToken: afterToken,
+                context: context
+            )
+        }
+        hostObject.setObject(installSwizzle as AnyObject, forKeyedSubscript: "installSwizzle" as NSString)
+
+        let classExists: @convention(block) (String, String) -> Bool = { _, name in
+            return NSClassFromString(name) != nil
+        }
+        hostObject.setObject(classExists as AnyObject, forKeyedSubscript: "classExists" as NSString)
+
+        // Runtime class construction, the iOS shape of DexMaker. The plugin
+        // describes the methods in JSON; the host allocates the subclass, adds a
+        // block per method, registers it, and hands back the generated name. It
+        // returns a class name on success or a `"!"`-prefixed reason on failure,
+        // because the bridge carries one string and a plugin wants to log why
+        // rather than catch across the boundary.
+        let buildClass: @convention(block) (String, String, String) -> String = { id, superclassName, methodsJSON in
+            host.pluginBuildClass(
+                pluginId: id,
+                superclassName: superclassName,
+                methodsJSON: methodsJSON,
+                context: context
+            )
+        }
+        hostObject.setObject(buildClass as AnyObject, forKeyedSubscript: "buildClass" as NSString)
+
+        let makeInstanceClass: @convention(block) (String, String) -> AnyObject? = { id, className in
+            return host.pluginMakeClassInstance(pluginId: id, className: className)
+        }
+        hostObject.setObject(makeInstanceClass as AnyObject, forKeyedSubscript: "makeInstanceClass" as NSString)
+
         // Network and proxy. Each takes a callback token rather than returning a
         // value: the script queue must not block on a socket, and the answer is
         // delivered by `__extera.resolveBridge(token, json)` when it arrives.
@@ -528,6 +664,11 @@ public final class PluginLoader {
             host.pluginHttpGet(pluginId: id, url: url, headersJSON: headersJSON, timeout: timeout, callbackToken: token)
         }
         hostObject.setObject(httpGet as AnyObject, forKeyedSubscript: "httpGet" as NSString)
+
+        let httpRequest: @convention(block) (String, String, String, String, String?, Double, String) -> Void = { id, method, url, headersJSON, bodyBase64, timeout, token in
+            host.pluginHttpRequest(pluginId: id, method: method, url: url, headersJSON: headersJSON, bodyBase64: bodyBase64, timeout: timeout, callbackToken: token)
+        }
+        hostObject.setObject(httpRequest as AnyObject, forKeyedSubscript: "httpRequest" as NSString)
 
         let proxyList: @convention(block) (String, String) -> Void = { id, token in
             host.pluginProxyList(pluginId: id, callbackToken: token)
@@ -548,6 +689,16 @@ public final class PluginLoader {
             host.pluginOwnPeerId(pluginId: id, account: PluginLoader.accountValue(account), callbackToken: token)
         }
         hostObject.setObject(ownPeerId as AnyObject, forKeyedSubscript: "ownPeerId" as NSString)
+
+        let peerInfo: @convention(block) (String, Double, Double, String) -> Void = { id, account, peerId, token in
+            host.pluginPeerInfo(pluginId: id, account: PluginLoader.accountValue(account), peerId: Int64(peerId), callbackToken: token)
+        }
+        hostObject.setObject(peerInfo as AnyObject, forKeyedSubscript: "peerInfo" as NSString)
+
+        let chatMessages: @convention(block) (String, Double, Double, Double, String) -> Void = { id, account, peerId, limit, token in
+            host.pluginChatMessages(pluginId: id, account: PluginLoader.accountValue(account), peerId: Int64(peerId), limit: Int(limit), callbackToken: token)
+        }
+        hostObject.setObject(chatMessages as AnyObject, forKeyedSubscript: "chatMessages" as NSString)
 
         context.setObject(hostObject, forKeyedSubscript: "__host" as NSString)
     }

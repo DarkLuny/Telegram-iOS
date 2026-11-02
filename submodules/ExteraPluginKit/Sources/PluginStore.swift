@@ -51,7 +51,11 @@ public final class PluginStore {
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             if isDirectory {
                 // A bundle-style plugin: `<id>/main.plugin` or `<id>/main.js`.
-                for candidate in ["main.plugin", "main.js", "plugin.js"] {
+                // An Elyx project lands here too — its entry module is `main.js`
+                // when the archive's `refmap` names one, and `main.elyx.js`
+                // otherwise, so an archive that keeps a `.py` entry is found but
+                // rejected by the loader with the reason rather than skipped.
+                for candidate in ["main.plugin", "main.js", "plugin.js", "main.elyx.js"] {
                     let file = url.appendingPathComponent(candidate)
                     if self.fileManager.fileExists(atPath: file.path) {
                         result.append((url.lastPathComponent, file))
@@ -84,6 +88,38 @@ public final class PluginStore {
         // build wrote must never claim it. The id is dropped from that list here
         // rather than relying on the sweep having already run: a plugin installed
         // while the app is loading would otherwise be deleted a moment later.
+        self.clearLegacyBundledMark(pluginId: pluginId)
+    }
+
+    /// Installs (or replaces) a plugin from an Elyx archive.
+    ///
+    /// The archive is extracted into `<id>/` rather than written as one file, so
+    /// the project's own layout — `src/`, `assets/`, `strings/` — survives and
+    /// `pluginSources()` finds `main.js` through the bundle branch it already
+    /// has. The extraction happens into a sibling directory that is renamed into
+    /// place only once it is complete, so a crash mid-extract cannot leave a
+    /// half-written plugin where a working one used to be.
+    public func installArchive(at archiveURL: URL, pluginId: String) throws {
+        self.fileLock.lock()
+        defer { self.fileLock.unlock() }
+        let directory = self.directory(for: pluginId)
+        let staging = self.pluginsDirectory.appendingPathComponent(".\(pluginId).incoming", isDirectory: true)
+        try? self.fileManager.removeItem(at: staging)
+        try self.fileManager.createDirectory(at: staging, withIntermediateDirectories: true, attributes: nil)
+        do {
+            _ = try PluginElyx.extract(archiveAt: archiveURL, into: staging)
+        } catch {
+            try? self.fileManager.removeItem(at: staging)
+            throw error
+        }
+        try? self.fileManager.removeItem(at: directory)
+        do {
+            try self.fileManager.moveItem(at: staging, to: directory)
+        } catch {
+            try? self.fileManager.removeItem(at: staging)
+            throw error
+        }
+        self.setEnabled(true, pluginId: pluginId)
         self.clearLegacyBundledMark(pluginId: pluginId)
     }
 

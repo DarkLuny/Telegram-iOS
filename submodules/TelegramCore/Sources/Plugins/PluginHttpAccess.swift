@@ -59,10 +59,33 @@ public enum PluginHttpAccess {
     }()
 
     public static func get(pluginId: String, url: String, headers: [String: String], timeout: Double) -> Signal<Response, Failure> {
+        return self.request(pluginId: pluginId, method: "GET", url: url, headers: headers, body: nil, timeout: timeout)
+    }
+
+    /// A request with an explicit method and optional body.
+    ///
+    /// `get` is the read a subscription needs; a plugin that posts a result, a
+    /// webhook callback or a form calls through here. The method is validated
+    /// against the small set a plugin realistically needs, and the body is
+    /// attached as raw bytes with a `Content-Type` the caller supplies, because
+    /// guessing between form, JSON and text is exactly the decision the plugin
+    /// already made.
+    public static func request(
+        pluginId: String,
+        method: String,
+        url: String,
+        headers: [String: String],
+        body: Data?,
+        timeout: Double
+    ) -> Signal<Response, Failure> {
         guard let parsed = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = parsed.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
             return .fail(.invalidURL(url))
+        }
+        let verb = method.uppercased()
+        guard ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].contains(verb) else {
+            return .fail(.transport("unsupported HTTP method: \(method)"))
         }
 
         return Signal { subscriber in
@@ -75,7 +98,7 @@ public enum PluginHttpAccess {
             }
 
             var request = URLRequest(url: parsed)
-            request.httpMethod = "GET"
+            request.httpMethod = verb
             // A plugin that fetches a JSON subscription should get the bytes, not
             // whatever the CDN negotiated; a fixed Accept keeps two runs identical.
             request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
@@ -84,6 +107,9 @@ public enum PluginHttpAccess {
             }
             for (key, value) in headers {
                 request.setValue(value, forHTTPHeaderField: key)
+            }
+            if let body = body, verb != "GET", verb != "HEAD" {
+                request.httpBody = body
             }
 
             let task = PluginHttpAccess.session.dataTask(with: request) { data, response, error in

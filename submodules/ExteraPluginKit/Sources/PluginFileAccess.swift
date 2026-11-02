@@ -154,6 +154,16 @@ enum PluginFileAccess {
         case "exists":
             return fileManager.fileExists(atPath: url.path) ? "true" : "false"
 
+        case "is_dir":
+            var isDirectory: ObjCBool = false
+            let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            return (exists && isDirectory.boolValue) ? "true" : "false"
+
+        case "is_file":
+            var isDirectory: ObjCBool = false
+            let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            return (exists && !isDirectory.boolValue) ? "true" : "false"
+
         default:
             PluginLog.write(pluginId: pluginId, text: "unknown file_utils operation: \(op)")
             return "false"

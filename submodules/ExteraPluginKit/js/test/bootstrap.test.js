@@ -973,9 +973,13 @@ test('BulletinHelper, a string condition and the Java-proxy stubs keep their sha
     assert.strictEqual(JSON.parse(bulletin[3]).text, 'via helper');
     assert.strictEqual(ctx.decorated, 'x');
     assert.strictEqual(ctx.field, 0);
-    // `java_subclass` exists so the decorator syntax parses; instantiating the
-    // generated class fails loudly instead of pretending to be a Java object.
-    assert.throws(() => ctx.__extera.api && ctx.extera_utils.classes.jclassbuilder()(), /Java/);
+    // `java_subclass` exists so the decorator syntax parses; `jclassbuilder`
+    // now builds a real Objective-C subclass through the host. Without a bridge
+    // it hands back a constructor that refuses, and the message names the actual
+    // reason rather than the Android one.
+    const built = ctx.__extera.api ? ctx.extera_utils.classes.jclassbuilder('NSObject', {}) : null;
+    assert.strictEqual(typeof built, 'function');
+    assert.throws(() => built(), /(runtime class building|superclass|is not loaded)/);
 });
 
 test('FilesController registers, rejects duplicates and unregisters', () => {

@@ -32,8 +32,10 @@ Baseline app: **13.1.1**. A plugin declares its own minimum with
 18. [Saved deleted messages](#17-saved-deleted-messages)
 19. [Logging](#18-logging)
 20. [Android-only surfaces](#19-android-only-surfaces)
-21. [Porting checklist](#20-porting-checklist)
-22. [JS ↔ Swift bridge (host internals)](#21-js--swift-bridge-host-internals)
+21. [Controller proxies](#20-controller-proxies)
+22. [Intents](#21-intents)
+23. [Porting checklist](#22-porting-checklist)
+24. [JS ↔ Swift bridge (host internals)](#23-js--swift-bridge-host-internals)
 
 ---
 
@@ -69,6 +71,34 @@ hand it over with `__extera.register(instance)`.
 
 A file whose body is Python (imports, `def`, a Python class body) is refused with
 a message saying so, rather than half-loaded.
+
+### Elyx containers
+
+A `.elyx` archive — the format the SDK's builder produces for a multi-file
+project — is accepted too. It is a ZIP whose entry is a YAML `metainfo` plus an
+`assets` tree and one or more JavaScript modules. The plugin's entry module is
+`main` from `metainfo` (or `main.elyx.js`), and the modules it `require`s are
+resolved inside the archive, with a CommonJS cache and cycle guard.
+
+```yaml
+# metainfo
+id: my_plugin
+name: My Plugin
+version: 1.0.0
+main: src/index.js
+```
+
+Inside an Elyx plugin, `elyx` exposes the archive's own parts: `elyx.assets`
+(the asset collection, with `content`/`content_bytes`/`content_string`/
+`content_json`), `elyx.strings` (the localised catalogues, with `pluralize`),
+`elyx.metainfo`, `elyx.refmap`, `elyx.settings`, `elyx.get_environment()`,
+`elyx.import_module(name)` and `elyx.Asset.from_path`. `elyx.temp_asset_from_url`
+is **asynchronous** here (the Android SDK's is synchronous): it takes a callback
+and calls it with the ready asset.
+
+The Python parts of the Elyx stack — `import_module` in Python semantics, wheels
+with a Python ABI, `mvel_execute`, the `gen`/`gen2` Java proxies — have no iOS
+counterpart and are stubs that throw with a reason rather than vanish.
 
 ### Metadata
 
@@ -152,6 +182,49 @@ script queue. It must be quick.
 Requests and updates cross the bridge as objects of fields; a nested TL value is
 an object with `_` (the constructor name) and its own fields, to depth 8. So
 `update.message.peer_id` and `update.message.id` read the way they do on Android.
+
+### Xposed-style hooks (Objective-C swizzling)
+
+The client's own hooks above cover TL traffic. To reach an app method directly —
+the Xposed case — use `hook_utils.find_class` and `.hook`, which swizzle an
+Objective-C method at runtime:
+
+```js
+var cls = hook_utils.find_class("SpeakerNode");   // a loaded ObjC class, or null
+var token = cls.hook("setMessage:", new MethodHook() { /* see below */ });
+```
+
+In practice a plugin constructs a `MethodHook` with the two callbacks:
+
+```js
+var hook = new MethodHook();
+hook.beforeHookedMethod = function (param) {
+    var args = param.getArgs();          // the receiver and up to two object args
+    // param.setResult(x) replaces the method's return and skips the original.
+};
+hook.afterHookedMethod = function (param) {
+    // Observes after the original ran; may also setResult.
+};
+hook.setPriority(50);                    // order among hooks on one method
+hook_utils.find_class("SomeClass").hook("someSelector:", hook);
+```
+
+`param` carries the SDK's own methods: `getArgs`, `getArg(index)`, `setResult`,
+`getResult`, `getObjectExtra(key)`, `setObjectExtra(key, value)`.
+
+What can be hooked: an Objective-C method that already exists on a class the app
+has loaded. What cannot: a Swift method not exposed with `@objc` (there is no such
+selector to find), a C function, and anything that would have to exist before the
+plugin runs. A class or selector that resolves to nothing is reported in the log,
+never created. A method whose real signature is not "receiver, up to two object
+arguments, object return" is still swizzled, but its arguments arrive as that
+two-object slice, which is what the SDK's `args` list is on Android too.
+
+Hooks are installed once per class+selector (a second install is a no-op) and are
+all restored when plugins unload, so a removed plugin's block cannot keep running.
+
+`hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
+property with no `@objc` cannot be reached by name — and log rather than guess.
 
 ---
 
@@ -424,7 +497,7 @@ script queue is shared by every plugin, so blocking it blocks all of them.
 
 ## 11. HTTP
 
-One GET, answered through a callback. Never blocking.
+Requests are answered through a callback. Never blocking.
 
 ```js
 http.get("https://example.com/list.txt", {headers: {"Accept": "text/plain"}, timeout: 10}, function (r) {
@@ -443,10 +516,30 @@ is a body, because a 404 body often explains the failure. `get_json` parses
 `text` and puts the result in `json`; an unparseable body is `ok: false` with the
 text kept.
 
-`http.post` does not exist — the host only exposes a read, and a request that
-silently went out as a GET would be worse than a refusal.
+### Verbs beyond GET
 
-Also aliased as `client_utils.http_get` / `client_utils.http_get_json`.
+`post`, `put`, `patch`, `delete` and a general `request` are implemented, each
+taking an options object with `headers`, a `body` (string or a value that is
+JSON-stringified), `timeout`, and the same callback:
+
+```js
+http.post("https://example.com/items", {body: {name: "x"}, headers: {"Content-Type": "application/json"}}, cb);
+http.put("https://example.com/items/1", {body: JSON.stringify({name: "y"})}, cb);
+http.patch(url, {body: "..."}, cb);
+http.delete(url, {headers: {...}}, cb);
+
+// The general form, for a method not listed above.
+http.request("OPTIONS", url, {headers: {...}, body: "..."}, cb);
+```
+
+The `*_json` variants (`post_json`, `put_json`, `patch_json`) parse the response
+body into `r.json`, the same as `get_json`. A request body that is not UTF-8
+safe is carried as base64 across the bridge; `http` encodes and decodes it on the
+JavaScript side, because `btoa` is absent in JavaScriptCore.
+
+Also aliased as `client_utils.http_get`, `client_utils.http_post`,
+`client_utils.http_put`, `client_utils.http_patch`, `client_utils.http_delete`,
+`client_utils.http_request`, and the `*_json` forms.
 
 ---
 
@@ -729,24 +822,119 @@ looks subscribed and does nothing — check the log first when a hook seems dead
 
 ## 19. Android-only surfaces
 
-These exist so an import line or an enum reference resolves, and they log rather
-than pretend:
+These exist so an import line or an enum reference resolves. Where an equivalent
+is possible on iOS it is real and noted; where it is not, the call logs rather
+than pretending:
 
 | Surface | Behaviour |
 |---|---|
-| `hook_utils.find_class` / `get_private_field` / `set_private_field` / static variants | return `null` / `false`; no Objective-C reflection is exposed |
-| `client_utils.get_last_fragment`, `get_messages_controller`, `get_connections_manager`, `send_request`, `get_queue_by_name`, `get_user_config`, and the other controller getters | return `null` and log once, so a plugin's own guard takes the safe branch |
+| `hook_utils.find_class` | **real**: resolves a loaded Objective-C class and returns a handle that can `.hook(selector, hook)`. Unknown names return `null`. |
+| `hook_utils.get_private_field` / `set_private_field` / static variants | log and return `null` / `false`; a Swift property not exposed with `@objc` cannot be reached by name |
+| Xposed-style `MethodHook` / `HookFilter`, `find_class(...).hook(...)` | **real** on Objective-C methods: the host swizzles the selector and calls `before`/`after` with a `param` carrying `getArgs`/`setResult`/`getResult`/`setObjectExtra`. A hook that sets a result replaces the method's return. |
+| `intents.IntentsManager` | **real**: `new_global_before_handler` / `new_global_after_handler` match opened URLs by scheme/host/path/query and run by ascending priority; a before-handler returning `true` stops the URL from opening. `send`/`startActivity` log and return `false`. |
+| `extera_utils.classes.jclassbuilder` / `makeInstance` | **real**: builds an Objective-C subclass at runtime (`objc_allocateClassPair` + `class_addMethod`) and instantiates it. Only the "receiver, ≤2 object args, object return" ABI is representable. |
+| `extera_utils.classes` decorators (`java_subclass`, `joverride`, `jmethod`, …) | identity functions that record the declaration for `jclassbuilder` |
+| `client_utils.get_messages_controller` / `get_contacts_controller` / `get_user_config` / `get_media_data_controller` / `get_notifications_settings` / `get_queue_by_name` | **real** proxies over host bridges (see §20) |
+| `client_utils.get_last_fragment`, `get_account_instance`, `get_connections_manager`, `send_request`, and the other controller getters | return `null` and log once, so a plugin's own guard takes the safe branch |
 | `NotificationCenterDelegate` | instantiates; there is no notification centre to observe |
-| `intents.IntentsManager` | `send` / `startActivity` log and return `false` |
-| `extera_utils.classes` (`java_subclass`, `joverride`, `jmethod`, …) | decorators are identity functions; `jclassbuilder` and anything that would generate a Java class throws a clear "not available on iOS" |
 | `FilesController.register` | returns a token and logs that nothing will fire |
-| Xposed-style `MethodHook` / `MethodReplacement` / `HookFilter` | not available |
+| `elyx.mvel_execute`, `gen`, `gen2` | throw with a clear reason; MVEL and the Java-proxy generators have no iOS counterpart |
 
 `TLRPC` carries the message-entity classes and nothing else.
 
 ---
 
-## 20. Porting checklist
+## 20. Controller proxies
+
+`client_utils.get_*` that only ever read data a plugin can be given are backed by
+real host calls and answer asynchronously, in the same callback shape as the HTTP
+bridges. The method names are ours, not Android's: a ported plugin reaches the
+same data through `get_messages(peer_id)` rather than a Java call.
+
+```js
+var messages = client_utils.get_messages_controller();
+messages.get_messages(peer_id, 50, function (r) {
+    // r = {ok, messages: [{id, peer_id, date, text, out, has_media, action, ...}, ...]}
+});
+
+var contacts = client_utils.get_contacts_controller();
+contacts.get_peer(peer_id, function (r) { /* r = {ok, peer: {...} | null} */ });
+
+var cfg = client_utils.get_user_config();
+cfg.getClientUserId(function (r) { /* r = {ok, peer_id} */ });
+cfg.getCurrentAccount();   // the resolved numeric account id
+
+var media = client_utils.get_media_data_controller();
+media.get_media(peer_id, 50, function (r) { /* r = {ok, media: [...]} */ });
+
+var queue = client_utils.get_queue_by_name("name");
+queue.run(fn); queue.run_after(fn, 250);
+```
+
+`get_messages_controller().send_message(peer, text, options)` forwards to the
+plugin's own `send_text` and is fire-and-forget, like the SDK's send.
+`delete_messages` logs that a message is deleted from the chat UI, not through a
+controller, and answers `{ok: false}`. `get_notifications_settings().get` answers
+peer-profile data, which is what a plugin reads it for.
+
+A peer id is the signed numeric id used everywhere else: positive for a user,
+small negative for a basic group, `-100…` for a channel.
+
+---
+
+## 21. Intents
+
+`intents.IntentsManager` registers global before/after handlers for URLs the app
+opens — `tg://`, `https://t.me`, deeplinks, anything the OS hands the client. The
+URL is parsed, the handlers are matched against it by scheme/host/path/query,
+sorted by ascending priority, and called with the values their own signature names.
+
+```js
+var IM = intents.IntentsManager;
+
+var handle = IM.new_global_before_handler(function (host, id) {
+    this.log("chat " + id);
+    return true;                 // stop the URL from opening
+}, {scheme: "tg", host: "chat", required_path_args_names: ["id"]});
+
+var after = IM.new_global_after_handler(function (host) {
+    this.log("opened " + host);
+}, {scheme: "https", host: "t.me"});
+
+handle.unhandle();               // remove one
+IM.unhandle(after.handler_id);   // remove by id
+```
+
+Filters: `scheme`, `host`, `path` (a leading `/` is added if missing, and
+`{var}` templates capture their values), `required_path_args_names` (in practice
+required **query** argument names), `priority` (lower runs first). `action`,
+`type`, `categories`, `whitelist_flags`, `blacklist_flags` are accepted and match
+against the URL's derived `Intent` values; an opened link is `ACTION_VIEW` with no
+type or categories unless the URL mapped one.
+
+A **before** handler that returns `true` stops the remaining before handlers *and*
+the client's own handling of the URL — the iOS form of `param.setResult(true)`.
+An **after** handler cannot stop anything; it runs once the URL has been handled.
+
+The callback is called with only the parameters it names: `intent`, `scheme`,
+`host`, `path`, `query_args`, `action`, `flags`, `type`, `categories`, plus any
+query argument or path-template variable by name. A function with no readable
+signature receives the whole context object (the `**kwargs` case); a function that
+names `...args` receives the standard positional bundle.
+
+`IM.parse(url)` returns `{scheme, host, path, query}` — the same shape a handler
+sees. `IM.unhandle(id)` throws a `HandlerNotRegistered` error for an unknown id.
+`IM.send` / `IM.startActivity` have no iOS meaning (this app has no intents to send
+to another app) and log.
+
+The host calls `__extera.dispatchUrlIntent(url)` before opening and
+`__extera.dispatchUrlIntentAfter(url)` after; the client wires the first into
+`AppDelegate.handleOpenURL`, so a before handler that returns `true` prevents the
+open.
+
+---
+
+## 22. Porting checklist
 
 1. Drop the `from … import …` lines; the names are globals — **except**
    `parse_text` and `SimpleSettingFactory`, which live only under
@@ -762,7 +950,7 @@ than pretend:
 
 ---
 
-## 21. JS ↔ Swift bridge (host internals)
+## 23. JS ↔ Swift bridge (host internals)
 
 Not plugin API. It is documented because a plugin's capability set is exactly
 this list, and because `js/test/bootstrap.test.js` is the contract check for it.
@@ -784,19 +972,26 @@ this list, and because `js/test/bootstrap.test.js` is the contract check for it.
 | `selectedAccount(pluginId)` | number |
 | `appVersion(pluginId)` | string |
 | `copyToClipboard`, `openUrl` | — / bool |
-| `pluginDirectory(pluginId)` | path |
+| `openSettingLink(pluginId, alias)` | — |
+| `pluginDirectory(pluginId)`, `moduleDirectory(pluginId)` | path |
+| `readModule(pluginId, path)`, `moduleExists(pluginId, path)` | text / bool |
 | `schedulePlugin(pluginId, delayMs, token)` | — |
 | `themeColors(pluginId, namesJSON)` | JSON text |
-| `httpGet`, `proxyList`, `proxyAdd`, `proxyRemoveAll`, `ownPeerId` | — (answers through `__extera.resolveBridge(token, json)`) |
+| `classExists(pluginId, className)` | bool |
+| `installSwizzle(pluginId, class, selector, isClassMethod, beforeToken, afterToken)` | reason or null |
+| `buildClass(pluginId, superclassName, methodsJSON)` | class name, or `"!" + reason` |
+| `makeInstanceClass(pluginId, className)` | object handle or null |
+| `httpGet`, `httpRequest`, `proxyList`, `proxyAdd`, `proxyRemoveAll`, `ownPeerId`, `peerInfo`, `chatMessages` | — (answers through `__extera.resolveBridge(token, json)`) |
 
-The asynchronous five answer by calling back into the context with
+The asynchronous members answer by calling back into the context with
 `__extera.resolveBridge(token, JSON)`; a plugin-facing helper stores the
 callback under the token and returns it.
 
 Swift entry points the manager exposes (JS function → Swift method): `runHook`,
 `query`, `hasHook`, `collectSettings`, `collectSubSettings`, `collectMenuItems`,
 `runMenuItem`, `invokeSettingCallback`, `runScheduled`, `runCallback`,
-`resolveBridge`, `callLifecycle`, `finalize`, `register`.
+`resolveBridge`, `callLifecycle`, `finalize`, `register`,
+`dispatchUrlIntent`, `dispatchUrlIntentAfter`, `runSwizzleCallback`.
 
 Members of `__extera` a plugin is not meant to call, listed so the surface is
 complete: `setIdentity`, `id`, `name`, `instance`, `api`, `LIFECYCLE`,
@@ -805,7 +1000,9 @@ complete: `setIdentity`, `id`, `name`, `instance`, `api`, `LIFECYCLE`,
 `parseText`, `fileValue`, `setSelectedAccount`, `selectedAccount`, `hookAccount`,
 `resolveAccount`, `settingKey`, `makeAccountClient`, `bulletinJson`,
 `holdCallback`, `runCallback`, `copyToClipboard`, `openUrl`, `appVersion`,
-`themeColors`, `hasHook`.
+`themeColors`, `hasHook`, `controllerRequest`, `resolveClass`, `makeClassHandle`,
+`installHook`, `runSwizzleHook`, `runSwizzleCallback`, `buildClass`,
+`makeInstanceClass`.
 `bulletinJson` is the richer bulletin form behind `ui.bulletin`: it takes one
 object whose callbacks are already tokens, and the host draws the title line,
 button or undo action from it.

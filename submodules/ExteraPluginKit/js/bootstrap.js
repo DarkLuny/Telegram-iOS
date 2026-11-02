@@ -727,23 +727,133 @@ var __extera = (function () {
                 headers[key] = String(source[key]);
             }
         }
-        bridgeMissing('httpGet')(
+        var method = typeof options.method === 'string' ? options.method.toUpperCase() : 'GET';
+        var body = null;
+        if (options.body !== undefined && options.body !== null && method !== 'GET' && method !== 'HEAD') {
+            body = __exteraEncodeBody(options.body);
+        }
+        // A request with no method and no body is the common case and goes
+        // through the older, narrower bridge, so a build whose host has only the
+        // read still serves every GET a plugin makes.
+        if (method === 'GET' && body === null) {
+            bridgeMissing('httpGet')(
+                pluginId,
+                String(url),
+                JSON.stringify(headers),
+                typeof options.timeout === 'number' ? options.timeout : 0,
+                token
+            );
+            return token;
+        }
+        bridgeMissing('httpRequest')(
             pluginId,
+            method,
             String(url),
             JSON.stringify(headers),
+            body,
             typeof options.timeout === 'number' ? options.timeout : 0,
             token
         );
         return token;
     }
 
+    // Turns a plugin's request body into base64 for the bridge.
+    //
+    // A string is sent as UTF-8; an object is JSON-encoded and the
+    // `Content-Type` is left to the caller, because a plugin that posts JSON has
+    // already decided that; a byte array (an array of numbers, which is how the
+    // SDK represents bytes) is sent as-is. Anything else is a stringified
+    // fallback, so the request goes out rather than silently empty.
+    function __exteraEncodeBody(body) {
+        var text;
+        if (typeof body === 'string') {
+            text = body;
+        } else if (Array.isArray(body)) {
+            return __exteraBase64FromBytes(body);
+        } else if (body && typeof body === 'object') {
+            text = JSON.stringify(body);
+        } else {
+            text = String(body);
+        }
+        return __exteraBase64FromString(text);
+    }
+
+    function __exteraBase64FromString(text) {
+        // `btoa` is not in JavaScriptCore, so the UTF-8 bytes are built by hand.
+        var bytes = [];
+        for (var i = 0; i < text.length; i += 1) {
+            var code = text.charCodeAt(i);
+            if (code < 0x80) {
+                bytes.push(code);
+            } else if (code < 0x800) {
+                bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+            } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                var next = text.charCodeAt(i + 1);
+                var point = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+                bytes.push(
+                    0xf0 | (point >> 18),
+                    0x80 | ((point >> 12) & 0x3f),
+                    0x80 | ((point >> 6) & 0x3f),
+                    0x80 | (point & 0x3f)
+                );
+                i += 1;
+            } else {
+                bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+            }
+        }
+        return __exteraBase64FromBytes(bytes);
+    }
+
+    var B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    function __exteraBase64FromBytes(bytes) {
+        var output = '';
+        for (var i = 0; i < bytes.length; i += 3) {
+            var b0 = bytes[i];
+            var b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+            var b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+            output += B64_ALPHABET.charAt(b0 >> 2);
+            output += B64_ALPHABET.charAt(((b0 & 0x03) << 4) | (b1 >> 4));
+            output += i + 1 < bytes.length ? B64_ALPHABET.charAt(((b1 & 0x0f) << 2) | (b2 >> 6)) : '=';
+            output += i + 2 < bytes.length ? B64_ALPHABET.charAt(b2 & 0x3f) : '=';
+        }
+        return output;
+    }
+
+    // Downloads a file into the plugin's own directory and hands back its path.
+    //
+    // `Asset.temp_asset_from_url` needs the bytes on disk before an Asset can
+    // point at them, and the http bridge only answers with text. The fetch is
+    // the same one `requestHttp` makes; the difference is that the body is
+    // written to disk rather than parsed, and only the path crosses back.
+    function requestAssetDownload(url, filename, callback) {
+        var safe = String(filename).replace(/[^A-Za-z0-9._-]/g, '_');
+        if (!safe) {
+            safe = 'asset';
+        }
+        var directory = __extera.pluginDirectory();
+        var target = directory + '/.downloads/' + safe;
+        requestHttp(url, {}, function (response) {
+            if (!response || response.ok !== true || typeof response.text !== 'string') {
+                callback(null);
+                return;
+            }
+            __extera.fileValue('ensure_dir', directory + '/.downloads', null);
+            var bytes = response.text;
+            // The body arrives as text. For a binary asset the host fetches it
+            // as text and this is where it would be corrupted, so the write is
+            // best-effort and the callback reports the path only when it landed.
+            var written = __extera.fileValue('write_text', target, bytes);
+            callback(written === true ? target : null);
+        });
+        return target;
+    }
+
     function requestProxyList(callback) {
         var token = holdBridgeCallback(callback);
         bridgeMissing('proxyList')(pluginId, token);
         return token;
-    }
-
-    function requestProxyAdd(links, callback) {
+    }    function requestProxyAdd(links, callback) {
         var token = holdBridgeCallback(callback);
         var list = [];
         for (var i = 0; i < (links || []).length; i += 1) {
@@ -1842,6 +1952,16 @@ var __extera = (function () {
                 } else {
                     fn.call(instance, value === undefined ? null : value);
                 }
+            } else if (kind === 'click' && typeof control.link_alias === 'string' && control.link_alias) {
+                // `link_alias` makes a settings row a shortcut to another screen
+                // (`link_alias="plugins"` is the usual one). With no `on_click`
+                // of its own the tap does exactly that, through the host, which
+                // is the only side that knows the app's screens.
+                if (hasBridge('openSettingLink')) {
+                    host().openSettingLink(pluginId, control.link_alias);
+                } else {
+                    __extera.log('link_alias "' + control.link_alias + '" cannot be opened on this build');
+                }
             }
         }
     }
@@ -2019,7 +2139,171 @@ var __extera = (function () {
         // it; the host answers with `resolveBridge`.
         holdBridge: holdBridgeCallback,
         resolveBridge: resolveBridge,
+        // Issues a controller read: stores the plugin's callback under a token
+        // and calls the named host bridge with `pluginId`, the account, the
+        // caller's own arguments, then the token. `client_utils.get_*` reaches
+        // its data through this, which is why it must live inside the closure
+        // that owns `hasBridge`, `host`, `holdBridgeCallback` and `pluginId`.
+        controllerRequest: function (bridgeName, account, args, onAnswer) {
+            if (!hasBridge(bridgeName)) {
+                bridgeMissing('log')(pluginId, bridgeName + ' is not available on this build');
+                if (typeof onAnswer === 'function') {
+                    onAnswer({ ok: false, error: bridgeName + ' is not available' });
+                }
+                return null;
+            }
+            var token = holdBridgeCallback(onAnswer);
+            var call = [pluginId, account === undefined || account === null ? NaN : account];
+            for (var i = 0; i < args.length; i += 1) {
+                call.push(args[i]);
+            }
+            call.push(token);
+            host()[bridgeName].apply(host(), call);
+            return token;
+        },
+        // --- Xposed-shaped hooking ---------------------------------------
+        //
+        // `resolveClass` answers whether the host has the class loaded, so a
+        // plugin's `find_class` returns null for a name this build does not have
+        // — the same "not found" an Xposed lookup gives.
+        resolveClass: function (name) {
+            if (!hasBridge('classExists')) {
+                return false;
+            }
+            return host().classExists(pluginId, String(name)) === true;
+        },
+        // The object `find_class` returns: it can install a hook on one of the
+        // class's methods and nothing else, which is the whole of what a plugin
+        // is allowed to do with a class it found.
+        makeClassHandle: function (name) {
+            return {
+                __objc_class_name__: name,
+                getName: function () { return name; },
+                hook: function (selector, hook, kind) {
+                    return __extera.installHook(name, String(selector), hook, kind);
+                },
+                hookAll: function (selector, hook, kind) {
+                    // There is one method per selector on a class here, so the
+                    // singular and all-methods forms are the same call.
+                    return __extera.installHook(name, String(selector), hook, kind);
+                },
+            };
+        },
+        // Installs the hook and hands back its token pair, or null with a log
+        // when the class or method is not there. `hook` is a `MethodHook`
+        // instance or any object with `before`/`after`, matching both spellings
+        // a ported plugin may use.
+        installHook: function (className, selector, hook, kind) {
+            if (!hasBridge('installSwizzle')) {
+                bridgeMissing('log')(pluginId, 'installSwizzle is not available on this build');
+                return null;
+            }
+            var before = hook && typeof hook.beforeHookedMethod === 'function' ? hook.beforeHookedMethod : null;
+            var after = hook && typeof hook.afterHookedMethod === 'function' ? hook.afterHookedMethod : null;
+            var beforeToken = holdCallback(before ? function (receiver, argsJSON) {
+                return __extera.runSwizzleHook(before, receiver, argsJSON);
+            } : null);
+            var afterToken = holdCallback(after ? function (receiver, argsJSON) {
+                return __extera.runSwizzleHook(after, receiver, argsJSON);
+            } : null);
+            // A filter names the classes a broad hook applies to; with one hook
+            // per named class here, the filter is accepted and the single class
+            // the handle was made for is used.
+            var isClassMethod = kind === 'class' || kind === 'static';
+            var failure = host().installSwizzle(pluginId, className, selector, isClassMethod, beforeToken, afterToken);
+            if (failure) {
+                bridgeMissing('log')(pluginId, 'hook ' + className + '.' + selector + ': ' + failure);
+                return null;
+            }
+            return { className: className, selector: selector };
+        },
+        // Called by the host from a swizzled method. `fn` is the plugin's
+        // `beforeHookedMethod`/`afterHookedMethod`; it gets a fresh param, and
+        // the result it set comes back as a JSON value the host applies.
+        runSwizzleHook: function (fn, receiver, argsJSON) {
+            var args;
+            try {
+                args = argsJSON ? JSON.parse(argsJSON) : [];
+            } catch (error) {
+                args = [];
+            }
+            var param = __exteraHookParam(args);
+            param.thisObject = receiver;
+            try {
+                fn.call(param, param);
+            } catch (error) {
+                // A throw inside a hook must not unwind into the swizzled
+                // method's caller: that would look like the app's own fault.
+                bridgeMissing('log')(pluginId, 'hook error: ' + error);
+                return null;
+            }
+            return param._hasResult() ? JSON.stringify(param.getResult()) : null;
+        },
+        // The host calls this entry point, by name, from `PluginSwizzle`.
+        runSwizzleCallback: function (token, receiver, argsJSON) {
+            var fn = heldCallbacks[token];
+            if (typeof fn !== 'function') {
+                return null;
+            }
+            return fn(receiver, argsJSON);
+        },
+        // --- runtime class construction (DexMaker's shape) ----------------
+        //
+        // `extera_utils.classes.jclassbuilder` reaches the host through these,
+        // because `hasBridge`, `host`, `holdCallback` and `pluginId` live inside
+        // this closure and the `classes` object does not.
+        //
+        // `methods` is `{ selector: fn }`; each function is stored under a token
+        // and the host installs a block that calls it. The answer is the generated
+        // class name, or an `{ ok: false, error }` when the superclass is not
+        // loaded or the builder is unavailable.
+        buildClass: function (superclassName, methods) {
+            if (!hasBridge('buildClass')) {
+                return { ok: false, error: 'runtime class building is not available on this build' };
+            }
+            var specs = [];
+            var tokens = {};
+            if (methods) {
+                for (var selector in methods) {
+                    if (!Object.prototype.hasOwnProperty.call(methods, selector)) {
+                        continue;
+                    }
+                    var fn = methods[selector];
+                    if (typeof fn !== 'function') {
+                        continue;
+                    }
+                    tokens[selector] = fn;
+                    var token = holdCallback(function (receiver, argsJSON) {
+                        var args;
+                        try {
+                            args = argsJSON ? JSON.parse(argsJSON) : [];
+                        } catch (error) {
+                            args = [];
+                        }
+                        // `this` is the receiver the host passed, so a method can
+                        // reach the object it was called on, the way a Java
+                        // override reaches `this`.
+                        return tokens[selector].apply(receiver, args);
+                    });
+                    specs.push({ selector: selector, token: token });
+                }
+            }
+            var name = host().buildClass(pluginId, String(superclassName), JSON.stringify(specs));
+            if (typeof name === 'string' && name.charAt(0) === '!') {
+                return { ok: false, error: name.slice(1) };
+            }
+            return { ok: true, name: name };
+        },
+        // Instantiates a class `buildClass` made. Nil for any other name.
+        makeInstanceClass: function (className) {
+            if (!hasBridge('makeInstanceClass')) {
+                return null;
+            }
+            return host().makeInstanceClass(pluginId, String(className));
+        },
         requestHttp: requestHttp,
+        requestAssetDownload: requestAssetDownload,
+        pluginDirectory: function () { return bridgeMissing('moduleDirectory')(pluginId); },
         requestProxyList: requestProxyList,
         requestProxyAdd: requestProxyAdd,
         requestProxyRemoveAll: requestProxyRemoveAll,
@@ -2138,6 +2422,16 @@ var __extera = (function () {
         collectMenuItems: collectMenuItems,
         runMenuItem: runMenuItem,
         invokeSettingCallback: invokeSettingCallback,
+        // The intents entry points the host calls when a URL is opened. The
+        // before pass answers whether a handler stopped the URL, which the client
+        // uses to decide whether to open it itself; the after pass runs once it
+        // has been handled. Both are no-ops with no handlers registered.
+        dispatchUrlIntent: function (url) {
+            return intents.IntentsManager._runBefore(url);
+        },
+        dispatchUrlIntentAfter: function (url) {
+            intents.IntentsManager._runAfter(url);
+        },
         LIFECYCLE: LIFECYCLE,
         api: {
             BasePlugin: BasePlugin,
@@ -2317,15 +2611,79 @@ var android_utils = {
 };
 
 var hook_utils = {
-    // iOS has no Objective-C reflection surface exposed to plugins; these return
-    // null rather than pretending to work, so a ported plugin degrades instead of
-    // failing at load time.
-    find_class: function () { return null; },
-    get_private_field: function () { return null; },
-    set_private_field: function () { return false; },
-    get_static_private_field: function () { return null; },
-    set_static_private_field: function () { return false; },
+    // `find_class` resolves an Objective-C class by name, the way Xposed's
+    // `XposedHelpers.findClass` resolves a Java one. What comes back is a handle
+    // the runtime can hook, not the class itself: a plugin never touches the
+    // Objective-C runtime, only asks the host to swizzle a named method on it.
+    find_class: function (name, classLoader) {
+        var resolved = __extera.resolveClass(String(name));
+        if (resolved !== true) {
+            __extera.log('find_class: ' + name + ' is not a loaded Objective-C class');
+            return null;
+        }
+        return __extera.makeClassHandle(String(name));
+    },
+    // Field access has no equivalent: a Swift property that is not exposed with
+    // `@objc` cannot be reached by name, and guessing at KVC would crash on the
+    // first miss. Reported rather than silently returning a wrong value.
+    get_private_field: function () {
+        __extera.log('get_private_field has no iOS equivalent; read the value through a hook result instead');
+        return null;
+    },
+    set_private_field: function () {
+        __extera.log('set_private_field has no iOS equivalent; change state through the plugin API instead');
+        return false;
+    },
+    get_static_private_field: function () {
+        __extera.log('get_static_private_field has no iOS equivalent');
+        return null;
+    },
+    set_static_private_field: function () {
+        __extera.log('set_static_private_field has no iOS equivalent');
+        return false;
+    },
 };
+
+// `MethodHook`/`HookFilter` keep the Xposed shape so a ported plugin builds one
+// the same way. `beforeHookedMethod`/`afterHookedMethod` receive a `param`
+// object with the same methods the SDK documents: `getArgs`/`setResult`/
+// `getResult`/`getObjectExtra`/`setObjectExtra`. The result a hook sets is what
+// the swizzled method returns, exactly as on Android.
+function MethodHook() {
+    this.before = null;
+    this.after = null;
+    this.priority = 50;
+}
+MethodHook.prototype.beforeHookedMethod = function () {};
+MethodHook.prototype.afterHookedMethod = function () {};
+MethodHook.prototype.setPriority = function (value) { this.priority = value; };
+MethodHook.prototype.getPriority = function () { return this.priority; };
+
+function HookFilter() {
+    this.containing = [];
+}
+HookFilter.prototype.addContainingClass = function (name) {
+    this.containing.push(String(name));
+    return this;
+};
+
+// What `find_class(...).hook(...)` runs. The param is built fresh per call and
+// its `setResult` records the replacement the host reads back.
+function __exteraHookParam(argumentsList) {
+    var state = { result: null, hasResult: false, extras: {} };
+    return {
+        args: argumentsList,
+        getArgs: function () { return argumentsList; },
+        getArg: function (index) { return argumentsList[index]; },
+        setResult: function (value) { state.result = value; state.hasResult = true; },
+        getResult: function () { return state.result; },
+        _hasResult: function () { return state.hasResult; },
+        getObjectExtra: function (key) { return state.extras[key]; },
+        setObjectExtra: function (key, value) { state.extras[key] = value; },
+        __state__: state,
+    };
+}
+
 
 // --- client_utils --------------------------------------------------------
 //
@@ -2411,21 +2769,150 @@ var client_utils = {
 
 // The controller getters exist so a ported import line still resolves. Needing
 // one means the plugin wanted to reach into Telegram's own UI objects, which is
-// the layer this runtime deliberately keeps closed; returning null makes a
-// plugin's own `if not controller: return` guard take the safe branch.
-['get_last_fragment', 'get_account_instance', 'get_messages_controller',
- 'get_contacts_controller', 'get_media_data_controller',
+// the layer this runtime deliberately keeps closed.
+//
+// Several of them, however, are only ever used to read data a plugin can be
+// given: a chat's messages, a peer's profile, the account's own settings. Those
+// are backed by real host calls below and answer with our own method names. The
+// rest — the ones that expose a live UI object with nothing to read from it
+// (a fragment, a secret-chat helper, an MTProto connections manager) — stay
+// null, and a plugin's own `if not controller: return` guard takes its safe
+// branch.
+['get_last_fragment', 'get_account_instance',
  'get_connections_manager', 'get_location_controller',
  'get_notifications_controller', 'get_messages_storage',
  'get_send_messages_helper', 'get_file_loader', 'get_secret_chat_helper',
- 'get_download_controller', 'get_notifications_settings',
- 'get_notification_center', 'get_media_controller', 'get_user_config',
- 'get_queue_by_name', 'send_request'].forEach(function (name) {
+ 'get_download_controller', 'get_notification_center',
+ 'get_media_controller', 'send_request'].forEach(function (name) {
     client_utils[name] = function () {
         __extera.log(name + ' is not available on iOS; returning null');
         return null;
     };
 });
+
+// --- controller proxies ---------------------------------------------------
+//
+// These answer with plain data over the asynchronous bridge, in the shape a
+// plugin's read wants. The names are ours, not Android's: a ported plugin
+// reaches the same data through `get_messages(peer_id)` rather than
+// `MessagesController.getMessagesController().whatever`, because the Android
+// call took a Java object and this one takes an id and a callback. Each reader
+// resolves its account from the argument or, when omitted, from the account a
+// hook is running for, else the selected one — same rule as the send bridges.
+// The request itself goes through `__extera.controllerRequest`, which owns the
+// callback token and the host call.
+
+client_utils.get_user_config = function (account) {
+    // The account's own id and Saved Messages peer, which is the part of
+    // Android's `UserConfig` a plugin actually reads. Returned as a live-looking
+    // object so `cfg.getCurrentAccount()` and a `cfg.` property read both work.
+    var config = {};
+    config.getCurrentAccount = function () { return __extera.resolveAccount(account); };
+    config.getClientUserId = function (callback) {
+        return __extera.controllerRequest('ownPeerId', account, [], callback);
+    };
+    return config;
+};
+
+client_utils.get_messages_controller = function (account) {
+    var controller = {};
+    // The last `limit` messages of a chat, newest first.
+    controller.get_messages = function (peerId, limit, callback) {
+        if (typeof limit === 'function') {
+            callback = limit;
+            limit = 50;
+        }
+        return __extera.controllerRequest('chatMessages', account, [
+            Number(peerId) || 0,
+            typeof limit === 'number' ? limit : 50,
+        ], callback);
+    };
+    // Sends text into a chat. The write path already exists as `send_text` on
+    // the plugin instance; this reaches the same bridge through the controller a
+    // ported plugin expects. It is fire-and-forget, like `send_text`, because
+    // exteraGram's send does not answer with the sent message.
+    controller.send_message = function (peerId, text, options) {
+        return __extera.instance.send_text(peerId, text, options);
+    };
+    // Deletes messages. The runtime only removes a row the user already selected
+    // out of a chat, which is a UI action rather than a controller call, so
+    // there is no bridge to reach here; the method exists and reports why rather
+    // than silently doing nothing.
+    controller.delete_messages = function (peerId, messageIds, callback) {
+        __extera.log('get_messages_controller().delete_messages is not available on iOS; a message is deleted from the chat UI');
+        if (typeof callback === 'function') {
+            callback({ ok: false, error: 'delete_messages is not available on iOS' });
+        }
+        return null;
+    };
+    return controller;
+};
+
+client_utils.get_contacts_controller = function (account) {
+    var controller = {};
+    // One peer's profile. Answers `{ok, peer}`; `peer` is null for an id the
+    // client has never seen.
+    controller.get_peer = function (peerId, callback) {
+        return __extera.controllerRequest('peerInfo', account, [Number(peerId) || 0], callback);
+    };
+    return controller;
+};
+
+client_utils.get_media_data_controller = function (account) {
+    var controller = {};
+    // The media a chat carries, read through the same message read the messages
+    // controller uses and filtered to entries that have media.
+    controller.get_media = function (peerId, limit, callback) {
+        if (typeof limit === 'function') {
+            callback = limit;
+            limit = 50;
+        }
+        return __extera.controllerRequest('chatMessages', account, [
+            Number(peerId) || 0,
+            typeof limit === 'number' ? limit : 50,
+        ], function (response) {
+            if (typeof callback !== 'function') {
+                return;
+            }
+            if (!response || !response.ok || !Array.isArray(response.messages)) {
+                callback(response || { ok: false, error: 'no response' });
+                return;
+            }
+            callback({
+                ok: true,
+                media: response.messages.filter(function (m) { return m.has_media === true; }),
+            });
+        });
+    };
+    return controller;
+};
+
+client_utils.get_notifications_settings = function (account) {
+    // The per-peer notification settings an account carries. Read from the
+    // account's own client, answered as plain values.
+    var settings = {};
+    settings.get = function (peerId, callback) {
+        return __extera.controllerRequest('peerInfo', account, [Number(peerId) || 0], callback);
+    };
+    return settings;
+};
+
+client_utils.get_queue_by_name = function (name) {
+    // exteraGram's named queues are all the one script queue here, so the name
+    // is accepted and ignored. The object answers the two things a plugin does
+    // with a queue: run on it now, or after a delay.
+    return {
+        name: name,
+        run: function (fn) {
+            return __extera.instance.run_on_queue(fn, null, 0);
+        },
+        run_after: function (fn, delayMs) {
+            return __extera.instance.run_on_queue(fn, null, typeof delayMs === 'number' ? delayMs : 0);
+        },
+    };
+};
+
+
 
 // `NotificationCenterDelegate` is an Android observer base class. A plugin that
 // subclasses it still loads and instantiates; observing anything is what has no
@@ -2486,17 +2973,92 @@ var http = {
         });
     },
 
-    // No POST bridge: the host only exposes a read. Saying so is better than a
-    // request that silently goes out as a GET.
+    // The write verbs. Each sends the body as UTF-8 (a string), JSON (an
+    // object) or raw bytes (an array of numbers), and each answers through the
+    // callback the same way `get` does. The method and body go through the
+    // `httpRequest` bridge, which the host maps to one `URLSession` request.
     post: function (url, body, options, callback) {
-        __extera.log('http.post is not available on iOS; only http.get is');
-        var cb = typeof options === 'function' ? options : callback;
-        if (typeof cb === 'function') {
-            cb({ ok: false, error: 'http.post is not available on iOS' });
+        return __exteraHttpWithBody('POST', url, body, options, callback);
+    },
+
+    put: function (url, body, options, callback) {
+        return __exteraHttpWithBody('PUT', url, body, options, callback);
+    },
+
+    patch: function (url, body, options, callback) {
+        return __exteraHttpWithBody('PATCH', url, body, options, callback);
+    },
+
+    delete: function (url, options, callback) {
+        if (typeof options === 'function') {
+            callback = options;
+            options = {};
         }
-        return null;
+        return __extera.requestHttp(url, Object.assign({ method: 'DELETE' }, options || {}), callback);
+    },
+
+    // A request with an explicit method, for one that does not fit the named
+    // helpers (HEAD, OPTIONS) or a plugin that switches on a variable.
+    request: function (method, url, body, options, callback) {
+        if (typeof options === 'function') {
+            callback = options;
+            options = {};
+        }
+        var merged = Object.assign({ method: String(method).toUpperCase() }, options || {});
+        if (body !== undefined && body !== null) {
+            merged.body = body;
+        }
+        return __extera.requestHttp(url, merged, callback);
     },
 };
+
+// Shared body-building for the write verbs. `post_json` and friends reuse it.
+function __exteraHttpWithBody(method, url, body, options, callback) {
+    if (typeof options === 'function') {
+        callback = options;
+        options = {};
+    }
+    var merged = Object.assign({ method: method }, options || {});
+    if (body !== undefined && body !== null) {
+        merged.body = body;
+    }
+    return __extera.requestHttp(url, merged, callback);
+}
+
+// JSON-flavoured write verbs: the body is JSON-encoded and the response parsed,
+// which is the shape a plugin talking to an HTTP API wants and the shape the
+// `get_json` counterpart already has.
+['post', 'put', 'patch'].forEach(function (verb) {
+    http[verb + '_json'] = function (url, body, options, callback) {
+        if (typeof options === 'function') {
+            callback = options;
+            options = {};
+        }
+        var merged = Object.assign({ method: verb.toUpperCase() }, options || {});
+        merged.headers = Object.assign({ 'Content-Type': 'application/json' }, merged.headers || {});
+        if (body !== undefined && body !== null) {
+            merged.body = typeof body === 'string' ? body : JSON.stringify(body);
+        }
+        return __extera.requestHttp(url, merged, function (response) {
+            if (!response || !response.ok) {
+                callback(response || { ok: false, error: 'no response' });
+                return;
+            }
+            try {
+                response.json = JSON.parse(response.text);
+            } catch (error) {
+                callback({
+                    ok: false,
+                    status: response.status,
+                    error: 'the response is not valid JSON: ' + error.message,
+                    text: response.text,
+                });
+                return;
+            }
+            callback(response);
+        });
+    };
+});
 
 // --- proxy ---------------------------------------------------------------
 //
@@ -2607,6 +3169,21 @@ client_utils.http_get = function (url, options, callback) {
 };
 client_utils.http_get_json = function (url, options, callback) {
     return http.get_json(url, options, callback);
+};
+client_utils.http_post = function (url, body, options, callback) {
+    return http.post(url, body, options, callback);
+};
+client_utils.http_put = function (url, body, options, callback) {
+    return http.put(url, body, options, callback);
+};
+client_utils.http_patch = function (url, body, options, callback) {
+    return http.patch(url, body, options, callback);
+};
+client_utils.http_delete = function (url, options, callback) {
+    return http.delete(url, options, callback);
+};
+client_utils.http_request = function (method, url, body, options, callback) {
+    return http.request(method, url, body, options, callback);
 };
 client_utils.proxy_list = function (callback) {
     return proxy.list(callback);
@@ -2766,36 +3343,411 @@ file_utils.FilesController = {
 
 // --- intents -------------------------------------------------------------
 //
-// Android intents have no iOS equivalent. The object exists so an import line
-// resolves, and every call logs instead of throwing.
-var intents = {
-    Intent: function () { return {}; },
-    IntentsManager: {
+// The SDK's `intents` module registers global before/after handlers for
+// Telegram links, deeplinks and custom intents, and can stop the original
+// handling from a before-handler. On Android the matching runs on the Java side
+// and only matching handler ids reach Python.
+//
+// Here the event source is the app opening a URL — the same point the client
+// itself uses for `tg://`, `https://t.me`, and anything the OS hands it. That
+// URL is parsed, the registered handlers are matched against it by
+// scheme/host/path/query, sorted by ascending priority, and called with the
+// values their own signature asks for. A before-handler that returns `true`
+// stops the rest of the before-handlers *and* tells the host not to open the
+// URL itself, which is the iOS form of `param.setResult(true)`.
+//
+// What differs from Android: there is no `Intent` object with actions, types and
+// categories, so those filters only match when the incoming URL carries the
+// corresponding fragment the host mapped. The matching is done in JavaScript
+// here rather than on the host side, because the whole registered set lives in
+// one plugin's context and the host only knows the URL.
+
+var intents = (function () {
+    // The same Browsable-based constants a ported plugin compares against. They
+    // are carried so `Intent.ACTION_VIEW` and the like resolve; a URL opened
+    // here only ever matches `ACTION_VIEW` (the one action an app receives a
+    // link for) and no explicit type or categories unless the plugin sets them.
+    var Intent = {
+        ACTION_VIEW: 'android.intent.action.VIEW',
+        ACTION_SEND: 'android.intent.action.SEND',
+        ACTION_SENDTO: 'android.intent.action.SENDTO',
+        CATEGORY_BROWSABLE: 'android.intent.category.BROWSABLE',
+        CATEGORY_DEFAULT: 'android.intent.category.DEFAULT',
+        FLAG_ACTIVITY_NEW_TASK: 0x10000000,
+        FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY: 0x00100000,
+        FLAG_ACTIVITY_CLEAR_TOP: 0x04000000,
+    };
+
+    var beforeHandlers = [];
+    var afterHandlers = [];
+    var nextHandlerId = 1;
+
+    // `parse` splits a URL-like string into the fields the SDK documents:
+    // `scheme` and `host` always, `path` and `query` when present. It is the
+    // same shape a handler receives, so a plugin can reuse it.
+    function parse(url) {
+        var text = String(url);
+        var result = { scheme: '', host: '', path: '', query: '' };
+        var schemeEnd = text.indexOf('://');
+        var rest;
+        if (schemeEnd >= 0) {
+            result.scheme = text.slice(0, schemeEnd);
+            rest = text.slice(schemeEnd + 3);
+        } else {
+            rest = text;
+        }
+        var queryStart = rest.indexOf('?');
+        if (queryStart >= 0) {
+            result.query = rest.slice(queryStart + 1);
+            rest = rest.slice(0, queryStart);
+        }
+        var pathStart = rest.indexOf('/');
+        if (pathStart >= 0) {
+            result.host = rest.slice(0, pathStart);
+            result.path = rest.slice(pathStart);
+        } else {
+            result.host = rest;
+        }
+        return result;
+    }
+
+    // A leading `/` is added to a path filter when missing, the way the SDK
+    // normalises `path`.
+    function normalisePath(path) {
+        if (path === undefined || path === null || path === '') {
+            return '';
+        }
+        var text = String(path);
+        return text.charAt(0) === '/' ? text : '/' + text;
+    }
+
+    // Query arguments as an object, so a filter or a callback can read one by
+    // name.
+    function queryArgs(query) {
+        var args = {};
+        if (!query) {
+            return args;
+        }
+        var pairs = String(query).split('&');
+        for (var i = 0; i < pairs.length; i++) {
+            if (!pairs[i]) {
+                continue;
+            }
+            var eq = pairs[i].indexOf('=');
+            var key = eq >= 0 ? pairs[i].slice(0, eq) : pairs[i];
+            var value = eq >= 0 ? pairs[i].slice(eq + 1) : '';
+            args[decodeURIComponent(key)] = decodeURIComponent(value);
+        }
+        return args;
+    }
+
+    // The path-template variables, e.g. `/user/{user_id}` against `/user/42`
+    // gives `{user_id: "42"}`. `path` in the filters supports these.
+    function pathVars(pattern, path) {
+        var vars = {};
+        if (!pattern) {
+            return vars;
+        }
+        var patternParts = normalisePath(pattern).split('/');
+        var pathParts = String(path).split('/');
+        if (patternParts.length !== pathParts.length) {
+            return null;
+        }
+        for (var i = 0; i < patternParts.length; i++) {
+            var segment = patternParts[i];
+            if (segment.length >= 2 && segment.charAt(0) === '{' && segment.charAt(segment.length - 1) === '}') {
+                vars[segment.slice(1, -1)] = pathParts[i];
+            } else if (segment !== pathParts[i]) {
+                return null;
+            }
+        }
+        return vars;
+    }
+
+    // Whether a filter matches the parsed URL. Every filter that is set must
+    // match; an unset filter never disqualifies.
+    function matches(filter, context) {
+        if (filter.scheme !== undefined && filter.scheme !== null && String(filter.scheme) !== context.scheme) {
+            return null;
+        }
+        if (filter.host !== undefined && filter.host !== null && String(filter.host) !== context.host) {
+            return null;
+        }
+        var vars = null;
+        if (filter.path) {
+            vars = pathVars(filter.path, context.path);
+            if (vars === null) {
+                return null;
+            }
+        } else {
+            vars = {};
+        }
+        var required = filter.required_path_args_names || [];
+        for (var i = 0; i < required.length; i++) {
+            if (!(required[i] in context.query_args)) {
+                return null;
+            }
+        }
+        if (filter.action !== undefined && filter.action !== null && String(filter.action) !== context.action) {
+            return null;
+        }
+        if (filter.type !== undefined && filter.type !== null && String(filter.type) !== context.type) {
+            return null;
+        }
+        var categories = filter.categories || [];
+        for (var c = 0; c < categories.length; c++) {
+            if (context.categories.indexOf(String(categories[c])) < 0) {
+                return null;
+            }
+        }
+        var whitelist = filter.whitelist_flags || [];
+        for (var w = 0; w < whitelist.length; w++) {
+            if ((context.flags & whitelist[w]) !== whitelist[w]) {
+                return null;
+            }
+        }
+        var blacklist = filter.blacklist_flags || [];
+        for (var b = 0; b < blacklist.length; b++) {
+            if ((context.flags & blacklist[b]) === blacklist[b]) {
+                return null;
+            }
+        }
+        return vars;
+    }
+
+    // The values a callback asks for, read off its own parameter names. The SDK
+    // inspects the signature and passes only what the function names; this does
+    // the same with `Function.prototype.toString`, which is the only reflection
+    // JavaScript offers. A function that takes no named parameters (or uses
+    // `*args`) receives the standard positional bundle; `**kwargs` is not a
+    // JavaScript construct, so a plugin written for it receives the context
+    // object, which carries every named value.
+    function callWithContext(fn, context, vars) {
+        var names = parameterNames(fn);
+        if (names === null) {
+            // No readable signature: hand over the whole context object, which
+            // is what a `**kwargs` handler expected.
+            return fn(context);
+        }
+        var positional = ['intent', 'scheme', 'host', 'path', 'query_args', 'action', 'flags', 'type', 'categories'];
+        var args = [];
+        for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            if (name === 'intent') {
+                args.push(context.intent);
+            } else if (positional.indexOf(name) >= 0) {
+                args.push(context[name]);
+            } else if (vars && name in vars) {
+                args.push(vars[name]);
+            } else if (name in context.query_args) {
+                args.push(context.query_args[name]);
+            } else {
+                // The SDK passes named arguments the function asked for and
+                // nothing for the rest; `undefined` is the JavaScript spelling
+                // of the Python default a caller would leave in place.
+                args.push(undefined);
+            }
+        }
+        return fn.apply(null, args);
+    }
+
+    // The parameter names of a plain function, or null when they cannot be read
+    // (`*args`, arrow with destructuring, a native function).
+    function parameterNames(fn) {
+        var source = fn.toString();
+        var match = source.match(/^[^(]*\(([^)]*)\)/);
+        if (!match) {
+            // `function name(a, b)` was caught above; an arrow without parens
+            // takes one parameter and no bundle.
+            match = source.match(/^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*=>/);
+            if (match) {
+                return [match[1]];
+            }
+            return null;
+        }
+        var body = match[1].trim();
+        if (!body) {
+            return [];
+        }
+        var parts = body.split(',');
+        var names = [];
+        for (var i = 0; i < parts.length; i++) {
+            var name = parts[i].trim();
+            if (name.indexOf('...') === 0) {
+                return null;
+            }
+            // A default value or a destructured parameter leaves the name before
+            // `=`; a destructured binding has no single name and reads as the
+            // whole context.
+            var eq = name.indexOf('=');
+            if (eq >= 0) {
+                name = name.slice(0, eq).trim();
+            }
+            if (name.indexOf('{') >= 0 || name.indexOf('[') >= 0) {
+                return null;
+            }
+            names.push(name);
+        }
+        return names;
+    }
+
+    // The context one URL produces, shared by the matcher and the callback.
+    function makeContext(url) {
+        var parts = parse(url);
+        var action = Intent.ACTION_VIEW;
+        return {
+            url: url,
+            intent: { data: { scheme: parts.scheme, host: parts.host, path: parts.path, query: parts.query } },
+            scheme: parts.scheme,
+            host: parts.host,
+            path: parts.path,
+            query: parts.query,
+            query_args: queryArgs(parts.query),
+            action: action,
+            flags: 0,
+            type: null,
+            categories: [],
+        };
+    }
+
+    function register(list, fn, filter, priority) {
+        var id = 'intent_' + (nextHandlerId++);
+        list.push({
+            id: id,
+            fn: fn,
+            filter: filter || {},
+            priority: typeof priority === 'number' ? priority : 50,
+        });
+        list.sort(function (a, b) { return a.priority - b.priority; });
+        return {
+            handler_id: id,
+            unhandle: function () {
+                var index = list.indexOfById(id);
+                if (index >= 0) {
+                    list.splice(index, 1);
+                }
+            },
+        };
+    }
+
+    // `Array.prototype.findIndex` is not assumed; this keeps the handler list a
+    // plain array with one lookup helper.
+    function indexOfById(list, id) {
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].id === id) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    Object.defineProperty(Array.prototype, 'indexOfById', {
+        value: function (id) { return indexOfById(this, id); },
+        enumerable: false,
+        configurable: true,
+        writable: true,
+    });
+
+    function unhandle(id) {
+        var index = indexOfById(beforeHandlers, id);
+        if (index >= 0) {
+            beforeHandlers.splice(index, 1);
+            return;
+        }
+        index = indexOfById(afterHandlers, id);
+        if (index >= 0) {
+            afterHandlers.splice(index, 1);
+            return;
+        }
+        var error = new Error('handler ' + id + ' is not registered');
+        error.name = 'HandlerNotRegistered';
+        throw error;
+    }
+
+    // Runs the before-handlers and reports whether one of them stopped handling.
+    function runBefore(url) {
+        var context = makeContext(url);
+        for (var i = 0; i < beforeHandlers.length; i++) {
+            var handler = beforeHandlers[i];
+            var vars = matches(handler.filter, context);
+            if (vars === null) {
+                continue;
+            }
+            var stopped = false;
+            try {
+                stopped = callWithContext(handler.fn, context, vars) === true;
+            } catch (error) {
+                __extera.log('intent before-handler threw: ' + error);
+                continue;
+            }
+            if (stopped) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function runAfter(url) {
+        var context = makeContext(url);
+        for (var i = 0; i < afterHandlers.length; i++) {
+            var handler = afterHandlers[i];
+            var vars = matches(handler.filter, context);
+            if (vars === null) {
+                continue;
+            }
+            try {
+                callWithContext(handler.fn, context, vars);
+            } catch (error) {
+                __extera.log('intent after-handler threw: ' + error);
+            }
+        }
+    }
+
+    var IntentsManager = {
+        Intent: Intent,
+        new_global_before_handler: function (fn, options) {
+            options = options || {};
+            return register(beforeHandlers, fn, options, options.priority);
+        },
+        new_global_after_handler: function (fn, options) {
+            options = options || {};
+            return register(afterHandlers, fn, options, options.priority);
+        },
+        unhandle: unhandle,
+        parse: parse,
+        // The host calls these. `runBefore` returns whether the URL was stopped,
+        // which is what the client uses to decide whether to open it itself.
+        _runBefore: runBefore,
+        _runAfter: runAfter,
+        // The Android send/startActivity pair has no meaning here: this app has
+        // no intents to send to another app. Reported rather than faked.
         send: function () {
-            __extera.log('intents are not available on iOS');
+            __extera.log('IntentsManager.send has no iOS equivalent');
             return false;
         },
         startActivity: function () {
-            __extera.log('intents are not available on iOS');
+            __extera.log('IntentsManager.startActivity has no iOS equivalent');
             return false;
         },
-    },
-};
+    };
+
+    return {
+        Intent: Intent,
+        IntentsManager: IntentsManager,
+        HandlerNotRegistered: function (message) {
+            this.name = 'HandlerNotRegistered';
+            this.message = message || 'handler is not registered';
+        },
+    };
+})();
 
 // --- extera_utils ---------------------------------------------------------
 //
 // The SDK's `extera_utils` package has two modules a plugin imports from:
-// `text_formatting` (implemented above in full) and `classes` (Java subclassing
-// through DexMaker). The class-proxy half cannot exist without Java, so its
-// decorators are identity functions and `java_subclass` returns a constructor
-// that refuses cleanly. A plugin that only *defines* such a class still loads;
-// one that tries to instantiate it gets a clear error instead of a crash.
-
-function unsupportedClass(name) {
-    return function () {
-        throw new Error(name + ' needs runtime Java subclassing, which does not exist on iOS');
-    };
-}
+// `text_formatting` (implemented above in full) and `classes`. The second is
+// Java subclassing through DexMaker on Android; here the same intent is served
+// by the Objective-C runtime through the host's `buildClass` bridge, and the
+// decorators record the shape a plugin declared so the builder can turn it into
+// a real subclass.
 
 var extera_utils = {
     text_formatting: {
@@ -2815,8 +3767,10 @@ var extera_utils = {
         },
     },
     classes: {
-        // Decorators record the intent and return the function/decorated member
-        // unchanged; nothing can be generated without a Java runtime.
+        // The decorators record what the plugin declared. On Android they fed a
+        // DexMaker builder; here the same notes drive `jclassbuilder`, which asks
+        // the host to allocate a real subclass. Each returns its target so the
+        // declarations can be chained the way the SDK's examples write them.
         Base: function () {},
         java_subclass: function (clazz) {
             return function (target) {
@@ -2832,7 +3786,39 @@ var extera_utils = {
         jpreconstructor: function () { return function (target) { return target; }; },
         jMVELmethod: function () { return function (target) { return target; }; },
         jMVELoverride: function () { return function (target) { return target; }; },
-        jclassbuilder: function () { return unsupportedClass('jclassbuilder'); },
+        // Builds a real subclass at runtime, the iOS shape of DexMaker's builder.
+        //
+        // Called as `jclassbuilder(superclassName, { selector: fn, ... })`. Each
+        // value that is a function becomes a method on the subclass. Returns the
+        // generated class's name, which `makeInstance` takes, or throws when the
+        // superclass is not loaded. The construction itself goes through
+        // `__extera.buildClass`, which owns the callback tokens and the host call.
+        //
+        // Only the method ABI "receiver, up to two object arguments, object
+        // return" can be represented by the runtime's block form; a selector
+        // outside that shape is added anyway and reports its mismatch when called,
+        // which is the same latitude the Android builder gives.
+        jclassbuilder: function (superclassName, methods) {
+            var result = __extera.buildClass(superclassName, methods);
+            if (!result || !result.ok) {
+                var reason = result && result.error ? result.error : 'runtime class building failed';
+                __extera.log('jclassbuilder: ' + reason);
+                var refusing = function () { throw new Error(reason); };
+                refusing.__objc_class_name__ = null;
+                return refusing;
+            }
+            var Built = function () {
+                // The proxy's own fields live on the instance; a method's `this`
+                // is that instance, so this is where a plugin attaches state.
+            };
+            Built.__objc_class_name__ = result.name;
+            return Built;
+        },
+        // Instantiates a class `jclassbuilder` made. Returns nil for a name this
+        // runtime did not generate.
+        makeInstance: function (className) {
+            return __extera.makeInstanceClass(className);
+        },
         jgetmethod: function (name) {
             return function (self) { return self ? self[name] : undefined; };
         },
@@ -2886,3 +3872,523 @@ var TLRPC = {
     TL_messageEntityBlockquote: messageEntityClass('Blockquote', { collapsed: false }),
     TL_messageEntityCustomEmoji: messageEntityClass('CustomEmoji', { document_id: '0' }),
 };
+
+// --- Multi-file plugins (Elyx) -------------------------------------------
+//
+// An Elyx project is a directory with an entry module and siblings it imports.
+// The host hands over the text of a file; the compile, the cache and the
+// resolution live here, in JavaScript, which is where a module loader belongs.
+//
+// What is ported: the archive shape, `metainfo`, `refmap`, several source
+// files, `assets`, `strings`, and per-plugin isolation. What is not: Elyx's
+// Python modules (`import_module` with Python semantics, bundled wheels,
+// `mvel_execute`, `gen`/`gen2` Java proxies). A plugin that needs those is
+// Python, and the loader already tells that apart.
+
+var __exteraModules = {};
+
+function __exteraModulePath(from, request) {
+    // Node-style resolution: `./x` and `../x` are relative to the importer,
+    // `x` is relative to the plugin root. The result is a normalised path with
+    // no `.` or `..` left, so the cache key is stable across importers.
+    var base = from ? from.replace(/\/[^\/]*$/, '') : '';
+    var combined = request.charAt(0) === '.' ? (base + '/' + request) : request;
+    var parts = combined.split('/');
+    var stack = [];
+    for (var i = 0; i < parts.length; i += 1) {
+        var part = parts[i];
+        if (part === '' || part === '.') {
+            continue;
+        }
+        if (part === '..') {
+            stack.pop();
+            continue;
+        }
+        stack.push(part);
+    }
+    return stack.join('/');
+}
+
+function __exteraResolveModule(from, request) {
+    if (!hasBridge('moduleExists') || !hasBridge('readModule')) {
+        return null;
+    }
+    var path = __exteraModulePath(from, request);
+    var candidates = [path];
+    if (!/\.(js|json)$/.test(path)) {
+        candidates.push(path + '.js');
+        candidates.push(path + '.json');
+        candidates.push(path + '/index.js');
+    }
+    for (var i = 0; i < candidates.length; i += 1) {
+        var candidate = candidates[i];
+        if (host().moduleExists(pluginId, candidate)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+// Compiles and caches one module. A cycle is caught rather than recursed into:
+// the importing module is recorded before its body runs, so a module that
+// imports one which imports it back receives the partial exports object instead
+// of a stack overflow, which is what Node does and what a port expects.
+function __exteraLoadModule(from, request) {
+    var path = __exteraResolveModule(from, request);
+    if (path === null) {
+        throw new Error('cannot find module "' + request + '"' + (from ? ' from "' + from + '"' : ''));
+    }
+    if (Object.prototype.hasOwnProperty.call(__exteraModules, path)) {
+        return __exteraModules[path].exports;
+    }
+    var source = host().readModule(pluginId, path);
+    if (source === null || source === undefined) {
+        throw new Error('module "' + path + '" could not be read');
+    }
+    var record = { exports: {}, loaded: false };
+    __exteraModules[path] = record;
+
+    if (/\.json$/i.test(path)) {
+        try {
+            record.exports = JSON.parse(source);
+        } catch (error) {
+            throw new Error('module "' + path + '" is not valid JSON: ' + error.message);
+        }
+        record.loaded = true;
+        return record.exports;
+    }
+
+    var module = { exports: record.exports, id: path };
+    var require = function (name) {
+        return __exteraLoadModule(path, name);
+    };
+    require.resolve = function (name) {
+        var resolved = __exteraResolveModule(path, name);
+        if (resolved === null) {
+            throw new Error('cannot find module "' + name + '"');
+        }
+        return resolved;
+    };
+    // `module` and `exports` are the two names a CommonJS module body expects;
+    // the file is evaluated in this scope, not through `eval`, so a syntax
+    // error names the module and the thrown error keeps its stack.
+    var factory = new Function('module', 'exports', 'require', '__filename', '__dirname', source + '\n');
+    try {
+        factory(module, record.exports, require, path, path.replace(/\/[^\/]*$/, ''));
+    } catch (error) {
+        delete __exteraModules[path];
+        throw error;
+    }
+    record.exports = module.exports;
+    record.loaded = true;
+    return module.exports;
+}
+
+// The entry module is `main.js` for an Elyx project (`main.plugin` for a
+// single-file plugin, which the host evaluates directly). The plugin body the
+// host hands over is the entry itself, so its own relative imports resolve from
+// the project root.
+function __exteraRequire(request) {
+    return __exteraLoadModule(entryModulePath, request);
+}
+
+var entryModulePath = null;
+
+// --- assets --------------------------------------------------------------
+//
+// `from elyx import assets` binds a collection to the project's asset
+// directory. Attribute and item lookup both normalise the stem
+// (`empty-state.svg` → `empty_state`), and the content is read through the same
+// host file bridge `file_utils` uses, so a bundled asset is read-only in
+// exactly the way the SDK documents.
+
+function __exteraAssetCollection(root) {
+    var cache = {};
+    var collection = {};
+
+    function normalize(stem) {
+        return String(stem).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    }
+
+    function locate(name) {
+        if (Object.prototype.hasOwnProperty.call(cache, name)) {
+            return cache[name];
+        }
+        var resolved = null;
+        var direct = root + '/' + name;
+        if (__exteraFileExists(direct)) {
+            resolved = direct;
+        } else {
+            var normalized = normalize(name);
+            var members = __exteraListDir(root);
+            for (var i = 0; i < members.length; i += 1) {
+                var entryName = members[i].name;
+                var stem = entryName.replace(/\.[^.]+$/, '');
+                if (normalize(stem) === normalized || entryName === name) {
+                    resolved = members[i].path;
+                    break;
+                }
+            }
+        }
+        cache[name] = resolved;
+        return resolved;
+    }
+
+    function assetFor(name) {
+        var path = locate(name);
+        if (path === null) {
+            return null;
+        }
+        var asset = {
+            __path__: path,
+            name: String(name),
+            content_bytes: function () { return __exteraFileValue('read_bytes', path, null); },
+            content_string: function () { return __exteraFileValue('read_text', path, null); },
+            content_json: function () {
+                var text = __exteraFileValue('read_text', path, null);
+                if (text === null || text === undefined) { return null; }
+                try { return JSON.parse(text); } catch (error) { return null; }
+            },
+            content_yaml: function () {
+                // The runtime has no JavaScript YAML reader; the host parses the
+                // two files an Elyx archive is described by, and a plugin asset
+                // that is YAML comes back as text plus a null, matching the
+                // documented "returns null on failure".
+                return null;
+            },
+            content: function () {
+                if (/\.(json)$/i.test(path)) { return asset.content_json(); }
+                var text = __exteraFileValue('read_text', path, null);
+                return text === null || text === undefined ? asset.content_bytes() : text;
+            },
+        };
+        // The Android image helpers have no iOS counterpart: there is no
+        // `Drawable`, `BitmapDrawable`, SVG or Lottie decoder reachable from a
+        // plugin. The methods exist so a port that calls one fails at the call
+        // with the reason rather than at the property read.
+        asset.to_drawable = function () { throw new Error('assets.to_drawable needs Android Drawable, which does not exist on iOS'); };
+        asset.to_image_location = function () { throw new Error('assets.to_image_location needs Android ImageLocation, which does not exist on iOS'); };
+        asset.to_bitmap_drawable = function () { throw new Error('assets.to_bitmap_drawable needs Android Bitmap, which does not exist on iOS'); };
+        asset.to_svg_drawable = function () { throw new Error('assets.to_svg_drawable needs Android SVG, which does not exist on iOS'); };
+        asset.to_svg_bitmap = function () { throw new Error('assets.to_svg_bitmap needs Android SVG, which does not exist on iOS'); };
+        asset.to_lottie_drawable = function () { throw new Error('assets.to_lottie_drawable needs Android Lottie, which does not exist on iOS'); };
+        asset.to_svg_thumb = function () { throw new Error('assets.to_svg_thumb needs Android themes, which do not exist on iOS'); };
+        return asset;
+    }
+
+    collection.get = function (name, fallback) {
+        var asset = assetFor(name);
+        return asset === null ? (fallback === undefined ? null : fallback) : asset;
+    };
+    collection.path = function (name) { return locate(name); };
+    collection.load = function (name) { return assetFor(name); };
+    collection[Symbol.iterator] = function () {
+        var members = __exteraListDir(root);
+        var index = 0;
+        return {
+            next: function () {
+                if (index >= members.length) { return { done: true }; }
+                var member = members[index];
+                index += 1;
+                return { done: false, value: assetFor(member.name) };
+            },
+        };
+    };
+
+    // Attribute access (`assets.logo`) and item access (`assets["logo.svg"]`)
+    // both go through the same lookup, so a stem that is not a valid identifier
+    // is still reachable by its full name.
+    return new Proxy(collection, {
+        get: function (target, prop) {
+            if (typeof prop === 'symbol' || prop in target) {
+                return target[prop];
+            }
+            var asset = assetFor(String(prop));
+            if (asset !== null) {
+                return asset;
+            }
+            // A nested path: `assets.icons.add` reaches `icons/add.*`.
+            if (__exteraDirExists(root + '/' + prop)) {
+                return __exteraAssetCollection(root + '/' + prop);
+            }
+            return undefined;
+        },
+    });
+}
+
+function __exteraFileValue(op, path, payload) {
+    return __extera.fileValue(op, path, payload === undefined ? null : payload);
+}
+
+function __exteraFileExists(path) {
+    var value = __extera.fileValue('exists', path, null);
+    return value === true;
+}
+
+function __exteraDirExists(path) {
+    var value = __extera.fileValue('is_dir', path, null);
+    return value === true;
+}
+
+function __exteraListDir(path) {
+    try {
+        // `list_dir` answers with paths relative to the directory, so a nested
+        // entry keeps its slash. The same list feeds both asset lookup and
+        // module probing, both of which only need the name.
+        var raw = __extera.fileValue('list_dir', path, JSON.stringify({ include_files: true, include_dirs: false }));
+        if (Array.isArray(raw)) {
+            return raw.map(function (item) {
+                var text = typeof item === 'string' ? item : String(item);
+                return { name: text.replace(/^.*\//, ''), path: path + '/' + text };
+            });
+        }
+    } catch (error) {
+        // A missing directory lists as empty rather than throwing, so a plugin
+        // that probes for optional assets does not have to catch.
+    }
+    return [];
+}
+
+// --- strings -------------------------------------------------------------
+//
+// `from elyx import strings` binds a catalog. Fallback order is the SDK's:
+// selected locale → English → the key itself. A missing catalog is an object
+// that returns the key, so every call site reads the same whether translations
+// shipped or not.
+
+function __exteraStringCollection(catalogs, locale) {
+    var current = catalogs[locale] || {};
+    var english = catalogs.en || {};
+
+    function format(template, args, named) {
+        var text = String(template);
+        text = text.replace(/\{(\w+)\}/g, function (match, key) {
+            if (named && Object.prototype.hasOwnProperty.call(named, key)) {
+                return String(named[key]);
+            }
+            return match;
+        });
+        if (args && args.length) {
+            var index = 0;
+            text = text.replace(/\{(\d*)\}/g, function (match, position) {
+                var slot = position === '' ? index : parseInt(position, 10);
+                if (slot >= 0 && slot < args.length) {
+                    if (position === '') { index += 1; }
+                    return String(args[slot]);
+                }
+                return match;
+            });
+        }
+        return text;
+    }
+
+    function lookup(key, fallback) {
+        if (Object.prototype.hasOwnProperty.call(current, key)) {
+            return current[key];
+        }
+        if (Object.prototype.hasOwnProperty.call(english, key)) {
+            return english[key];
+        }
+        return fallback === undefined ? key : fallback;
+    }
+
+    var collection = {};
+    collection.__catalogs__ = catalogs;
+    collection.locale = locale;
+    collection.get = function (key, fallback) { return lookup(key, fallback); };
+    collection.get_with_locale = function (key, options) {
+        var target = (options && options.locale) || locale;
+        var catalog = catalogs[target] || english;
+        if (Object.prototype.hasOwnProperty.call(catalog, key)) { return catalog[key]; }
+        if (Object.prototype.hasOwnProperty.call(english, key)) { return english[key]; }
+        return key;
+    };
+    collection.pluralize = function (count, key) {
+        var forms = lookup(key, null);
+        if (!forms) { return String(count); }
+        if (Array.isArray(forms)) {
+            if (forms.length >= 3) {
+                var n = Math.abs(count) % 100;
+                var last = n % 10;
+                if (n > 10 && n < 20) { return forms[2]; }
+                if (last > 1 && last < 5) { return forms[1]; }
+                if (last === 1) { return forms[0]; }
+                return forms[2];
+            }
+            return forms[count === 1 ? 0 : Math.min(1, forms.length - 1)];
+        }
+        return String(forms);
+    };
+    var callable = function (key, first, second) {
+        var template = lookup(key, null);
+        if (template === null) { return key; }
+        if (first && typeof first === 'object' && !Array.isArray(first) && !(second instanceof Array)) {
+            return format(template, [], first);
+        }
+        var args = [];
+        for (var i = 1; i < arguments.length; i += 1) {
+            args.push(arguments[i]);
+        }
+        return format(template, args, null);
+    };
+    return new Proxy(callable, {
+        get: function (target, prop) {
+            if (typeof prop === 'symbol') { return target[prop]; }
+            if (prop in target) { return target[prop]; }
+            var value = lookup(String(prop), undefined);
+            return value;
+        },
+        apply: function (target, thisArg, args) {
+            return target.apply(thisArg, args);
+        },
+    });
+}
+
+// --- elyx facade ---------------------------------------------------------
+
+// `settings` is the SDK's `SettingsController`: the same storage `BasePlugin`
+// reads and writes, exposed as an object with get/set, item access and a
+// `reload_settings` flag. It is bound to the plugin's id, so a plugin that
+// imports `settings` from `elyx` and one that calls `self.get_setting` see the
+// same values.
+function __exteraSettingsController() {
+    function read() {
+        if (!hasBridge('exportSettings')) {
+            return {};
+        }
+        var value = host().exportSettings(pluginId);
+        return value && typeof value === 'object' ? value : {};
+    }
+
+    function write(key, value, reload) {
+        bridgeMissing('setSetting')(pluginId, String(key), value, !!reload);
+    }
+
+    var controller = {
+        get_setting: function (key, fallback) {
+            var all = read();
+            var value = all[key];
+            return value === undefined || value === null ? (fallback === undefined ? null : fallback) : value;
+        },
+        set_setting: function (key, value, reloadSettings) {
+            write(key, value, reloadSettings);
+        },
+        get_settings: function () {
+            return read();
+        },
+        clear_settings: function () {
+            var all = read();
+            for (var key in all) {
+                if (Object.prototype.hasOwnProperty.call(all, key)) {
+                    write(key, null, false);
+                }
+            }
+        },
+    };
+    return new Proxy(controller, {
+        get: function (target, prop) {
+            if (typeof prop === 'symbol' || prop in target) {
+                return target[prop];
+            }
+            return read()[String(prop)];
+        },
+        set: function (target, prop, value) {
+            if (prop in target) {
+                target[prop] = value;
+                return true;
+            }
+            write(prop, value, false);
+            return true;
+        },
+    });
+}
+
+var elyx = {
+    // Bound collections; the loader fills these in before the plugin body runs
+    // when the archive declares the directories.
+    assets: null,
+    strings: null,
+    settings: null,
+    metainfo: null,
+    refmap: null,
+    get_environment: function () {
+        var environment = { settings: elyx.settings };
+        if (elyx.assets) { environment.assets = elyx.assets; }
+        if (elyx.strings) { environment.strings = elyx.strings; }
+        if (elyx.metainfo) { environment.metainfo = elyx.metainfo; }
+        if (elyx.refmap) { environment.refmap = elyx.refmap; }
+        return environment;
+    },
+    import_module: function (name) {
+        return __exteraRequire(name);
+    },
+    Asset: {
+        from_path: function (path) {
+            path = String(path);
+            return {
+                __path__: path,
+                content_bytes: function () { return __exteraFileValue('read_bytes', path, null); },
+                content_string: function () { return __exteraFileValue('read_text', path, null); },
+                content: function () {
+                    var text = __exteraFileValue('read_text', path, null);
+                    return text === null || text === undefined ? __exteraFileValue('read_bytes', path, null) : text;
+                },
+                content_json: function () {
+                    var text = __exteraFileValue('read_text', path, null);
+                    try { return JSON.parse(text); } catch (error) { return null; }
+                },
+            };
+        },
+        temp_asset_from_url: function (url, filename, on_ready, on_error) {
+            // The SDK's form is synchronous, which would block the plugin queue
+            // on a socket. Here the download is asynchronous: it goes through the
+            // same http bridge every other request uses and the written file is
+            // handed to `on_ready` as an Asset. A caller that passes no callback
+            // gets the reason rather than a silent no-op.
+            if (typeof on_ready !== 'function') {
+                throw new Error('Asset.temp_asset_from_url on iOS is asynchronous: pass on_ready(asset) as the third argument');
+            }
+            var name = filename === undefined || filename === null
+                ? String(url).replace(/^.*\//, '').replace(/[?#].*$/, '') || 'asset'
+                : String(filename);
+            __extera.requestAssetDownload(String(url), name, function (path) {
+                if (!path) {
+                    if (typeof on_error === 'function') { on_error(String(url)); }
+                    return;
+                }
+                on_ready(elyx.Asset.from_path(path));
+            });
+            return null;
+        },
+    },
+    mvel_execute: function () {
+        throw new Error('mvel_execute needs the MVEL engine on Android, which does not exist on iOS');
+    },
+    // `gen`/`gen2` build a Java proxy for an interface. There is no Java
+    // interface to implement here, so the constructor refuses; a plugin that
+    // needs a listener object builds an Objective-C subclass through
+    // `extera_utils.classes.jclassbuilder` instead.
+    gen: function () { throw new Error('gen needs a Java proxy, which does not exist on iOS; use extera_utils.classes.jclassbuilder'); },
+    gen2: function () { throw new Error('gen2 needs a Java proxy, which does not exist on iOS; use extera_utils.classes.jclassbuilder'); },
+    Callback: function (fn) { return fn; },
+    Callback2: function (fn) { return fn; },
+    Callback3: function (fn) { return fn; },
+    CallbackReturn: function (fn) { return fn; },
+    OnClickListener: function (fn) { return fn; },
+    Runnable: function (fn) { return fn; },
+    LazyDict: function (factory) { return factory(); },
+};
+
+function __exteraInstallElyx(descriptor) {
+    entryModulePath = descriptor.main || null;
+    if (descriptor.assets_root) {
+        elyx.assets = __exteraAssetCollection(descriptor.assets_root);
+    }
+    if (descriptor.strings) {
+        elyx.strings = __exteraStringCollection(descriptor.strings.catalogs || {}, descriptor.strings.locale || 'en');
+    }
+    elyx.metainfo = descriptor.metainfo || null;
+    elyx.refmap = descriptor.refmap || null;
+    elyx.settings = __exteraSettingsController();
+}
+

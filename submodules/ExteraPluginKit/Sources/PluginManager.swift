@@ -108,6 +108,18 @@ public final class PluginManager: PluginHost {
         return self.jsQueue.sync(execute: body)
     }
 
+    /// The same entry point, visible to `PluginSwizzle`.
+    ///
+    /// A swizzled method runs on whatever thread called it — the main thread for
+    /// UI, the network queue for a callback — and has to re-enter plugin
+    /// JavaScript, which is only safe on the script queue. This blocks that
+    /// caller until the plugin's `before`/`after` has run, which is what an
+    /// Xposed hook does too: the hooked method does not proceed until the hook
+    /// returns.
+    public func runOnJSQueueAndWait(_ body: () -> Void) {
+        _ = self.withJSQueue(body)
+    }
+
     /// Like `withJSQueue` but never blocks the caller.
     ///
     /// Used for work that originates on the main thread and has no result the
@@ -304,6 +316,12 @@ public final class PluginManager: PluginHost {
         self.cachedDeletedMessagesHook = nil
         self.cachedForgetDeletedMessagesHook = nil
         self.lock.unlock()
+
+        // Swizzled methods are installed in the Objective-C runtime, not in a
+        // `JSContext`, so they outlive the context that owns them. A removed
+        // plugin's block would otherwise keep running and keep a dead context
+        // alive. Restoring the original IMPs here is what makes unload complete.
+        PluginSwizzle.shared.removeAll()
     }
 
     public var loadedPlugins: [LoadedPlugin] {
@@ -760,6 +778,173 @@ public final class PluginManager: PluginHost {
         return PluginFileAccess.perform(pluginId: pluginId, op: op, path: path, payload: payload)
     }
 
+    /// Reads a sibling module for the multi-file loader.
+    ///
+    /// Resolution is confined to the plugin's own directory. `path` may carry
+    /// `./` and `../` from relative imports, so it is normalised and then checked
+    /// against the directory: a resolved path outside it reads nothing, which is
+    /// what keeps `require('../../other_plugin/main')` from crossing between
+    /// plugins. The text is returned as-is; whether it is valid JavaScript is
+    /// decided by the context that evaluates it, which reports a syntax error
+    /// with the file name attached.
+    public func pluginReadModule(pluginId: String, path: String) -> String? {
+        guard let url = self.moduleURL(pluginId: pluginId, path: path) else {
+            return nil
+        }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    public func pluginModuleExists(pluginId: String, path: String) -> Bool {
+        guard let url = self.moduleURL(pluginId: pluginId, path: path) else {
+            return false
+        }
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+    }
+
+    /// Whether an Objective-C class with this name is loaded.
+    ///
+    /// `NSClassFromString` is exactly what `PluginSwizzle` uses to resolve a
+    /// hook target, so the answer a plugin gets from `find_class` and the one the
+    /// install gets cannot disagree.
+    public func pluginClassExists(pluginId: String, className: String) -> Bool {
+        return NSClassFromString(className) != nil
+    }
+
+    /// Runs the plugins' global intent before-handlers for a URL that is about to
+    /// be opened, and answers whether one of them stopped it.
+    ///
+    /// The client calls this from `handleOpenURL` before it hands the URL to its
+    /// own opener. `true` means a plugin registered a before-handler that matches
+    /// this URL and returned `true`, which on Android is `param.setResult(true)`
+    /// stopping the original handling; the client then does not open the URL.
+    ///
+    /// Ordering: plugins are asked in load order and the first `true` short-
+    /// circuits, because once the URL is stopped there is nothing more to stop.
+    /// Each plugin's own handlers are already sorted by ascending priority.
+    public func dispatchUrlIntent(url: String) -> Bool {
+        for plugin in self.loadedPlugins {
+            guard plugin.isEnabled else {
+                continue
+            }
+            if let answer = self.callJS(plugin: plugin, function: "__extera.dispatchUrlIntent", arguments: [url]), answer == "true" {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Runs the plugins' global intent after-handlers once the URL has been
+    /// handled. Never stops anything; a throw is logged and the rest still run.
+    public func dispatchUrlIntentAfter(url: String) {
+        for plugin in self.loadedPlugins {
+            guard plugin.isEnabled else {
+                continue
+            }
+            _ = self.callJS(plugin: plugin, function: "__extera.dispatchUrlIntentAfter", arguments: [url])
+        }
+    }
+
+    /// Builds a runtime subclass, the host half of `jclassbuilder`.
+    ///
+    /// Answers a class name on success and a `"!"`-prefixed reason on failure.
+    /// The bridge carries one string, and a plugin that asked for a subclass of a
+    /// class this build does not have should log why, not catch an exception
+    /// across the JavaScriptCore boundary.
+    public func pluginBuildClass(pluginId: String, superclassName: String, methodsJSON: String, context: JSContext) -> String {
+        var specs: [PluginClassProxy.MethodSpec] = []
+        if let data = methodsJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let parsed = object as? [[String: Any]] {
+            for entry in parsed {
+                guard let selector = entry["selector"] as? String, let token = entry["token"] as? String else {
+                    continue
+                }
+                specs.append(PluginClassProxy.MethodSpec(selector: selector, token: token))
+            }
+        }
+        do {
+            return try PluginClassProxy.shared.build(
+                ownerId: pluginId,
+                superclassName: superclassName,
+                methods: specs,
+                context: context
+            )
+        } catch {
+            return "!" + String(describing: error)
+        }
+    }
+
+    /// Instantiates a class `pluginBuildClass` built. Only classes this runtime
+    /// made can be instantiated through here.
+    public func pluginMakeClassInstance(pluginId: String, className: String) -> AnyObject? {
+        return PluginClassProxy.shared.makeInstance(className: className)
+    }
+
+    /// Opens the screen a settings row's `link_alias` names.
+    ///
+    /// The alias is the SDK's own vocabulary (`plugins`, `appearance`,
+    /// `notifications`, ...). Only the ones this app actually has are honoured;
+    /// an unknown name is logged and ignored, because opening the wrong screen
+    /// is worse than a row that does nothing.
+    public func pluginOpenSettingLink(pluginId: String, alias: String) {
+        let normalised = alias.trimmingCharacters(in: .whitespaces).lowercased()
+        switch normalised {
+        case "plugins", "plugin_settings":
+            self.actions?.openPluginSettings()
+        default:
+            self.pluginLog(pluginId: pluginId, text: "link_alias \"\(alias)\" has no matching screen on iOS")
+        }
+    }
+
+    /// Installs an Objective-C swizzle for a plugin, through `PluginSwizzle`.
+    ///
+    /// The plugin gives a class and a selector and gets `before`/`after`
+    /// callbacks, which is the iOS shape of an Xposed hook. A class or a method
+    /// that does not exist is answered with a reason, not a thrown error across
+    /// the bridge: a ported plugin usually hooks several methods and wants to
+    /// log the ones this build does not have and keep going.
+    public func pluginInstallSwizzle(
+        pluginId: String,
+        className: String,
+        selector: String,
+        isClassMethod: Bool,
+        beforeToken: String?,
+        afterToken: String?,
+        context: JSContext
+    ) -> String? {
+        let hook = PluginSwizzle.Hook(
+            pluginId: pluginId,
+            className: className,
+            selectorName: selector,
+            isClassMethod: isClassMethod,
+            context: context,
+            beforeToken: beforeToken,
+            afterToken: afterToken
+        )
+        do {
+            try PluginSwizzle.shared.install(hook)
+            return nil
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    /// Resolves a module path inside one plugin's directory, or nil when the
+    /// result would leave it.
+    private func moduleURL(pluginId: String, path: String) -> URL? {
+        let base = self.store.directory(for: pluginId).standardizedFileURL
+        let candidate = base.appendingPathComponent(path).standardizedFileURL
+        let basePath = base.path.hasSuffix("/") ? base.path : base.path + "/"
+        // The entry module itself resolves to the directory, which is not a
+        // file; `hasPrefix` on the directory plus a separator rejects a bare
+        // `..` that lands exactly on the parent without rejecting the base.
+        guard candidate.path == base.path || candidate.path.hasPrefix(basePath) else {
+            return nil
+        }
+        return candidate
+    }
+
     public func pluginSelectedAccount(pluginId: String) -> Int64? {
         return self.actions?.selectedAccountId()
     }
@@ -841,6 +1026,14 @@ public final class PluginManager: PluginHost {
         actions.httpGet(pluginId: pluginId, url: url, headersJSON: headersJSON, timeout: timeout, callbackToken: callbackToken)
     }
 
+    public func pluginHttpRequest(pluginId: String, method: String, url: String, headersJSON: String, bodyBase64: String?, timeout: Double, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.httpRequest(pluginId: pluginId, method: method, url: url, headersJSON: headersJSON, bodyBase64: bodyBase64, timeout: timeout, callbackToken: callbackToken)
+    }
+
     public func pluginProxyList(pluginId: String, callbackToken: String) {
         guard let actions = self.actions else {
             self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
@@ -871,6 +1064,22 @@ public final class PluginManager: PluginHost {
             return
         }
         actions.ownPeerId(pluginId: pluginId, account: account, callbackToken: callbackToken)
+    }
+
+    public func pluginPeerInfo(pluginId: String, account: Int64?, peerId: Int64, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.peerInfo(pluginId: pluginId, account: account, peerId: peerId, callbackToken: callbackToken)
+    }
+
+    public func pluginChatMessages(pluginId: String, account: Int64?, peerId: Int64, limit: Int, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.chatMessages(pluginId: pluginId, account: account, peerId: peerId, limit: limit, callbackToken: callbackToken)
     }
 
     // MARK: - Plugin-visible callbacks
@@ -1826,10 +2035,23 @@ public protocol PluginActions: AnyObject {
     // `PluginManager.resolveBridgeCallback(pluginId:token:...)` — never
     // synchronously, and never by blocking the script queue.
     func httpGet(pluginId: String, url: String, headersJSON: String, timeout: Double, callbackToken: String)
+    func httpRequest(pluginId: String, method: String, url: String, headersJSON: String, bodyBase64: String?, timeout: Double, callbackToken: String)
+    /// Opens the app's own plugin settings screen, the target of a settings row
+    /// whose `link_alias` is `plugins`.
+    func openPluginSettings()
     func proxyList(pluginId: String, callbackToken: String)
     func proxyAdd(pluginId: String, linksJSON: String, callbackToken: String)
     func proxyRemoveAll(pluginId: String, callbackToken: String)
     func ownPeerId(pluginId: String, account: Int64?, callbackToken: String)
+
+    /// The profile of one peer, the data behind
+    /// `get_contacts_controller().get_peer(...)`. Answers through
+    /// `resolveBridgeCallback`; `peerId` is the signed numeric id a plugin
+    /// already uses elsewhere.
+    func peerInfo(pluginId: String, account: Int64?, peerId: Int64, callbackToken: String)
+    /// The most recent messages of one chat, the data behind
+    /// `get_messages_controller().get_messages(...)`. `limit` is the page size.
+    func chatMessages(pluginId: String, account: Int64?, peerId: Int64, limit: Int, callbackToken: String)
 
     /// Drops every in-flight bridge request.
     ///
