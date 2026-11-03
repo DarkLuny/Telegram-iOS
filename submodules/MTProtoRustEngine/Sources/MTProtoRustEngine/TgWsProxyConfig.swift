@@ -121,6 +121,11 @@ enum TgWsProxyConfig {
             return
         }
         self.engine = engine
+        // Snapshot what is there when the engine starts, so a document left by
+        // the previous run does not reset connections on the first poll — but a
+        // change made after this point always reaches the sessions, including
+        // one the plugin writes moments after launch.
+        self.lastConfigurationKey = self.current()?.configurationKey ?? "off"
         let timer = DispatchSource.makeTimerSource(queue: self.watcherQueue)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.5)
         timer.setEventHandler {
@@ -130,16 +135,16 @@ enum TgWsProxyConfig {
         self.watcherTimer = timer
     }
 
-    /// Only on `watcherQueue`. The first poll only records what is there, so
-    /// launching the app does not reset connections for no reason.
+    /// Only on `watcherQueue`. The key the previous poll saw is the one in the
+    /// stored document; a difference means the plugin rewrote it.
     private static func pollConfiguration() {
         let key = self.current()?.configurationKey ?? "off"
         self.watcherLock.lock()
-        let previous = self.lastConfigurationKey
+        let previous = self.lastConfigurationKey ?? "off"
         self.lastConfigurationKey = key
         let engine = self.engine
         self.watcherLock.unlock()
-        guard let previous = previous, previous != key else {
+        guard previous != key else {
             return
         }
         rustEngineImportantLog("[TGWSProxy] transport configuration changed: \(key)")
