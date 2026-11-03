@@ -30,11 +30,14 @@
  *   __host.proxyList(pluginId, token)
  *   __host.proxyAdd(pluginId, linksJson, token)
  *   __host.proxyRemoveAll(pluginId, token)
+ *   __host.localProxy(pluginId, requestJson, token)
+ *   __host.localProxyStatus(pluginId) -> json
  *   __host.ownPeerId(pluginId, account, token)
  *
  * The last five answer through `__extera.resolveBridge(token, json)` instead of
  * returning a value, because a socket or a database transaction cannot finish
- * inside the call.
+ * inside the call. `localProxyStatus` is the exception: it is synchronous
+ * because it only reads state the client already holds.
  *
  * `js/test/bootstrap.test.js` installs a fake `__host` with exactly this shape,
  * so a bridge the bootstrap calls but the test does not provide fails there
@@ -869,6 +872,43 @@ var __extera = (function () {
         var token = holdBridgeCallback(callback);
         bridgeMissing('proxyRemoveAll')(pluginId, token);
         return token;
+    }
+
+    // The local MTProxy the client runs for us.
+    //
+    // This is the one thing a plugin cannot do itself: iOS gives plugin
+    // JavaScript no sockets, so a plugin that wants a proxy asks the client to
+    // start one on 127.0.0.1. `request` is
+    // `{action: 'start' | 'stop' | 'status', domain: '<zone>'}` (the domain is
+    // only read by `start`), and the answer is
+    // `{ok, status: {running, host, port, domain, active, link[, error]}}`.
+    //
+    // `start` also adds the proxy entry to Telegram's own list and makes it the
+    // active proxy, which is why the entry the user sees appears there and why
+    // messages go through it without a restart. `stop` takes the entry away and
+    // returns to a direct connection only if that entry was the active one, so a
+    // proxy the user configured by hand is never disturbed.
+    function requestLocalProxy(request, callback) {
+        var token = holdBridgeCallback(callback);
+        bridgeMissing('localProxy')(pluginId, JSON.stringify(request || {}), token);
+        return token;
+    }
+
+    // The same status without waiting for a callback. A settings row is built
+    // synchronously, so this is what it uses; it never opens a socket.
+    function localProxyStatus() {
+        if (!hasBridge('localProxyStatus')) {
+            return { ok: false, running: false, error: 'this client build has no local proxy' };
+        }
+        var json = host().localProxyStatus(pluginId);
+        if (typeof json !== 'string') {
+            return { ok: false, running: false };
+        }
+        try {
+            return JSON.parse(json);
+        } catch (error) {
+            return { ok: false, running: false };
+        }
     }
 
     function requestOwnPeerId(account, callback) {
@@ -2335,6 +2375,8 @@ var __extera = (function () {
         requestProxyList: requestProxyList,
         requestProxyAdd: requestProxyAdd,
         requestProxyRemoveAll: requestProxyRemoveAll,
+        requestLocalProxy: requestLocalProxy,
+        localProxyStatus: localProxyStatus,
         requestOwnPeerId: requestOwnPeerId,
         parseText: parseText,
         // A `file_utils` call. The host answers with a JSON document, so the
@@ -3110,6 +3152,26 @@ var proxy = {
     // means the list the user sees in settings.
     remove_all: function (callback) {
         return __extera.requestProxyRemoveAll(callback);
+    },
+
+    // Starts the client's own MTProto proxy on 127.0.0.1 for `domain` (a
+    // CloudFlare zone whose `kws<dc>.<domain>` names answer), adds the entry to
+    // the list, and makes it active. `domain` is optional when a proxy is already
+    // running: the call then only restores the entry.
+    local_start: function (domain, callback) {
+        return __extera.requestLocalProxy({ action: 'start', domain: domain === undefined ? '' : domain }, callback);
+    },
+
+    // Stops it and removes its entry, unless the user had since picked another
+    // proxy.
+    local_stop: function (callback) {
+        return __extera.requestLocalProxy({ action: 'stop' }, callback);
+    },
+
+    // `{ok, running, host, port, domain, active, link, error}` — synchronous,
+    // for a settings row.
+    local_status: function () {
+        return __extera.localProxyStatus();
     },
 
     own_peer_id: function (account, callback) {

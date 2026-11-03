@@ -1,12 +1,12 @@
 /*
- * Runs js/tg_ws_proxy.plugin through the real bootstrap against a fake __host,
- * with a fake Documents directory and a fake CloudFlare front.
+ * Runs js/tg_ws_proxy.plugin through the real bootstrap against a fake __host.
  *
- * The behaviour under test is the automatic one: enabling the plugin picks a
- * zone by itself and writes the document the client build reads, disabling it
- * removes the document, and the screen reports what the client confirmed. The
- * fake front answers through the bridge's token, the same way the host's
- * URLSession does.
+ * The behaviour under test is the automatic one, the reference app minus its
+ * button: loading with the switch on (or turning it on) picks a CloudFlare zone
+ * by itself, asks the client to run its local MTProxy for that zone, and reports
+ * exactly what the client answered. The native side is faked with the same
+ * request JSON and response shape PluginLocalProxy uses, so the plugin is
+ * checked against the real contract rather than a mock of its own invention.
  */
 const fs = require('fs');
 const path = require('path');
@@ -17,8 +17,7 @@ const dir = path.join(__dirname, '..', '..');
 const bootstrap = fs.readFileSync(path.join(dir, 'js', 'bootstrap.js'), 'utf8');
 const plugin = fs.readFileSync(path.join(dir, 'js', 'tg_ws_proxy.plugin'), 'utf8');
 
-const CONFIG_PATH = '/documents/tg_ws_proxy.json';
-const STATUS_PATH = '/documents/tg_ws_proxy_status.json';
+const LEGACY_PATH = '/documents/tg_ws_proxy.json';
 
 const DOMAINS = [
     'pclead.co.uk',
@@ -32,6 +31,17 @@ function makeHost(options) {
     options = options || {};
     const calls = [];
     const settings = Object.assign({}, options.settings || {});
+    const proxyStatus = {
+        ok: true,
+        running: false,
+        host: '127.0.0.1',
+        port: 1443,
+        domain: '',
+        active: false,
+        connections: 0,
+        upstreams: 0,
+        link: '',
+    };
     const state = {
         calls,
         settings,
@@ -41,6 +51,13 @@ function makeHost(options) {
         clipboard: [],
         opened: [],
         scheduled: [],
+        proxy: {
+            status: proxyStatus,
+            requests: [],
+            starts: [],
+            stops: 0,
+        },
+        supported: options.supported !== false,
     };
 
     const host = {
@@ -99,6 +116,57 @@ function makeHost(options) {
             );
         },
     };
+
+    if (state.supported) {
+        // The synchronous read a settings row uses.
+        host.localProxyStatus = () => JSON.stringify(Object.assign({}, proxyStatus));
+        // The asynchronous request: `{action, domain}` in, `{ok, status}` out,
+        // resolved through the token the bootstrap handed out.
+        host.localProxy = (id, requestJSON, token) => {
+            const request = JSON.parse(requestJSON || '{}');
+            state.proxy.requests.push(request);
+            let response;
+            if (request.action === 'start') {
+                if (options.startFails) {
+                    Object.assign(proxyStatus, {
+                        ok: false, running: false, domain: '', active: false, connections: 0, upstreams: 0,
+                        error: 'address already in use',
+                    });
+                    response = { ok: false, error: 'address already in use', status: Object.assign({}, proxyStatus) };
+                } else {
+                    Object.assign(proxyStatus, {
+                        ok: true,
+                        running: true,
+                        host: '127.0.0.1',
+                        port: options.port || 1443,
+                        domain: request.domain,
+                        active: options.startActive !== false,
+                        connections: options.connections || 0,
+                        upstreams: options.upstreams || 0,
+                        link: 'tg://proxy?server=127.0.0.1&port=' + (options.port || 1443) + '&secret=dd' + '00',
+                        error: undefined,
+                    });
+                    delete proxyStatus.error;
+                    state.proxy.starts.push(request.domain);
+                    response = { ok: true, status: Object.assign({}, proxyStatus) };
+                }
+            } else if (request.action === 'stop') {
+                Object.assign(proxyStatus, {
+                    running: false, domain: '', active: false, connections: 0, upstreams: 0, link: '',
+                });
+                state.proxy.stops += 1;
+                response = { ok: true, status: Object.assign({}, proxyStatus) };
+            } else {
+                response = { ok: true, status: Object.assign({}, proxyStatus) };
+            }
+            vm.runInContext(
+                '__extera.resolveBridge(' + JSON.stringify(token) + ', ' +
+                    JSON.stringify(JSON.stringify(response)) + ')',
+                state.context
+            );
+        };
+    }
+
     state.host = host;
     return state;
 }
@@ -137,11 +205,6 @@ function changeSetting(state, ctx, key, value) {
     ctx.__extera.invokeSettingCallback(key, 'change', JSON.stringify({ value: value }));
 }
 
-function configOf(state) {
-    const written = state.files[CONFIG_PATH];
-    return written ? JSON.parse(written) : null;
-}
-
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
@@ -150,7 +213,7 @@ test('metadata matches the plugin file', () => {
     const ctx = load(state);
     assert.strictEqual(ctx.__id__, 'tg_ws_proxy');
     assert.strictEqual(ctx.__name__, 'TG WS Proxy');
-    assert.strictEqual(ctx.__version__, '2.1.0');
+    assert.strictEqual(ctx.__version__, '3.0.0');
 });
 
 test('tg-ws-proxy zone list decodes to the five co.uk zones', () => {
@@ -172,12 +235,12 @@ test('the screen is the automatic one: no Apply, a default-on switch', () => {
     assert.ok(selector, 'no domain selector');
     assert.deepStrictEqual(Array.from(selector.items), ['Автоматически'].concat(DOMAINS));
     assert.ok(controls.some((c) => c.key === 'connect' && c.type === 'text'));
+    assert.ok(controls.some((c) => c.key === 'status' && c.type === 'text'));
     assert.ok(!controls.some((c) => c.type === 'text' && c.text === 'Применить'));
-    assert.ok(!controls.some((c) => c.key === 'restart_note'));
-    assert.ok(!(CONFIG_PATH in state.files));
+    assert.strictEqual(state.proxy.requests.length, 0, 'a disabled plugin started the proxy');
 });
 
-test('enabling connects by itself: probes every zone, takes the first that answers', () => {
+test('enabling connects by itself: probes every zone, starts the proxy on the first that answers', () => {
     const state = makeHost({
         settings: { enabled: false },
         front: (url) => (url.includes('pclead') ? { ok: false, status: 0 } : { ok: false, status: 404 }),
@@ -191,11 +254,12 @@ test('enabling connects by itself: probes every zone, takes the first that answe
         DOMAINS.map((d) => 'https://kws2.' + d + '/')
     );
     assert.ok(state.http.every((r) => r.timeout === 4));
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'offshor.co.uk' });
+    assert.deepStrictEqual(state.proxy.starts, ['offshor.co.uk']);
     assert.strictEqual(state.settings.last_domain, 'offshor.co.uk');
     assert.ok(state.bulletins.some((b) => b.kind === 'success' && b.text.includes('offshor.co.uk')), JSON.stringify(state.bulletins));
-    // The confirmation lands a couple of seconds later; one refresh is asked for.
-    assert.ok(state.scheduled.some((s) => s.delay === 4000), JSON.stringify(state.scheduled));
+    // The client connects a moment after the entry becomes active; one refresh
+    // is asked for so the row can show the live counters.
+    assert.ok(state.scheduled.some((s) => s.delay === 3000), JSON.stringify(state.scheduled));
 });
 
 test('a five-hundred answer from the edge is not a working zone', () => {
@@ -205,37 +269,63 @@ test('a five-hundred answer from the edge is not a working zone', () => {
     });
     const ctx = load(state);
     changeSetting(state, ctx, 'enabled', true);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'cakeisalie.co.uk' });
+    assert.deepStrictEqual(state.proxy.starts, ['cakeisalie.co.uk']);
 });
 
-test('auto mode with nothing reachable refuses to write and turns the switch back off', () => {
+test('nothing reachable still starts the proxy on the fallback route', () => {
     const state = makeHost({ settings: { enabled: false }, front: () => ({ ok: false, status: 0 }) });
     const ctx = load(state);
     changeSetting(state, ctx, 'enabled', true);
-    assert.ok(!(CONFIG_PATH in state.files), 'a dead route reached the file');
-    assert.strictEqual(state.settings.enabled, false);
-    assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('Ни один CF-домен')));
+    // The listener has its own fallbacks (Telegram's web front, then the
+    // datacenter address), so a failed probe must not leave the user without a
+    // transport — but the user is told the zone went unchecked.
+    assert.deepStrictEqual(state.proxy.starts, ['pclead.co.uk']);
+    assert.strictEqual(state.settings.enabled, true, 'the switch was turned off');
+    assert.ok(state.bulletins.some((b) => b.kind === 'info' && b.text.includes('не ответил')), JSON.stringify(state.bulletins));
+    assert.ok(!state.bulletins.some((b) => b.kind === 'success'), JSON.stringify(state.bulletins));
 });
 
-test('choosing a zone probes only that zone and applies it', () => {
+test('the status row reads the host: entry active and live counters', () => {
     const state = makeHost({
-        settings: { enabled: false },
-        front: () => ({ ok: false, status: 404 }),
+        settings: { enabled: true, last_domain: 'offshor.co.uk' },
+        connections: 2,
+        upstreams: 2,
     });
     const ctx = load(state);
+    assert.strictEqual(state.http.length, 0, 'a remembered zone was probed again');
+    assert.deepStrictEqual(state.proxy.starts, ['offshor.co.uk']);
+    const status = controlByKey(ctx, 'status');
+    assert.ok(status.subtext.includes('127.0.0.1:1443'), status.subtext);
+    assert.ok(status.subtext.includes('kws1…5.offshor.co.uk'), status.subtext);
+    assert.ok(status.subtext.includes('соединений: 2'), status.subtext);
+    assert.ok(status.subtext.includes('каналов: 2'), status.subtext);
+});
+
+test('a running proxy whose entry is not active is reported as such', () => {
+    const state = makeHost({
+        settings: { enabled: true, last_domain: 'pclead.co.uk' },
+        startActive: false,
+    });
+    const ctx = load(state);
+    assert.ok(controlByKey(ctx, 'status').subtext.includes('не активна'));
+});
+
+test('choosing a zone starts it at once, without a probe', () => {
+    const state = makeHost({ settings: { enabled: false } });
+    const ctx = load(state);
     changeSetting(state, ctx, 'zone_index', 3);
+    assert.strictEqual(state.proxy.starts.length, 0, 'a stopped plugin started something');
     changeSetting(state, ctx, 'enabled', true);
-    assert.deepStrictEqual(state.http.map((r) => r.url), ['https://kws2.cakeisalie.co.uk/']);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'cakeisalie.co.uk' });
+    assert.strictEqual(state.http.length, 0, 'an explicit zone was probed');
+    assert.deepStrictEqual(state.proxy.starts, ['cakeisalie.co.uk']);
 });
 
 test('a custom domain wins over the list and is normalised', () => {
-    const state = makeHost({ settings: { enabled: false }, front: () => ({ ok: true, status: 200 }) });
+    const state = makeHost({ settings: { enabled: false } });
     const ctx = load(state);
     changeSetting(state, ctx, 'custom_domain', '  Example.COM. ');
     changeSetting(state, ctx, 'enabled', true);
-    assert.deepStrictEqual(state.http.map((r) => r.url), ['https://kws2.example.com/']);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'example.com' });
+    assert.deepStrictEqual(state.proxy.starts, ['example.com']);
 });
 
 test('a custom domain that is not a hostname is refused', () => {
@@ -243,124 +333,89 @@ test('a custom domain that is not a hostname is refused', () => {
     const ctx = load(state);
     changeSetting(state, ctx, 'custom_domain', 'not a host/path');
     changeSetting(state, ctx, 'enabled', true);
-    assert.ok(!(CONFIG_PATH in state.files));
+    assert.strictEqual(state.proxy.starts.length, 0, 'an invalid domain reached the proxy');
+    assert.strictEqual(state.settings.enabled, false);
     assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('имя хоста')));
 });
 
-test('the connect row applies a custom domain even when the probe gets nothing', () => {
-    const state = makeHost({ settings: { enabled: false, custom_domain: 'mine.example' }, front: () => ({ ok: false, status: 0 }) });
+test('the connect row starts a custom domain without a probe', () => {
+    const state = makeHost({ settings: { enabled: false, custom_domain: 'mine.example' } });
     const ctx = load(state);
     clickKey(ctx, 'connect');
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'mine.example' });
+    assert.deepStrictEqual(state.proxy.starts, ['mine.example']);
     assert.strictEqual(state.settings.enabled, true);
-    assert.ok(state.bulletins.some((b) => b.text.includes('не ответил')), JSON.stringify(state.bulletins));
+    assert.ok(state.bulletins.some((b) => b.kind === 'success' && b.text.includes('mine.example')), JSON.stringify(state.bulletins));
 });
 
-test('switching off removes the document and says so', () => {
-    const state = makeHost({
-        settings: { enabled: true },
-        files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }) },
-        front: () => ({ ok: true, status: 200 }),
-    });
+test('switching off stops the host proxy and returns to the direct route', () => {
+    const state = makeHost({ settings: { enabled: true, last_domain: 'pclead.co.uk' } });
     const ctx = load(state);
-    assert.ok(CONFIG_PATH in state.files);
+    assert.strictEqual(state.proxy.starts.length, 1);
     changeSetting(state, ctx, 'enabled', false);
-    assert.ok(!(CONFIG_PATH in state.files), 'the config survived');
+    assert.strictEqual(state.proxy.stops, 1);
     assert.ok(state.bulletins.some((b) => b.kind === 'info' && b.text.includes('Выключено')));
 });
 
-test('loading with an existing document probes nothing and keeps the choice', () => {
-    const state = makeHost({
-        settings: {},
-        files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'lovetrue.co.uk' }) },
-    });
+test('an unsupported client build is reported, not faked', () => {
+    const state = makeHost({ settings: {}, supported: false });
     const ctx = load(state);
-    assert.strictEqual(state.http.length, 0);
-    const controls = settingsOf(ctx);
-    assert.strictEqual(controls.find((c) => c.key === 'enabled').value, true);
-    // An automatic choice stays automatic, so the next enable picks again
-    // instead of probing only the zone chosen last time.
-    assert.strictEqual(controls.find((c) => c.key === 'zone_index').value, 0);
-    assert.strictEqual(controls.find((c) => c.key === 'custom_domain').value, '');
-    assert.ok(controlByKey(ctx, 'status').subtext.includes('kws1…5.lovetrue.co.uk'));
+    assert.ok(controlByKey(ctx, 'status').subtext.includes('не умеет локальный прокси'));
+    assert.strictEqual(state.proxy.starts.length, 0);
+    assert.ok(!state.bulletins.some((b) => b.kind === 'success'));
 });
 
-test('a document with a custom zone is reported on the status row', () => {
-    const state = makeHost({
-        settings: {},
-        files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'my.zone.example' }) },
-    });
+test('a host failure turns the switch off instead of claiming success', () => {
+    const state = makeHost({ settings: { enabled: false }, startFails: true });
     const ctx = load(state);
-    assert.ok(controlByKey(ctx, 'status').subtext.includes('kws1…5.my.zone.example'));
+    changeSetting(state, ctx, 'enabled', true);
+    assert.strictEqual(state.settings.enabled, false);
+    assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('address already in use')), JSON.stringify(state.bulletins));
 });
 
-test('loading with the switch on and no document reconnects by itself', () => {
-    const state = makeHost({
-        settings: {},
-        front: () => ({ ok: false, status: 404 }),
-    });
-    const ctx = load(state);
-    assert.strictEqual(state.http.length, DOMAINS.length);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'pclead.co.uk' });
-});
-
-test('a remembered zone is restored without probing', () => {
+test('loading with the switch on and a remembered zone starts without probing', () => {
     const state = makeHost({ settings: { enabled: true, last_domain: 'offshor.co.uk' } });
     const ctx = load(state);
     assert.strictEqual(state.http.length, 0);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'offshor.co.uk' });
+    assert.deepStrictEqual(state.proxy.starts, ['offshor.co.uk']);
+    // An automatic choice stays automatic, so a later enable may pick again.
+    assert.strictEqual(controlByKey(ctx, 'zone_index').value, 0);
+    assert.strictEqual(controlByKey(ctx, 'custom_domain').value, '');
 });
 
-test('typing in the custom field does not probe per keystroke', () => {
-    const state = makeHost({
-        settings: { enabled: true },
-        files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }) },
-    });
+test('loading with the switch on and no remembered zone chooses automatically', () => {
+    const state = makeHost({ settings: {}, front: () => ({ ok: false, status: 404 }) });
     const ctx = load(state);
-    assert.strictEqual(state.http.length, 0);
+    assert.strictEqual(state.http.length, DOMAINS.length);
+    assert.deepStrictEqual(state.proxy.starts, ['pclead.co.uk']);
+});
+
+test('typing in the custom field does nothing until applied', () => {
+    const state = makeHost({ settings: { enabled: true, last_domain: 'pclead.co.uk' } });
+    const ctx = load(state);
+    assert.strictEqual(state.proxy.starts.length, 1);
     changeSetting(state, ctx, 'custom_domain', 'm');
     changeSetting(state, ctx, 'custom_domain', 'mi');
     changeSetting(state, ctx, 'custom_domain', 'mine.example');
     assert.strictEqual(state.http.length, 0);
-    assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'pclead.co.uk' });
+    assert.deepStrictEqual(state.proxy.starts, ['pclead.co.uk']);
 });
 
-test('the status row shows what the client confirmed', () => {
-    const at = Math.floor(new Date(2026, 10, 3, 14, 5, 0).getTime() / 1000);
-    const state = makeHost({
-        settings: {},
-        files: {
-            [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }),
-            [STATUS_PATH]: JSON.stringify({ host: 'kws2.pclead.co.uk', dc: 2, at: at }),
-        },
-    });
-    const ctx = load(state);
-    const status = controlByKey(ctx, 'status');
-    assert.ok(status.subtext.includes('kws1…5.pclead.co.uk'), status.subtext);
-    assert.ok(status.subtext.includes('клиент применил в 14:05'), status.subtext);
-});
-
-test('a status for another zone is not reported as confirmation', () => {
-    const at = Math.floor(Date.now() / 1000) - 10;
-    const state = makeHost({
-        settings: {},
-        files: {
-            [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }),
-            [STATUS_PATH]: JSON.stringify({ host: 'kws2.lovetrue.co.uk', at: at }),
-        },
-    });
-    const ctx = load(state);
-    assert.ok(controlByKey(ctx, 'status').subtext.includes('ещё переключается'));
-});
-
-test('unloading the plugin removes the transport', () => {
-    const state = makeHost({
-        settings: {},
-        files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }) },
-    });
+test('unloading the plugin stops the proxy', () => {
+    const state = makeHost({ settings: { enabled: true, last_domain: 'pclead.co.uk' } });
     const ctx = load(state);
     ctx.__extera.callLifecycleJSON('on_plugin_unload', '{}');
-    assert.ok(!(CONFIG_PATH in state.files), 'the transport outlived the plugin');
+    assert.strictEqual(state.proxy.stops, 1, 'the tunnel outlived the plugin');
+});
+
+test('the legacy document from 2.x is removed on load', () => {
+    const state = makeHost({
+        settings: { enabled: false },
+        files: { [LEGACY_PATH]: JSON.stringify({ enabled: true, domain: 'pclead.co.uk' }) },
+    });
+    load(state);
+    assert.ok(!(LEGACY_PATH in state.files), 'the old web-route document survived');
+    assert.ok(!Object.keys(state.files).some((p) => p.includes('tg_ws_proxy.json')),
+        'the plugin wrote a document the client no longer reads');
 });
 
 test('probing asks for kws2 of every zone and counts any answer', () => {
@@ -372,23 +427,22 @@ test('probing asks for kws2 of every zone and counts any answer', () => {
     clickKey(ctx, 'check');
     assert.strictEqual(state.http.length, DOMAINS.length);
     assert.ok(state.bulletins.some((b) => b.text.includes('Ответили 4 из 5')), JSON.stringify(state.bulletins));
-    assert.ok(!(CONFIG_PATH in state.files), 'a probe wrote the config');
+    assert.strictEqual(state.proxy.starts.length, 0, 'a probe started the proxy');
 });
 
-test('the report carries the applied transport and the confirmed host', () => {
-    const at = Math.floor(new Date(2026, 10, 3, 9, 30, 0).getTime() / 1000);
+test('the report carries the listening proxy and the counters', () => {
     const state = makeHost({
-        settings: {},
-        files: {
-            [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'cakeisalie.co.uk' }),
-            [STATUS_PATH]: JSON.stringify({ host: 'kws2.cakeisalie.co.uk', at: at }),
-        },
+        settings: { enabled: true, last_domain: 'cakeisalie.co.uk' },
+        connections: 3,
+        upstreams: 3,
     });
     const ctx = load(state);
     clickKey(ctx, 'report');
     const report = state.clipboard[state.clipboard.length - 1];
-    assert.ok(report.includes('cakeisalie.co.uk'), report);
-    assert.ok(report.includes('kws2.cakeisalie.co.uk в 09:30'), report);
+    assert.ok(report.includes('MTProxy 127.0.0.1:1443'), report);
+    assert.ok(report.includes('kws1…5.cakeisalie.co.uk'), report);
+    assert.ok(report.includes('Запись в списке: активна'), report);
+    assert.ok(report.includes('Соединения: 3, каналы: 3'), report);
     assert.ok(report.includes('Выбор: автоматически'), report);
 });
 

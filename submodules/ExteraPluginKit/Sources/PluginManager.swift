@@ -1073,6 +1073,24 @@ public final class PluginManager: PluginHost {
         actions.proxyRemoveAll(pluginId: pluginId, callbackToken: callbackToken)
     }
 
+    /// Starts, stops or reports the in-app local MTProxy. Answers through
+    /// `resolveBridgeCallback(pluginId:token:...)`.
+    public func pluginLocalProxy(pluginId: String, requestJSON: String, callbackToken: String) {
+        guard let actions = self.actions else {
+            self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
+            return
+        }
+        actions.localProxy(pluginId: pluginId, requestJSON: requestJSON, callbackToken: callbackToken)
+    }
+
+    /// The local proxy's current status as JSON, synchronously.
+    public func pluginLocalProxyStatus(pluginId: String) -> String {
+        guard let actions = self.actions else {
+            return "{\"ok\":false,\"running\":false,\"error\":\"the plugin runtime is not active\"}"
+        }
+        return actions.localProxyStatus(pluginId: pluginId)
+    }
+
     public func pluginOwnPeerId(pluginId: String, account: Int64?, callbackToken: String) {
         guard let actions = self.actions else {
             self.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: ["ok": false, "error": "the plugin runtime is not active"])
@@ -2062,6 +2080,13 @@ public protocol PluginActions: AnyObject {
     func proxyList(pluginId: String, callbackToken: String)
     func proxyAdd(pluginId: String, linksJSON: String, callbackToken: String)
     func proxyRemoveAll(pluginId: String, callbackToken: String)
+    /// Starts, stops or reports the local MTProxy a plugin asked for, and adds
+    /// or removes its entry in the proxy list. `requestJSON` is
+    /// `{"action": "start" | "stop" | "status", "domain": "zone"}`.
+    func localProxy(pluginId: String, requestJSON: String, callbackToken: String)
+    /// The same status the `status` action answers with, for a settings row that
+    /// cannot wait for a callback.
+    func localProxyStatus(pluginId: String) -> String
     func ownPeerId(pluginId: String, account: Int64?, callbackToken: String)
 
     /// The profile of one peer, the data behind

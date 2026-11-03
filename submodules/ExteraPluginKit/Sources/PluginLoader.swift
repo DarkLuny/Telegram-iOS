@@ -129,6 +129,11 @@ public protocol PluginHost: AnyObject {
     func pluginProxyAdd(pluginId: String, linksJSON: String, callbackToken: String)
     /// Empties the list and turns proxying off. Answers `{"ok": true, "removed": 0}`.
     func pluginProxyRemoveAll(pluginId: String, callbackToken: String)
+    /// Starts, stops or reports the in-app local MTProxy. Answers
+    /// `{"ok": true, "status": {"running": true, "host": "127.0.0.1", "port": 1443, "domain": "...", "active": true}}`.
+    func pluginLocalProxy(pluginId: String, requestJSON: String, callbackToken: String)
+    /// The local proxy's status, synchronously, as the same JSON object.
+    func pluginLocalProxyStatus(pluginId: String) -> String
     /// The id of the account's own user, which is also the Saved Messages peer.
     /// Answers `{"ok": true, "peer_id": 123}`.
     func pluginOwnPeerId(pluginId: String, account: Int64?, callbackToken: String)
@@ -684,6 +689,20 @@ public final class PluginLoader {
             host.pluginProxyRemoveAll(pluginId: id, callbackToken: token)
         }
         hostObject.setObject(proxyRemoveAll as AnyObject, forKeyedSubscript: "proxyRemoveAll" as NSString)
+
+        // The local MTProxy. `localProxy` answers through the bridge like the
+        // other network calls; `localProxyStatus` is synchronous because it only
+        // reads state the client already holds, which is what a settings row
+        // being built right now needs.
+        let localProxy: @convention(block) (String, String, String) -> Void = { id, requestJSON, token in
+            host.pluginLocalProxy(pluginId: id, requestJSON: requestJSON, callbackToken: token)
+        }
+        hostObject.setObject(localProxy as AnyObject, forKeyedSubscript: "localProxy" as NSString)
+
+        let localProxyStatus: @convention(block) (String) -> String = { id in
+            return host.pluginLocalProxyStatus(pluginId: id)
+        }
+        hostObject.setObject(localProxyStatus as AnyObject, forKeyedSubscript: "localProxyStatus" as NSString)
 
         let ownPeerId: @convention(block) (String, Double, String) -> Void = { id, account, token in
             host.pluginOwnPeerId(pluginId: id, account: PluginLoader.accountValue(account), callbackToken: token)

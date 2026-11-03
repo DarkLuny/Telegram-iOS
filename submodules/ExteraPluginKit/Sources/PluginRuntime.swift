@@ -844,6 +844,54 @@ private final class PluginActionsImpl: PluginActions {
         }
     }
 
+    /// Runs the in-app local MTProxy, the one capability a plugin cannot build
+    /// for itself: iOS gives a plugin no sockets and no way to open a port, so
+    /// the client owns the listener and the plugin asks for it here.
+    ///
+    /// The request is `{"action": "start" | "stop" | "status", "domain": "zone"}`.
+    /// `start` begins listening on `127.0.0.1`, adds its `tg://proxy` entry to
+    /// the list and makes that entry the active proxy, so messages go through it
+    /// at once; `stop` removes the entry and goes back to a direct connection.
+    /// The answer is the same object `localProxyStatus` returns, under `status`.
+    func localProxy(pluginId: String, requestJSON: String, callbackToken: String) {
+        guard let sharedContext = self.sharedContext else {
+            self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
+            return
+        }
+        let request = PluginRuntime.parseObject(requestJSON)
+        let action = (request["action"] as? String)?.lowercased() ?? "status"
+        let domain = request["domain"] as? String ?? ""
+        let proxy = PluginLocalProxy.shared
+        let respond: (PluginLocalProxy.Status) -> Void = { status in
+            var response: [String: Any] = ["ok": status.error == nil, "status": status.json]
+            if let error = status.error {
+                response["error"] = error
+            }
+            PluginManager.shared.resolveBridgeCallback(pluginId: pluginId, token: callbackToken, response: response)
+        }
+        switch action {
+        case "start":
+            proxy.start(domain: domain, accountManager: sharedContext.accountManager, completion: respond)
+        case "stop":
+            proxy.stop(accountManager: sharedContext.accountManager, completion: respond)
+        default:
+            respond(proxy.currentStatus())
+        }
+    }
+
+    /// The local proxy's status without a round trip, for a settings row that
+    /// has to be built synchronously. Reads locked state only, so it is safe on
+    /// the script queue.
+    func localProxyStatus(pluginId: String) -> String {
+        var object = PluginLocalProxy.shared.currentStatus().json
+        object["ok"] = true
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{\"ok\":false,\"running\":false}"
+        }
+        return text
+    }
+
     /// Empties the proxy list and reports how many entries were dropped.
     func proxyRemoveAll(pluginId: String, callbackToken: String) {
         guard let sharedContext = self.sharedContext else {

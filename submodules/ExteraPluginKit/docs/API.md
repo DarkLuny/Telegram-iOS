@@ -595,6 +595,49 @@ server. `parse_link` is pure JS and answers `null` for anything it cannot read.
 
 Also aliased as `client_utils.proxy_list` / `client_utils.get_own_peer_id`.
 
+### 12.1 Local MTProxy
+
+A plugin cannot open a socket: iOS gives the JavaScript context no sockets and
+no way to listen on a port. The client owns that listener instead, which is the
+one capability a plugin cannot build for itself.
+
+`proxy.local_start(domain)` runs an MTProxy on `127.0.0.1` (port 1443 when free,
+otherwise an ephemeral port) with a fresh `dd` secret, **adds its
+`tg://proxy?server=127.0.0.1&port=…&secret=dd…` entry to the proxy list and
+makes that entry active**, so the client's own traffic uses it at once and the
+entry is visible in Settings → Privacy → Proxy exactly as a hand-added one is.
+
+`domain` is a CloudFlare zone whose `kws<dc>.<domain>` names answer (the
+`tg-ws-proxy` arrangement). The tunnel dials `kws<dc>.<domain>` over WSS, falls
+back to `kws<dc>.web.telegram.org` and then to the datacenter address, so a zone
+that stops answering does not take the transport down.
+
+```js
+proxy.local_start("pclead.co.uk", function (r) {
+    // r = {ok, status: {running, host, port, domain, active, connections,
+    //                   upstreams, link, error, upstream_error}}
+});
+
+proxy.local_stop(function (r) { /* r = {ok, status: {...}} */ });
+
+var s = proxy.local_status();   // the same status object, synchronously
+```
+
+`start` on an already-running proxy only restores its entry (the domain is then
+optional). `stop` removes the entry and returns to a direct connection only when
+that entry was the active one, so a proxy the user added by hand is never
+disturbed; it runs when the plugin is disabled or unloaded, but not when the app
+merely goes to the background. `local_status` is synchronous because it only
+reads state the client already holds, which is what a settings row needs; it is
+`{ok: false, running: false, error}` on a build without this bridge.
+
+`active` says the entry is the one Telegram is using; `connections` and
+`upstreams` say whether traffic is actually flowing. They are reported, never
+guessed, which is what lets a plugin tell "connected" from "started and waiting".
+`upstream_error` carries the last failure from the tunnel.
+
+The `tg_ws_proxy` plugin in `js/` is the reference user of this API.
+
 ---
 
 ## 13. Text formatting
@@ -1009,7 +1052,8 @@ this list, and because `js/test/bootstrap.test.js` is the contract check for it.
 | `installSwizzle(pluginId, class, selector, isClassMethod, beforeToken, afterToken)` | reason or null |
 | `buildClass(pluginId, superclassName, methodsJSON)` | class name, or `"!" + reason` |
 | `makeInstanceClass(pluginId, className)` | object handle or null |
-| `httpGet`, `httpRequest`, `proxyList`, `proxyAdd`, `proxyRemoveAll`, `ownPeerId`, `peerInfo`, `chatMessages` | — (answers through `__extera.resolveBridge(token, json)`) |
+| `httpGet`, `httpRequest`, `proxyList`, `proxyAdd`, `proxyRemoveAll`, `localProxy`, `ownPeerId`, `peerInfo`, `chatMessages` | — (answers through `__extera.resolveBridge(token, json)`) |
+| `localProxyStatus(pluginId)` | JSON text (synchronous) |
 
 The asynchronous members answer by calling back into the context with
 `__extera.resolveBridge(token, JSON)`; a plugin-facing helper stores the

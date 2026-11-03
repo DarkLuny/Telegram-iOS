@@ -1,35 +1,36 @@
 /*
- * TG WS Proxy — CloudFlare-fronted Telegram Web transport, inside the client.
+ * TG WS Proxy — the reference app's transport, run by the client itself.
  *
- * The original (Flowseal/tg-ws-proxy; the iOS port is amurcanov's tree) runs a
- * local MTProto proxy on 127.0.0.1 and dials `kws<dc>.<CloudFlare zone>` over
- * WSS, so a network that drops Telegram's addresses still reaches Telegram Web.
- * A plugin cannot open a listening socket, and a proxy entry pointing at a port
- * with nothing behind it would break the account — but it does not need to:
- * this client already carries MTProto over Telegram Web's WebSocket (the route
- * it takes when direct TCP is blocked), and the only part it lacked was a way
- * to be told which host to dial. The build this plugin ships with reads that
- * from `Documents/tg_ws_proxy.json` and hands it to
- * `mt_session_set_web_endpoint` — the same call the engine's own web-transport
- * tests make. So the tunnel runs in the app process, through the app's own
- * network stack: no local port, no VPN, no separate app.
+ * The original (Flowseal/tg-ws-proxy; the iOS port is amurcanov's tree) starts a
+ * Go MTProxy on 127.0.0.1 with a `dd` secret, and asks Telegram to use it with
+ * `https://t.me/proxy?server=127.0.0.1&port=1443&secret=dd…`. Its tunnel dials
+ * `kws<dc>.<CloudFlare zone>` over WSS, so a network that drops Telegram's
+ * addresses still reaches Telegram Web.
  *
- * It is automatic, like the reference app is once its button is pressed:
- *   - enabling the plugin picks a working zone itself and writes the document;
- *   - the client watches that document and moves its live sessions at once,
- *     so there is no restart and no Apply;
- *   - switching the plugin off puts the client back on Telegram's own hosts;
- *   - the client writes back what it applied, and the status row shows it.
+ * This plugin is that app minus the button, with the server living in the
+ * client: `proxy.local_start(domain)` asks the host to run the local MTProxy
+ * (a plugin has no sockets, so the listener must be Swift), and the host also
+ * adds the proxy entry to Telegram's list and makes it active. From then on the
+ * client's own traffic goes through the tunnel; the plugin's only jobs are
+ * picking the zone, starting and stopping the server, and telling the truth
+ * about what the host reports.
  *
- * The only thing the reference app has that this plugin does not is the
- * button: everything here happens from the switch itself.
+ * Automatic, like the reference once its button is pressed:
+ *   - enabling the plugin picks a working zone itself and starts the proxy;
+ *   - loading the plugin while the switch is on starts it again (the last zone
+ *     is remembered and reused without probing);
+ *   - the status row comes from the host: entry active, client connections and
+ *     live upstream channels, so "connected" is never just a guess;
+ *   - switching off removes the entry and returns the client to a direct
+ *     connection;
+ *   - the only difference from the reference app is that there is no button.
  */
 
 var __id__ = "tg_ws_proxy";
 var __name__ = "TG WS Proxy";
-var __description__ = "MTProto через WebSocket CloudFlare внутри клиента. Подбирает рабочий CF-домен сам и подключается сразу при включении — без кнопки, перезапуска, VPN и локального порта.";
+var __description__ = "Локальный MTProxy 127.0.0.1 внутри клиента через CloudFlare. Подбирает CF-домен сам, запускается при включении плагина и добавляет прокси в список Telegram — без кнопки, VPN и отдельного приложения.";
 var __author__ = "tg-ws-proxy (Flowseal), порт для ExteraPluginKit";
-var __version__ = "2.1.0";
+var __version__ = "3.0.0";
 var __min_version__ = "13.1.1";
 
 // `cfproxyEnc` from tg-ws-proxy.go. The core decodes each entry into the zone it
@@ -42,13 +43,10 @@ var CFPROXY_ENCODED = [
     "twdmbzcm.com",
 ];
 
-// The document the client build reads. Keep in step with `TgWsProxyConfig.fileName`
-// in MTProtoRustEngine.
-var CONFIG_FILE = "tg_ws_proxy.json";
-
-// What the client wrote back after handing the endpoint to the engine. Keep in
-// step with `TgWsProxyConfig.statusFileName`.
-var STATUS_FILE = "tg_ws_proxy_status.json";
+// The document an older build of this plugin wrote for the engine's web route.
+// It is removed on load and unload: left in place it would keep moving the
+// engine's sessions while the local proxy is the transport in use.
+var LEGACY_CONFIG_FILE = "tg_ws_proxy.json";
 
 // The host the probes ask for. `kws2` is a real front — every zone answers it —
 // and a plain GET is enough to prove DNS and TLS work, even when the answer
@@ -58,10 +56,10 @@ var PROBE_TIMEOUT = 4;
 
 // `LogManager` from the app: consecutive duplicates collapse into a count, the
 // list is capped, and these markers are always kept. Used for the plugin's own
-// journal over the same probes and saves.
+// journal over the same probes and starts.
 var ESSENTIAL_MARKERS = [
-    "pool", "key:", "started", "address:", "error", "failed", "blocked",
-    "Пул", "Ключ:", "запущен", "Адрес:", "ошибка", "провалены", "заблокирован",
+    "прокси", "запись", "канал", "ошибка", "подключ", "запуск", "домен",
+    "proxy", "started", "error",
 ];
 var MAX_LOG_LINES = 100;
 
@@ -123,8 +121,9 @@ function defaultCfproxyDomains() {
 
 var CF_DOMAINS = defaultCfproxyDomains();
 
-// The engine's rule, mirrored so the plugin writes only what the build accepts:
-// lower case, no trailing dot, two or more ASCII labels, not a bare address.
+// The host's rule, mirrored so the plugin only asks for what the listener
+// accepts: lower case, no trailing dot, two or more ASCII labels, not a bare
+// address.
 function normalizeHost(value) {
     var text = String(value === undefined || value === null ? "" : value).trim().toLowerCase();
     while (text.length > 0 && text.charAt(text.length - 1) === ".") {
@@ -151,14 +150,6 @@ function normalizeHost(value) {
     return text;
 }
 
-// The status document's clock, as local HH:MM.
-function formatAppliedTime(seconds) {
-    var date = new Date(seconds * 1000);
-    var hours = date.getHours();
-    var minutes = date.getMinutes();
-    return (hours < 10 ? "0" : "") + hours + ":" + (minutes < 10 ? "0" : "") + minutes;
-}
-
 // --- plugin ---------------------------------------------------------------
 
 class TgWsProxyPlugin extends BasePlugin {
@@ -171,146 +162,107 @@ class TgWsProxyPlugin extends BasePlugin {
         // method mirrors stored values into the screen; without the guard that
         // would start a connection from inside the load.
         this._loading = true;
-
-        var config = this.readConfig();
-        if (config && config.enabled) {
-            // The document is what the client follows, so the switch must agree
-            // with it. The zone is deliberately not copied into the selector: an
-            // automatic choice should stay automatic, or the next enable would
-            // probe only the zone picked last time instead of picking again.
-            this.set_setting("enabled", true, false);
-        }
-
-        var enabled = !!this.get_setting("enabled", true);
+        // A legacy document would compete with the local proxy.
+        this.removeLegacyConfig();
         this._loading = false;
-        this.entry("плагин загружен", "info");
 
-        if (!enabled) {
-            this.entry("транспорт выключен, клиент использует обычный маршрут", "info");
+        this.entry("плагин загружен", "info");
+        if (!this.localProxySupported()) {
+            this.entry("эта сборка клиента не умеет локальный прокси", "error");
             return;
         }
-        if (config && config.enabled) {
-            this.entry("маршрут уже действует: kws1…5." + config.domain, "info");
+        if (!this.get_setting("enabled", true)) {
+            this.entry("прокси выключен, клиент на обычном маршруте", "info");
             return;
         }
-        // No document, but the plugin is on: reconnect by itself, exactly as
-        // enabling the plugin does in the reference app minus the button.
-        var remembered = normalizeHost(this.get_setting("last_domain", ""));
-        if (remembered) {
-            this.entry("восстанавливаю прежний домен: " + remembered, "info");
-            this.applyDomain(remembered, false);
-            return;
-        }
-        this.connect();
+        // The reference app's button, minus the button: start now, reusing the
+        // zone chosen last time when there is one.
+        this.startFromSettings();
     }
 
     on_plugin_unload() {
-        // The tunnel is the plugin: disabling it (or removing it) must put the
-        // client back on Telegram's own hosts. The last domain is kept in the
-        // settings, so the next load reconnects without probing again.
-        this.removeConfig(true);
-        this.entry("плагин выгружен, транспорт снят", "info");
-    }
-
-    // --- the document the client build reads ------------------------------
-
-    configPath() {
-        var documents = file_utils.get_documents_dir();
-        if (!documents) {
-            return "";
+        // The tunnel belongs to the plugin: disabling or removing it has to take
+        // the proxy entry away, or the client would keep dialing a port with
+        // nothing behind it.
+        this.removeLegacyConfig();
+        if (this.localProxySupported()) {
+            proxy.local_stop(() => {});
         }
-        return documents + "/" + CONFIG_FILE;
+        this.entry("плагин выгружен, прокси остановлен", "info");
     }
 
-    statusPath() {
-        var documents = file_utils.get_documents_dir();
-        if (!documents) {
-            return "";
-        }
-        return documents + "/" + STATUS_FILE;
+    // --- the host's local proxy -------------------------------------------
+
+    localProxySupported() {
+        var status = proxy.local_status();
+        return !!(status && status.ok === true);
     }
 
-    readConfig() {
-        var path = this.configPath();
-        if (!path) {
+    // The transport the screen reports. `null` when the build has no local
+    // proxy; the object otherwise is the host's own view, not a guess.
+    transportStatus() {
+        var status = proxy.local_status();
+        if (!status || status.ok !== true) {
             return null;
         }
-        var text = file_utils.read_file(path);
-        if (!text) {
-            return null;
-        }
-        var parsed = null;
-        try {
-            parsed = JSON.parse(text);
-        } catch (error) {
-            this.entry("файл настройки повреждён: " + error.message, "error");
-            return null;
-        }
-        if (!parsed || typeof parsed !== "object") {
-            return null;
-        }
-        var domain = normalizeHost(parsed.domain);
-        if (parsed.enabled !== true || !domain) {
-            return { enabled: false, domain: "" };
-        }
-        return { enabled: true, domain: domain };
+        return status;
     }
 
-    writeConfig(domain) {
-        var path = this.configPath();
-        if (!path) {
-            this.entry("не удалось найти каталог Documents", "error");
-            return false;
+    // `unverified` only changes what the user is told: a zone that did not
+    // answer the probe is still tried, because the probe can be filtered where
+    // the WebSocket tunnel is not.
+    startTransport(domain, unverified) {
+        if (this._busy) {
+            return;
         }
-        var payload = JSON.stringify({ enabled: true, domain: domain });
-        if (!file_utils.write_file(path, payload)) {
-            this.entry("не удалось записать настройку транспорта", "error");
-            return false;
-        }
-        return true;
-    }
-
-    removeConfig(quiet) {
-        var path = this.configPath();
-        if (path && file_utils.file_exists(path) && !file_utils.delete_file(path)) {
-            this.entry("не удалось удалить настройку транспорта", "error");
-            if (!quiet) {
-                ui.bulletin.show_error("Не удалось выключить транспорт");
+        this._busy = true;
+        this.entry("запуск локального MTProxy: kws1…5." + domain, "info");
+        proxy.local_start(domain, (response) => {
+            this._busy = false;
+            var status = response && response.status ? response.status : null;
+            if (!response || response.ok !== true || !status || status.running !== true) {
+                var reason = (response && response.error) || (status && status.error) || "клиент не запустил прокси";
+                this.entry("не удалось запустить прокси: " + reason, "error");
+                ui.bulletin.show_error("Не удалось запустить прокси: " + reason);
+                this.set_setting("enabled", false, true);
+                return;
             }
-            return false;
-        }
-        if (!quiet) {
-            this.entry("настройка транспорта удалена", "info");
-        }
-        return true;
+            this.set_setting("last_domain", status.domain, false);
+            this.entry("прокси слушает " + status.host + ":" + status.port + " · " + status.domain, "info");
+            if (status.active === true) {
+                this.entry("запись " + status.host + ":" + status.port + " активна в списке прокси", "info");
+            } else {
+                this.entry("запись добавлена, но не стала активной", "error");
+            }
+            if (unverified) {
+                ui.bulletin.show_info("Прокси включён: " + status.domain + ". Домен не ответил на проверку.");
+            } else {
+                ui.bulletin.show_success("Прокси включён: " + status.host + ":" + status.port + " · " + status.domain);
+            }
+            this.scheduleScreenRefresh();
+        });
     }
 
-    // What the client last handed to the engine, or null when it wrote nothing.
-    appliedStatus() {
-        var path = this.statusPath();
-        if (!path) {
-            return null;
-        }
-        var text = file_utils.read_file(path);
-        if (!text) {
-            return null;
-        }
-        var parsed = null;
-        try {
-            parsed = JSON.parse(text);
-        } catch (error) {
-            return null;
-        }
-        if (!parsed || typeof parsed !== "object") {
-            return null;
-        }
-        return {
-            host: typeof parsed.host === "string" ? parsed.host : "",
-            at: typeof parsed.at === "number" ? parsed.at : 0,
-        };
+    stopTransport(quiet) {
+        proxy.local_stop((response) => {
+            var ok = !!(response && response.ok === true);
+            this.entry(ok ? "прокси остановлен, запись удалена" : "прокси остановлен с ошибкой", ok ? "info" : "error");
+            if (!quiet) {
+                ui.bulletin.show_info("Выключено. Клиент вернулся на обычный маршрут.");
+            }
+            this.scheduleScreenRefresh();
+        });
     }
 
-    // --- what the screen would write --------------------------------------
+    // The client connects to the proxy a moment after the entry becomes active;
+    // one delayed rebuild turns "трафика ещё нет" into the live counters.
+    scheduleScreenRefresh() {
+        this.run_on_queue(() => {
+            this.set_setting("screen_reload", Date.now(), true);
+        }, 3000);
+    }
+
+    // --- choosing the zone -------------------------------------------------
 
     // 0 is "Автоматически"; 1..CF_DOMAINS.length are the zones in order.
     rawDomainIndex() {
@@ -405,14 +357,11 @@ class TgWsProxyPlugin extends BasePlugin {
         return null;
     }
 
-    // --- connecting -------------------------------------------------------
+    // --- starting ---------------------------------------------------------
 
-    // The automatic path, and the only thing the reference app needs a button
-    // for: probe every zone, take the first that answers, write it.
-    connect() {
-        if (this._busy) {
-            return;
-        }
+    // What load and the switch both go through: the remembered zone when there
+    // is one, otherwise the automatic choice.
+    startFromSettings() {
         var custom = String(this.get_setting("custom_domain", "")).trim();
         if (custom) {
             var domain = normalizeHost(custom);
@@ -422,81 +371,45 @@ class TgWsProxyPlugin extends BasePlugin {
                 this.set_setting("enabled", false, true);
                 return;
             }
-            this.connectFixed(domain);
+            this.startTransport(domain, false);
             return;
         }
         var index = this.domainIndex();
         if (index > 0) {
-            this.connectFixed(CF_DOMAINS[index - 1]);
+            this.startTransport(CF_DOMAINS[index - 1], false);
+            return;
+        }
+        var remembered = normalizeHost(this.get_setting("last_domain", ""));
+        if (remembered) {
+            // Same zone as last time: no probe, start at once.
+            this.entry("использую прежний домен: " + remembered, "info");
+            this.startTransport(remembered, false);
             return;
         }
         this.autoConnect();
     }
 
     autoConnect() {
+        if (this._busy) {
+            return;
+        }
         this._busy = true;
         this.entry("автоподбор CF-домена: проверяю " + CF_DOMAINS.length, "info");
         this.probeDomains(CF_DOMAINS, PROBE_TIMEOUT, (results) => {
             this._busy = false;
             var pick = this.firstReachable(results);
             if (!pick) {
-                this.entry("ни один CF-домен не ответил", "error");
-                ui.bulletin.show_error("Ни один CF-домен не ответил — проверьте сеть");
-                this.set_setting("enabled", false, true);
+                // The listener has its own fallbacks — Telegram's own web front,
+                // then the datacenter address — so a failed probe is not a
+                // reason to leave the user without a transport.
+                this.entry("ни один CF-домен не ответил, включаю с запасным маршрутом", "error");
+                ui.bulletin.show_info("CF-домены не ответили — прокси попробует запасной маршрут.");
+                this.startTransport(CF_DOMAINS[0], true);
                 return;
             }
             this.entry("выбран " + pick.domain + " (ответ " + pick.status + ")", "info");
-            this.applyDomain(pick.domain, false);
+            this.startTransport(pick.domain, false);
         });
-    }
-
-    // A zone the user asked for by name is applied even when the probe gets
-    // nothing: the answer may be a filtered probe rather than a dead front, and
-    // refusing a deliberate choice is worse than honouring it with a warning.
-    connectFixed(domain) {
-        this._busy = true;
-        this.probeOne(domain, PROBE_TIMEOUT, (status) => {
-            this._busy = false;
-            if (status > 0 && status < 500) {
-                this.applyDomain(domain, false);
-                return;
-            }
-            this.entry("домен " + domain + " не ответил, всё равно включаю", "error");
-            this.applyDomain(domain, true);
-        });
-    }
-
-    applyDomain(domain, unreachable) {
-        if (!this.writeConfig(domain)) {
-            ui.bulletin.show_error("Не удалось сохранить настройку");
-            this.set_setting("enabled", false, true);
-            return;
-        }
-        this.set_setting("last_domain", domain, false);
-        this.entry("маршрут: kws1…5." + domain, "info");
-        if (unreachable) {
-            ui.bulletin.show_info("Включено: kws1…5." + domain + ". Домен не ответил на проверку.");
-        } else {
-            ui.bulletin.show_success("Подключено: kws1…5." + domain);
-        }
-        this.set_setting("transport_reload", Date.now(), true);
-        // The client polls its document, resets the connections and writes the
-        // status file within a couple of seconds. One delayed refresh turns
-        // "клиент ещё переключается" into the confirmed host and time without
-        // the user leaving the screen.
-        this.run_on_queue(() => {
-            this.set_setting("transport_reload", Date.now(), true);
-        }, 4000);
-    }
-
-    disconnect() {
-        var hadConfig = !!this.readConfig();
-        this.removeConfig(true);
-        this.entry("транспорт выключен", "info");
-        if (hadConfig) {
-            ui.bulletin.show_info("Выключено. Клиент вернётся на обычный маршрут.");
-        }
-        this.set_setting("transport_reload", Date.now(), true);
     }
 
     // --- the switch and the selector --------------------------------------
@@ -507,10 +420,10 @@ class TgWsProxyPlugin extends BasePlugin {
         }
         var enabled = value === undefined || value === null ? !!this.get_setting("enabled", true) : !!value;
         if (enabled) {
-            this.entry("включение: подбираю домен", "info");
-            this.connect();
+            this.entry("включение: запускаю прокси", "info");
+            this.startFromSettings();
         } else {
-            this.disconnect();
+            this.stopTransport(false);
         }
     }
 
@@ -524,12 +437,16 @@ class TgWsProxyPlugin extends BasePlugin {
         if (!this.get_setting("enabled", true)) {
             return;
         }
-        this.connect();
+        if (this.hasCustomInput() || this.domainIndex() > 0) {
+            this.startFromSettings();
+        } else {
+            this.autoConnect();
+        }
     }
 
     // --- actions ----------------------------------------------------------
 
-    // Probes only, no write: the reference app's "check" button.
+    // Probes only, no change: the reference app's "check" button.
     checkDomains() {
         var domains = CF_DOMAINS;
         if (this.hasCustomInput()) {
@@ -553,14 +470,23 @@ class TgWsProxyPlugin extends BasePlugin {
         });
     }
 
+    refreshStatus() {
+        var status = this.transportStatus();
+        if (!status) {
+            this.entry("состояние недоступно", "error");
+        } else {
+            this.entry("состояние: " + this.configSummary(), "info");
+        }
+        this.set_setting("screen_reload", Date.now(), true);
+    }
+
     copyDomainList() {
         android_utils.copy_to_clipboard(CF_DOMAINS.join("\n"));
         ui.bulletin.show_copied_to_clipboard();
     }
 
     copyReport() {
-        var config = this.readConfig();
-        var applied = this.appliedStatus();
+        var status = this.transportStatus();
         var errors = [];
         var entries = this.logEntries();
         for (var i = 0; i < entries.length; i += 1) {
@@ -569,9 +495,20 @@ class TgWsProxyPlugin extends BasePlugin {
             }
         }
         var report = "TG WS Proxy (плагин " + __version__ + ")\n";
-        report += "Транспорт: " + (config && config.enabled ? "kws1…5." + config.domain : "выключен") + "\n";
+        if (status && status.running === true) {
+            report += "Прокси: MTProxy " + status.host + ":" + status.port + " · kws1…5." + status.domain + "\n";
+            report += "Запись в списке: " + (status.active === true ? "активна" : "не активна") + "\n";
+            report += "Соединения: " + (status.connections || 0) + ", каналы: " + (status.upstreams || 0) + "\n";
+            if (status.upstream_error) {
+                report += "Ошибка канала: " + status.upstream_error + "\n";
+            }
+            if (status.link) {
+                report += "Ссылка: " + status.link + "\n";
+            }
+        } else {
+            report += "Прокси: выключен\n";
+        }
         report += "Выбор: " + (this.isAuto() ? "автоматически" : (this.desiredDomain() || "—")) + "\n";
-        report += "Клиент применил: " + (applied && applied.host ? applied.host + " в " + formatAppliedTime(applied.at) : "нет подтверждения") + "\n";
         report += "Домены: " + CF_DOMAINS.join(", ") + "\n";
         if (!errors.length) {
             report += "Ошибки: нет\n";
@@ -591,23 +528,28 @@ class TgWsProxyPlugin extends BasePlugin {
     // --- the status row ---------------------------------------------------
 
     configSummary() {
-        var config = this.readConfig();
-        var applied = this.appliedStatus();
-        if (!config || !config.enabled) {
+        var status = this.transportStatus();
+        if (!status) {
+            return "Эта сборка клиента не умеет локальный прокси";
+        }
+        if (status.running !== true) {
             if (this.get_setting("enabled", true)) {
-                return "Включается… подбираю CF-домен";
+                return "Включается… запускаю локальный MTProxy";
             }
             return "Выключено · клиент на обычном маршруте";
         }
-        var text = "Включено: kws1…5." + config.domain;
-        if (applied && applied.host && applied.host.indexOf("." + config.domain) >= 0) {
-            text += " · клиент применил в " + formatAppliedTime(applied.at);
+        var text = "MTProxy " + status.host + ":" + status.port + " · kws1…5." + status.domain;
+        if (status.active !== true) {
+            text += " · запись в списке не активна";
+        } else if ((status.connections || 0) > 0 && (status.upstreams || 0) > 0) {
+            text += " · соединений: " + status.connections + ", каналов: " + status.upstreams;
+        } else if ((status.connections || 0) > 0) {
+            text += " · клиент подключился, канал не поднят";
         } else {
-            text += " · клиент ещё переключается";
+            text += " · запись активна, трафика ещё нет";
         }
-        var desired = this.desiredDomain();
-        if (desired && desired !== config.domain) {
-            text += " · выбрано " + desired;
+        if (status.upstream_error) {
+            text += " · канал: ошибка";
         }
         return text;
     }
@@ -690,6 +632,19 @@ class TgWsProxyPlugin extends BasePlugin {
         this.set_setting("log_reload", Date.now(), true);
     }
 
+    // --- legacy document --------------------------------------------------
+
+    removeLegacyConfig() {
+        var documents = file_utils.get_documents_dir();
+        if (!documents) {
+            return;
+        }
+        var path = documents + "/" + LEGACY_CONFIG_FILE;
+        if (file_utils.file_exists(path)) {
+            file_utils.delete_file(path);
+        }
+    }
+
     // --- settings screen --------------------------------------------------
 
     row(key, text, options) {
@@ -711,9 +666,9 @@ class TgWsProxyPlugin extends BasePlugin {
             new Header({ text: "Транспорт CloudFlare" }),
             new Switch({
                 key: "enabled",
-                text: "MTProto через CloudFlare",
+                text: "Локальный MTProxy",
                 default: true,
-                subtext: "Включено — клиент сам выбирает рабочий CF-домен и переключается сразу",
+                subtext: "Включено — клиент сам выбирает CF-домен, запускает прокси и добавляет его в список",
                 icon: "msg_folders",
                 on_change: (value) => this.onEnabledChanged(value),
             }),
@@ -729,7 +684,7 @@ class TgWsProxyPlugin extends BasePlugin {
                 key: "custom_domain",
                 text: "Свой домен",
                 default: "",
-                subtext: "Важнее списка. Применяется кнопкой ниже или повторным включением",
+                subtext: "Важнее списка. Применяется кнопкой ниже, переключателем или повторным включением",
                 icon: "msg_link",
             }),
             this.row("status", "Состояние", {
@@ -737,13 +692,22 @@ class TgWsProxyPlugin extends BasePlugin {
                 icon: "msg_settings",
             }),
             this.row("connect", this.hasCustomInput() ? "Подключиться к своему домену" : (this.isAuto() ? "Подобрать заново" : "Подключиться к выбранному"), {
-                subtext: "Проверит домены и переключит клиент сейчас",
+                subtext: "Проверит домены и запустит прокси сейчас",
                 icon: "msg_retry",
                 accent: true,
                 on_click: () => {
                     this.set_setting("enabled", true, false);
-                    this.connect();
+                    if (this.hasCustomInput() || this.domainIndex() > 0) {
+                        this.startFromSettings();
+                    } else {
+                        this.autoConnect();
+                    }
                 },
+            }),
+            this.row("refresh", "Обновить состояние", {
+                subtext: "Перечитать счётчики соединений у клиента",
+                icon: "msg_retry",
+                on_click: () => this.refreshStatus(),
             }),
             new Header({ text: "Проверка" }),
             this.row("check", "Проверить CF-домены", {
@@ -834,17 +798,18 @@ class TgWsProxyPlugin extends BasePlugin {
     helpPage() {
         return [
             new Header({ text: "Что делает плагин" }),
-            new Text({ key: "help_1", text: "Включает MTProto через CloudFlare", subtext: "Встроенный веб-транспорт клиента (WebSocket к Telegram Web) ходит на kws1.<домен> … kws5.<домен> — те же зоны, что использует tg-ws-proxy." }),
-            new Text({ key: "help_2", text: "Всё внутри клиента", subtext: "Нет локального порта, VPN, отдельного приложения и профиля расширения. Соединение несёт сам клиент, через свой сетевой стек." }),
-            new Text({ key: "help_3", text: "Без секрета и без прокси-записи", subtext: "Секрет MTProxy, порт 1443 и пул WebSocket нужны были локальному серверу приложения. Здесь их роль выполняет движок клиента." }),
+            new Text({ key: "help_1", text: "Поднимает MTProxy внутри клиента", subtext: "Локальный MTProxy на 127.0.0.1 (порт 1443) с секретом dd и подключает его к kws1.<домен> … kws5.<домен> — те же зоны CloudFlare, что использует tg-ws-proxy." }),
+            new Text({ key: "help_2", text: "Добавляет прокси в список Telegram", subtext: "Клиент сам добавляет запись 127.0.0.1:1443 в список прокси и делает её активной — так же, как это делает приложение-референс ссылкой t.me/proxy." }),
+            new Text({ key: "help_3", text: "Всё внутри клиента", subtext: "Нет VPN, отдельного приложения и профиля расширения. Порт слушает только это устройство, снаружи он недоступен." }),
             new Header({ text: "Как это работает" }),
-            new Text({ key: "help_4", text: "Домен выбирается сам", subtext: "При включении плагин одновременно опрашивает все зоны из списка, берёт первую ответившую и записывает её. Ничего нажимать не нужно — это единственное отличие от приложения-референса, где была кнопка." }),
-            new Text({ key: "help_5", text: "Подключается сразу", subtext: "Клиент следит за настройкой и переводит живые сессии на выбранный домен без перезапуска. Строка «Состояние» показывает, что клиент применил и во сколько." }),
-            new Text({ key: "help_6", text: "Выключение возвращает обычный маршрут", subtext: "Выключите переключатель или сам плагин — настройка снимается, и клиент возвращается на адреса Telegram." }),
-            new Text({ key: "help_7", text: "Свой домен", subtext: "Впишите зону, у которой есть поддомены kws1…kws5 на Telegram Web через CloudFlare, и нажмите строку подключения. Свой домен важнее списка." }),
+            new Text({ key: "help_4", text: "Домен выбирается сам", subtext: "При включении плагин одновременно опрашивает все зоны, берёт первую ответившую и запускает прокси. Ничего нажимать не нужно — это единственное отличие от приложения-референса, где была кнопка." }),
+            new Text({ key: "help_5", text: "Подключается сразу", subtext: "Прокси стартует при включении плагина и при каждом запуске, пока переключатель включён; выбор домена запоминается. Строка «Состояние» показывает то, что клиент реально видит: запись активна и сколько соединений/каналов поднято." }),
+            new Text({ key: "help_6", text: "Запасной маршрут", subtext: "Если зона не отвечает, прокси пробует kws*.web.telegram.org и адрес датацентра. Поэтому сбой проверки не выключает транспорт." }),
+            new Text({ key: "help_7", text: "Выключение возвращает обычный маршрут", subtext: "Выключите переключатель или сам плагин — запись удаляется, и клиент возвращается на адреса Telegram." }),
+            new Text({ key: "help_8", text: "Свой домен", subtext: "Впишите зону, у которой есть поддомены kws1…kws5 на Telegram Web через CloudFlare. Свой домен важнее списка." }),
             new Header({ text: "Границы" }),
-            new Text({ key: "help_8", text: "Прямой TCP остаётся первым", subtext: "Клиент пробует обычные адреса Telegram и переходит на веб-транспорт, когда они не отвечают. Это тот же сценарий, ради которого существует tg-ws-proxy: сеть режет TCP до Telegram." }),
-            new Text({ key: "help_9", text: "Список может устареть", subtext: "Зоны взяты из tg-ws-proxy. Если ни одна не отвечает, плагин честно скажет об этом и не включится." }),
+            new Text({ key: "help_9", text: "Список может устареть", subtext: "Зоны взяты из tg-ws-proxy. Если ни одна не отвечает, прокси всё равно стартует с запасным маршрутом и честно пишет об этом в журнале." }),
+            new Text({ key: "help_10", text: "Это замена веб-маршрута движка", subtext: "Раньше плагин переключал встроенный веб-транспорт клиента через файл настройки. Теперь он поднимает настоящий локальный MTProxy — как приложение-референс." }),
             new Header({ text: "Ссылки" }),
             this.row("help_src", "Оригинальный tg-ws-proxy", {
                 subtext: "Flowseal",

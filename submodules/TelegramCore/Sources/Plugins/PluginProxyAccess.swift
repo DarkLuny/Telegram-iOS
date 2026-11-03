@@ -55,6 +55,74 @@ public enum PluginProxyAccess {
         }
     }
 
+    /// Puts `server` in the list and makes it the active proxy.
+    ///
+    /// This is the one operation `add` deliberately does not do: a subscription
+    /// list must not reroute traffic by itself. A local proxy is different — the
+    /// plugin asked for the client to go through it, and until the entry is the
+    /// active server the client keeps using the direct connection and the proxy
+    /// entry the plugin shows is not the one carrying messages.
+    ///
+    /// An entry for the same host, port and secret is reused rather than
+    /// duplicated, so starting the proxy again after a restart leaves the list
+    /// with one entry, not one per launch.
+    public static func activate(accountManager: AccountManager<TelegramAccountManagerTypes>, server: ProxyServerSettings) -> Signal<Bool, NoError> {
+        return accountManager.transaction { transaction -> Bool in
+            var changed = true
+            _ = updateProxySettingsInteractively(transaction: transaction, { settings in
+                var settings = settings
+                let existing = settings.servers.firstIndex(of: server)
+                if existing == nil {
+                    settings.servers.insert(server, at: 0)
+                } else {
+                    // Move it to the front so the list shows the proxy in use.
+                    if let index = existing, index != 0 {
+                        settings.servers.remove(at: index)
+                        settings.servers.insert(server, at: 0)
+                    }
+                }
+                if settings.activeServer == server && settings.enabled {
+                    changed = false
+                }
+                settings.activeServer = server
+                settings.enabled = true
+                return settings
+            })
+            return changed
+        }
+    }
+
+    /// Removes the local entries a plugin owns and switches back to a direct
+    /// connection if one of them was active.
+    ///
+    /// Only entries whose host is `host` and whose MTProto secret is in `secrets`
+    /// are touched. Another proxy the user configured by hand survives, and is
+    /// left active if it was the active one.
+    public static func deactivateLocal(accountManager: AccountManager<TelegramAccountManagerTypes>, host: String, secrets: [Data]) -> Signal<Int, NoError> {
+        let wanted = Set(secrets)
+        return accountManager.transaction { transaction -> Int in
+            var removed = 0
+            _ = updateProxySettingsInteractively(transaction: transaction, { settings in
+                var settings = settings
+                let isOurs: (ProxyServerSettings) -> Bool = { server in
+                    guard server.host == host, case let .mtp(secret) = server.connection else {
+                        return false
+                    }
+                    return wanted.contains(secret)
+                }
+                if let active = settings.activeServer, isOurs(active) {
+                    settings.activeServer = nil
+                    settings.enabled = false
+                }
+                let before = settings.servers.count
+                settings.servers.removeAll(where: isOurs)
+                removed = before - settings.servers.count
+                return settings
+            })
+            return removed
+        }
+    }
+
     /// Empties the list and turns proxying off, because a list with no active
     /// server cannot stay enabled.
     public static func removeAll(accountManager: AccountManager<TelegramAccountManagerTypes>) -> Signal<Int, NoError> {
