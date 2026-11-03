@@ -229,17 +229,27 @@ public final class PluginLocalProxy {
 
     private func activate(accountManager: AccountManager<TelegramAccountManagerTypes>, secret: Data, port: UInt16, domain: String, completion: @escaping (Status) -> Void) {
         let server = ProxyServerSettings(host: "127.0.0.1", port: Int32(port), connection: .mtp(secret: secret))
-        _ = PluginProxyAccess.activate(accountManager: accountManager, server: server).start(next: { success in
-            var status = self.currentStatus()
-            status.running = true
-            status.host = "127.0.0.1"
-            status.port = Int(port)
-            status.secret = secret
-            status.domain = domain
-            status.active = success
-            status.error = success ? nil : "the proxy list could not be updated"
-            self.setStatus(status)
-            completion(status)
+        // The listener is already up at this point, so the status says so before
+        // the list transaction runs; `active` follows it.
+        var status = self.currentStatus()
+        status.running = true
+        status.host = "127.0.0.1"
+        status.port = Int(port)
+        status.secret = secret
+        status.domain = domain
+        status.active = false
+        status.error = nil
+        self.setStatus(status)
+
+        // The transaction sets `activeServer` either way; its Bool only says
+        // whether the settings changed, and an entry that was already active is
+        // a success too. Reporting that as a failure is what would have shown
+        // "added, but not active" every time the proxy was started twice.
+        _ = PluginProxyAccess.activate(accountManager: accountManager, server: server).start(next: { _ in
+            var activated = self.currentStatus()
+            activated.active = true
+            self.setStatus(activated)
+            completion(activated)
         })
     }
 
