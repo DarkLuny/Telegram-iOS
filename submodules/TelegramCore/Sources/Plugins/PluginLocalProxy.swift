@@ -383,9 +383,12 @@ private final class LocalMTProxyAesCtr {
         }
         var output = Data(count: input.count)
         var moved = 0
-        let status = input.withUnsafeBytes { inputBytes -> CCCryptorStatus in
-            output.withUnsafeMutableBytes { outputBytes -> CCCryptorStatus in
-                CCCryptorUpdate(cryptor, inputBytes.baseAddress, input.count, outputBytes.baseAddress, output.count, &moved)
+        // The counts come from the buffers, not from `input`/`output`: reading
+        // `output` inside its own `withUnsafeMutableBytes` is an overlapping
+        // access and does not compile.
+        let status = input.withUnsafeBytes { (inputBytes: UnsafeRawBufferPointer) -> CCCryptorStatus in
+            output.withUnsafeMutableBytes { (outputBytes: UnsafeMutableRawBufferPointer) -> CCCryptorStatus in
+                CCCryptorUpdate(cryptor, inputBytes.baseAddress, inputBytes.count, outputBytes.baseAddress, outputBytes.count, &moved)
             }
         }
         guard status == kCCSuccess, moved == input.count else {

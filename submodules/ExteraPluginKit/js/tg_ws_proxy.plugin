@@ -397,6 +397,12 @@ class TgWsProxyPlugin extends BasePlugin {
         this.entry("автоподбор CF-домена: проверяю " + CF_DOMAINS.length, "info");
         this.probeDomains(CF_DOMAINS, PROBE_TIMEOUT, (results) => {
             this._busy = false;
+            // The switch can be turned off while the probes are in flight; a
+            // probe that lands afterwards must not start what was just stopped.
+            if (!this.get_setting("enabled", true)) {
+                this.entry("выключено во время проверки доменов", "info");
+                return;
+            }
             var pick = this.firstReachable(results);
             if (!pick) {
                 // The listener has its own fallbacks — Telegram's own web front,
