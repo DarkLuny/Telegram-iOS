@@ -1291,7 +1291,7 @@ private final class LocalMTProxyUpstream {
         }
         if let key = self.pendingWebSocketKey {
             let expected = LocalMTProxyUpstream.webSocketAccept(key: key)
-            if let line = text.split(separator: "\r\n").first(where: { $0.lowercased().hasPrefix("sec-websocket-accept:") }) {
+            if let line = text.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("sec-websocket-accept:") }) {
                 let value = line.split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
                 if value != expected {
                     self.fail()
