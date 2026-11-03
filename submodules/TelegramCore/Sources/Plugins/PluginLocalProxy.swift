@@ -1045,6 +1045,11 @@ private final class LocalMTProxyUpstream {
     private var queued: [Data] = []
     private var pingTimer: DispatchSourceTimer?
     private var lastTargetDescription = ""
+    /// Whether any payload byte has crossed this tunnel. Once one has, the
+    /// obfuscated stream is past its header and the next front would start its
+    /// own cipher at offset 64, so the session has to be rebuilt from the client
+    /// rather than continued on another target.
+    private var hasTransferredPayload = false
 
     private static let maximumBufferedBytes = 8 * 1024 * 1024
     private static let pingInterval: TimeInterval = 30.0
@@ -1104,8 +1109,16 @@ private final class LocalMTProxyUpstream {
         self.receiveBuffer = Data()
         self.isReady = false
         self.isWebSocket = false
-        // Packets already produced for this target are still valid for the next
-        // one: the header and the stream state do not change.
+        if self.hasTransferredPayload {
+            // The stream has moved past its header, so no second target can
+            // pick it up: it would start its cipher at offset 64 while our
+            // encryptor and the client's decryptor are further along. Closing
+            // makes the client open a fresh session with a fresh header.
+            self.close()
+            return
+        }
+        // Nothing crossed yet, so the same header and keystream are still valid
+        // for the next target.
         self.openNextTarget()
     }
 
@@ -1175,7 +1188,7 @@ private final class LocalMTProxyUpstream {
             }
             switch state {
             case .ready:
-                let request = "GET /apiws HTTP/1.1\r\nHost: \(host)\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Protocol: binary\r\n\r\n"
+                let request = "GET /apiws HTTP/1.1\r\nHost: \(host)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n\r\n"
                 connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
                     if error != nil {
                         self.fail()
@@ -1189,6 +1202,17 @@ private final class LocalMTProxyUpstream {
             }
         }
         connection.start(queue: self.queue)
+        // A front that accepts the connection and then never answers the
+        // upgrade would otherwise hold the session open forever with no
+        // fallback. The reference gives the upgrade five seconds; this gives it
+        // eight, which keeps a slow handshake alive but still moves on.
+        self.queue.asyncAfter(deadline: .now() + 8) { [weak self, weak connection] in
+            guard let self = self, let connection = connection, !self.isClosed, !self.isReady,
+                  self.connection === connection else {
+                return
+            }
+            self.fail()
+        }
     }
 
     private var pendingWebSocketKey: String?
@@ -1221,7 +1245,10 @@ private final class LocalMTProxyUpstream {
         guard let connection = self.connection else {
             return
         }
-        connection.send(content: self.initialHeader, completion: .contentProcessed { [weak self] error in
+        // Over WebSocket the obfuscated header is the first binary message, so
+        // it needs a frame of its own; the raw TCP fallback takes it as bytes.
+        let content = self.isWebSocket ? LocalMTProxyUpstream.maskFrame(self.initialHeader, opcode: 0x2) : self.initialHeader
+        connection.send(content: content, completion: .contentProcessed { [weak self] error in
             if error != nil {
                 self?.fail()
             }
@@ -1243,6 +1270,7 @@ private final class LocalMTProxyUpstream {
         guard let connection = self.connection else {
             return
         }
+        self.hasTransferredPayload = true
         let content = self.isWebSocket ? LocalMTProxyUpstream.maskFrame(packet, opcode: 0x2) : packet
         connection.send(content: content, completion: .contentProcessed { [weak self] error in
             if error != nil {
@@ -1271,6 +1299,7 @@ private final class LocalMTProxyUpstream {
                 } else {
                     let payload = self.receiveBuffer
                     self.receiveBuffer = Data()
+                    self.hasTransferredPayload = true
                     self.onPayload(payload)
                 }
             }
@@ -1371,6 +1400,9 @@ private final class LocalMTProxyUpstream {
             self.receiveBuffer.removeFirst(offset + maskLength + length)
             switch opcode {
             case 0x2, 0x0:
+                if !payload.isEmpty {
+                    self.hasTransferredPayload = true
+                }
                 self.onPayload(payload)
             case 0x9:
                 if let connection = self.connection {
