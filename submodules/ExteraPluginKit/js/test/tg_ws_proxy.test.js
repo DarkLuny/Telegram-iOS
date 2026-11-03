@@ -167,7 +167,7 @@ test('the screen is the automatic one: no Apply, a default-on switch', () => {
     const enable = controls.find((c) => c.type === 'switch' && c.key === 'enabled');
     assert.ok(enable, 'no enabled switch');
     assert.strictEqual(enable.default, true);
-    const selector = controls.find((c) => c.type === 'selector' && c.key === 'domain_index');
+    const selector = controls.find((c) => c.type === 'selector' && c.key === 'zone_index');
     assert.ok(selector, 'no domain selector');
     assert.deepStrictEqual(Array.from(selector.items), ['Автоматически'].concat(DOMAINS));
     assert.ok(controls.some((c) => c.key === 'connect' && c.type === 'text'));
@@ -220,7 +220,7 @@ test('choosing a zone probes only that zone and applies it', () => {
         front: () => ({ ok: false, status: 404 }),
     });
     const ctx = load(state);
-    changeSetting(state, ctx, 'domain_index', 3);
+    changeSetting(state, ctx, 'zone_index', 3);
     changeSetting(state, ctx, 'enabled', true);
     assert.deepStrictEqual(state.http.map((r) => r.url), ['https://kws2.cakeisalie.co.uk/']);
     assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'cakeisalie.co.uk' });
@@ -266,7 +266,7 @@ test('switching off removes the document and says so', () => {
     assert.ok(state.bulletins.some((b) => b.kind === 'info' && b.text.includes('Выключено')));
 });
 
-test('loading with an existing document probes nothing and mirrors it', () => {
+test('loading with an existing document probes nothing and keeps the choice', () => {
     const state = makeHost({
         settings: {},
         files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'lovetrue.co.uk' }) },
@@ -275,17 +275,20 @@ test('loading with an existing document probes nothing and mirrors it', () => {
     assert.strictEqual(state.http.length, 0);
     const controls = settingsOf(ctx);
     assert.strictEqual(controls.find((c) => c.key === 'enabled').value, true);
-    assert.strictEqual(controls.find((c) => c.key === 'domain_index').value, 5);
+    // An automatic choice stays automatic, so the next enable picks again
+    // instead of probing only the zone chosen last time.
+    assert.strictEqual(controls.find((c) => c.key === 'zone_index').value, 0);
     assert.strictEqual(controls.find((c) => c.key === 'custom_domain').value, '');
+    assert.ok(controlByKey(ctx, 'status').subtext.includes('kws1…5.lovetrue.co.uk'));
 });
 
-test('a document with a custom zone lands in the custom field', () => {
+test('a document with a custom zone is reported on the status row', () => {
     const state = makeHost({
         settings: {},
         files: { [CONFIG_PATH]: JSON.stringify({ enabled: true, domain: 'my.zone.example' }) },
     });
     const ctx = load(state);
-    assert.strictEqual(controlByKey(ctx, 'custom_domain').value, 'my.zone.example');
+    assert.ok(controlByKey(ctx, 'status').subtext.includes('kws1…5.my.zone.example'));
 });
 
 test('loading with the switch on and no document reconnects by itself', () => {
@@ -383,7 +386,7 @@ test('the report carries the applied transport and the confirmed host', () => {
     const report = state.clipboard[state.clipboard.length - 1];
     assert.ok(report.includes('cakeisalie.co.uk'), report);
     assert.ok(report.includes('kws2.cakeisalie.co.uk в 09:30'), report);
-    assert.ok(report.includes('Выбор: cakeisalie.co.uk'), report);
+    assert.ok(report.includes('Выбор: автоматически'), report);
 });
 
 const failed = [];

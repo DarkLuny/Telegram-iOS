@@ -174,14 +174,11 @@ class TgWsProxyPlugin extends BasePlugin {
 
         var config = this.readConfig();
         if (config && config.enabled) {
+            // The document is what the client follows, so the switch must agree
+            // with it. The zone is deliberately not copied into the selector: an
+            // automatic choice should stay automatic, or the next enable would
+            // probe only the zone picked last time instead of picking again.
             this.set_setting("enabled", true, false);
-            var index = CF_DOMAINS.indexOf(config.domain);
-            if (index >= 0) {
-                this.set_setting("domain_index", index + 1, false);
-                this.set_setting("custom_domain", "", false);
-            } else {
-                this.set_setting("custom_domain", config.domain, false);
-            }
         }
 
         var enabled = !!this.get_setting("enabled", true);
@@ -317,7 +314,7 @@ class TgWsProxyPlugin extends BasePlugin {
 
     // 0 is "Автоматически"; 1..CF_DOMAINS.length are the zones in order.
     rawDomainIndex() {
-        var index = parseInt(this.get_setting("domain_index", 0), 10);
+        var index = parseInt(this.get_setting("zone_index", 0), 10);
         return isFinite(index) ? index : 0;
     }
 
@@ -714,7 +711,7 @@ class TgWsProxyPlugin extends BasePlugin {
                 on_change: (value) => this.onEnabledChanged(value),
             }),
             new Selector({
-                key: "domain_index",
+                key: "zone_index",
                 text: "CF-домен",
                 default: 0,
                 items: ["Автоматически"].concat(CF_DOMAINS),
