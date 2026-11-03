@@ -1168,7 +1168,11 @@ public class ChatMessageAnimatedStickerItemNode: ChatMessageItemView {
                 hasAutoremove: item.message.isSelfExpiring,
                 canViewReactionList: canViewMessageReactionList(message: EngineMessage(item.message)),
                 animationCache: item.controllerInteraction.presentationContext.animationCache,
-                animationRenderer: item.controllerInteraction.presentationContext.animationRenderer
+                animationRenderer: item.controllerInteraction.presentationContext.animationRenderer,
+                // A sticker restored from a plugin's copy is still a saved row:
+                // without this the marker would be drawn on every row but this
+                // one, and a deleted sticker would look live again.
+                isDeleted: item.content.firstMessageAttributes.isDeleted
             ))
             
             let (dateAndStatusSize, dateAndStatusApply) = statusSuggestedWidthAndContinue.1(statusSuggestedWidthAndContinue.0)

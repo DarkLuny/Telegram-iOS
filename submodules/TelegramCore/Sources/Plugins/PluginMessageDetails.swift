@@ -13,7 +13,7 @@ import Postbox
 /// rather than a flag bit, `media_kind` rather than a class name. Everything is
 /// derived from the stored message alone, so building it never touches the
 /// network and never blocks.
-public func pluginMessageDetailsJSON(_ message: Message) -> String {
+public func pluginMessageDetailsJSON(_ message: Message, includingMediaData: Bool = false) -> String {
     var result: [String: Any] = [:]
 
     result["id"] = Int(message.id.id)
@@ -208,7 +208,53 @@ public func pluginMessageDetailsJSON(_ message: Message) -> String {
         result["media"] = media
     }
 
+    // The message's media, in the coding Postbox already uses for its own
+    // tables, as base64.
+    //
+    // A plugin that keeps a deleted message draws it again after the row is
+    // gone, and a row rebuilt from `media_kind` alone can only say
+    // "[sticker_video]" — it cannot show the sticker. This field is that
+    // sticker: decoding it gives the same `TelegramMediaFile` the message
+    // carried, and the row is drawn by the ordinary sticker node.
+    //
+    // A snapshot, not a reference: the plugin stores the bytes in its own
+    // file, so the media survives the message being erased from the database
+    // and needs no Postbox reference counting on either side. Only media that
+    // can be encoded and drawn is included, and the decoder refuses anything
+    // it does not recognise, so a corrupt or foreign value yields no media
+    // rather than a crash.
+    //
+    // Opt-in, because this function is also called for every visible row by
+    // the hide hook and for the insertion animation, where the media is never
+    // used: encoding a file description per row would put that work on the
+    // list's build path. Only the delete path asks for it.
+    if includingMediaData, let encoded = pluginEncodedMedia(message: message) {
+        result["media_data"] = encoded
+    }
+
     return pluginJSONString(result)
+}
+
+/// A message's first drawable media, encoded for the plugin store.
+///
+/// Action, service and unsupported media are skipped: they have nothing to
+/// draw once the message is gone, and the marker `media_kind` already
+/// describes them. The encoder refuses an empty result, which would decode to
+/// a broken object.
+private func pluginEncodedMedia(message: Message) -> String? {
+    for item in message.media {
+        guard item is TelegramMediaFile || item is TelegramMediaImage else {
+            continue
+        }
+        let encoder = PostboxEncoder()
+        encoder.encodeRootObject(item)
+        let data = encoder.makeData()
+        if data.isEmpty {
+            continue
+        }
+        return data.base64EncodedString()
+    }
+    return nil
 }
 
 /// The media kind a details screen groups by.
@@ -344,4 +390,29 @@ private func pluginActionName(_ action: TelegramMediaActionType) -> String {
         // which can hold a member list or user-written text.
         return "service"
     }
+}
+
+/// Decodes the media a plugin kept back into a drawable object.
+///
+/// The inverse of `pluginEncodedMedia`: the base64 string is what the plugin
+/// stored, and the result is the same `TelegramMediaFile` or
+/// `TelegramMediaImage` the message carried. Only types the app can draw are
+/// accepted and only when they have an id — a media with none cannot be placed
+/// in the media box, and the sticker nodes look one up. Anything else returns
+/// `nil`, and the caller falls back to the `mediaKind` marker.
+public func pluginDecodedMedia(base64: String?) -> Media? {
+    guard let base64 = base64, let data = Data(base64Encoded: base64), !data.isEmpty else {
+        return nil
+    }
+    let decoder = PostboxDecoder(buffer: MemoryBuffer(data: data))
+    guard let media = decoder.decodeRootObject() as? Media else {
+        return nil
+    }
+    guard media is TelegramMediaFile || media is TelegramMediaImage else {
+        return nil
+    }
+    guard media.id != nil else {
+        return nil
+    }
+    return media
 }

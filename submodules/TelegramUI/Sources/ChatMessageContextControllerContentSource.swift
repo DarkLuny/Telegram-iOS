@@ -48,7 +48,17 @@ final class ChatMessageContextExtractedContentSource: ContextExtractedContentSou
         if let chatController = self.chatController, case .customChatContents = chatController.subject {
             return .single(false)
         }
-    
+        // A saved copy of a deleted message is not in the database: it is a row
+        // the plugin synthesised, in the local namespace. Asking the database
+        // about it therefore always answers `nil`, and treating that as "the
+        // message was deleted, close the menu" would dismiss the menu the moment
+        // it opened. The row exists for as long as the plugin keeps the copy, so
+        // the menu stays up; deleting it goes through the same "delete" item as
+        // any other message, which forgets the copy.
+        if self.message.id.namespace == Namespaces.Message.Local {
+            return .single(false)
+        }
+
         return self.engine.data.subscribe(TelegramEngine.EngineData.Item.Messages.Message(id: self.message.id))
         |> map { message -> Bool in
             if let _ = message {

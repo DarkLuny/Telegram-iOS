@@ -1612,12 +1612,17 @@ public final class PluginManager: PluginHost {
         }
         let sender = (object["sender_id"] as? NSNumber)?.int64Value
         let mediaKind = (object["media_kind"] as? String).flatMap { $0 == "none" || $0.isEmpty ? nil : $0 }
+        // Passed through untouched: the plugin is only carrying the bytes the
+        // host gave it, and decoding is the caller's job, where the fallback to
+        // `mediaKind` lives if the bytes turn out to be unreadable.
+        let mediaData = (object["media_data"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         return PluginStoredMessage(
             peerId: peerId,
             messageId: id,
             timestamp: timestamp,
             text: (object["text"] as? String) ?? "",
             mediaKind: mediaKind,
+            mediaData: mediaData,
             senderId: sender == nil || sender == 0 ? nil : sender,
             isOutgoing: (object["is_out"] as? Bool) ?? false
         )

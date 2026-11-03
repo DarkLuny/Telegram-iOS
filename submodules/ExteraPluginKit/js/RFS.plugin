@@ -32,10 +32,14 @@
  *     `AndroidUtilities` here; the host does the same sweep with
  *     `UIApplication.shared.connectedScenes`, which is why the plugin does not
  *     carry one.
- *   - The original also let the client's own "screenshot taken" report through
- *     (it only removed the block, it did not pretend nothing happened). The same
- *     is true here: a screenshot of a secret chat is still reported to the peer,
- *     exactly as on Android with this plugin installed.
+ *   - The original's "screenshot taken" report on Android travelled with the
+ *     commercial app's own settings and was not part of the plugin. Here the
+ *     report is a separate service message (`historyScreenshot`), and leaving it
+ *     on would tell the peer about a screenshot of content this plugin claims is
+ *     free to capture. The host therefore asks
+ *     `PluginHookPoints.suppressScreenshotReport` at every enqueue site, and the
+ *     answer follows this switch: while screenshots are allowed, no report is
+ *     sent. Turning the plugin off restores the stock behaviour exactly.
  *   - A copy ban (`isCopyProtected`) also hides the copy/share affordances in the
  *     gallery and the message menu on Android, and the plugin did not restore
  *     them. Nor does this one: the promise is "you can screenshot", not "the
@@ -152,15 +156,15 @@ class RemoveFlagSecurePlugin extends BasePlugin {
                 text: "Уже открытый экран",
                 subtext: "Пометка, поставленная до включения плагина, снимается сразу: хост обходит окна приложения. Новые экраны собираются уже без неё."
             }),
+            Text({
+                text: "Отчёт о скриншоте",
+                subtext: "Пока скриншоты разрешены, собеседник не получает служебное сообщение о снимке экрана — оно уходит вместе с этим переключателем. Выключите плагин, и отчёт вернётся вместе с защитой."
+            }),
             Divider({}),
             Header({ text: "Что не перенесено" }),
             Text({
                 text: "Запрет копирования",
                 subtext: "На Android он ещё и убирал «копировать» и «переслать» из меню. Здесь этого нет: плагин разрешает снимок экрана, но не отменяет запрет копирования."
-            }),
-            Text({
-                text: "Отчёт о скриншоте",
-                subtext: "Снимок экрана секретного чата по-прежнему отправляется собеседнику — на Android с этим плагином было так же."
             })
         ];
     }

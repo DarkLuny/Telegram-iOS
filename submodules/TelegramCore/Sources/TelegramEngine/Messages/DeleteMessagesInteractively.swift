@@ -55,7 +55,10 @@ func _internal_deleteMessagesInteractively(account: Account, messageIds: [Messag
         // still arrive as updates and are handled there, so they are not
         // described twice.
         if wantsDeletedMessageHook, let willBeDeleted = PluginHookPoints.shared.messagesWillBeDeleted {
-            let described = messageIds.compactMap { transaction.getMessage($0) }.map(pluginMessageDetailsJSON)
+            // `includingMediaData` because this is the last moment the media
+            // exists: the plugin keeps it so the saved row can draw a sticker
+            // instead of a "[sticker_video]" marker.
+            let described = messageIds.compactMap { transaction.getMessage($0) }.map { pluginMessageDetailsJSON($0, includingMediaData: true) }
             if !described.isEmpty {
                 willBeDeleted(account.id.int64, "{\"messages\":[" + described.joined(separator: ",") + "]}")
             }

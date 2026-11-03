@@ -135,6 +135,22 @@ public final class PluginHookPoints {
     /// the call when nothing listens.
     public var canForgetDeletedMessages: (() -> Bool)?
 
+    // MARK: - Screenshot reports
+    //
+    // Telegram reports a screenshot to the peer by enqueuing a
+    // `TelegramMediaAction.historyScreenshot` service message. The report is
+    // *not* part of the screenshot protection: protection only keeps the content
+    // out of the capture, while the report is a message the user sends. So a
+    // plugin that removes the protection would leave the report behind, and the
+    // peer would learn about a screenshot of media the plugin claimed was free to
+    // capture. This closure is the switch that keeps the two together.
+
+    /// Whether the client should skip sending "screenshot taken" to the peer.
+    ///
+    /// Checked at every enqueue site, before the service message is built. `nil`
+    /// (nothing wired) and `false` both mean the stock behaviour: the peer is told.
+    public var suppressScreenshotReport: (() -> Bool)?
+
     // MARK: - Appearance
     //
     // The four hooks below are not network interception: they answer "what should
@@ -251,10 +267,7 @@ public struct PluginDetailItem {
 ///
 /// Everything here comes from the plugin's own storage rather than from the
 /// database: the message is gone, so the row in the chat has to be built from
-/// this description alone. That is why the text is a plain string with no
-/// entities and no media — the plugin only kept what it could encode into its
-/// JSON file, and a row that pretends to have more than that would show a
-/// message that never existed.
+/// this description alone.
 public struct PluginStoredMessage {
     /// The peer the message belongs to, as `PeerId.toInt64()`.
     public let peerId: Int64
@@ -265,23 +278,30 @@ public struct PluginStoredMessage {
     public let text: String
     /// What kind of media the message had, when it had no text.
     ///
-    /// The plugin kept a marker rather than the file itself — it can only store
-    /// what fits in its JSON file — so a deleted photo cannot be shown again.
-    /// Pretending otherwise, with an empty bubble, would read as a message that
-    /// was never sent; the marker says "there was a photo here", which is what
-    /// the module's own deleted-messages screen showed too.
+    /// Answers the row when no `mediaData` was kept: the marker says "there was
+    /// a photo here" rather than drawing an empty bubble that reads as a
+    /// message which was never sent.
     public let mediaKind: String?
+    /// The message's media, encoded by Postbox and base64'd.
+    ///
+    /// The plugin keeps the bytes in its own file, so the media outlives the
+    /// message being erased from the database and needs no reference counting
+    /// on either side. Decoded with `pluginDecodedMedia(base64:)`; `nil` for a
+    /// message whose media could not be encoded, which then falls back to
+    /// `mediaKind`.
+    public let mediaData: String?
     /// The author, when the plugin kept one. `nil` for a message with no author
     /// (a channel post, a deleted account).
     public let senderId: Int64?
     public let isOutgoing: Bool
 
-    public init(peerId: Int64, messageId: Int32, timestamp: Int32, text: String, mediaKind: String?, senderId: Int64?, isOutgoing: Bool) {
+    public init(peerId: Int64, messageId: Int32, timestamp: Int32, text: String, mediaKind: String?, mediaData: String? = nil, senderId: Int64?, isOutgoing: Bool) {
         self.peerId = peerId
         self.messageId = messageId
         self.timestamp = timestamp
         self.text = text
         self.mediaKind = mediaKind
+        self.mediaData = mediaData
         self.senderId = senderId
         self.isOutgoing = isOutgoing
     }

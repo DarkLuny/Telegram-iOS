@@ -291,6 +291,19 @@ public final class PluginRuntime {
             manager.dispatchForgetDeletedMessages(account: accountId, peerId: peerId, messageIds: messageIds)
         }
 
+        // "Screenshot taken" is a message to the peer, not a protection flag, so
+        // the client would keep reporting it even when a plugin allowed the
+        // capture. The two travel together: whenever the override answers "this
+        // screen is capturable", the report is silenced as well, which is the
+        // behaviour the Android plugin had.
+        //
+        // Read from the flag the override already applied rather than from a
+        // fresh plugin query: this is asked on the enqueue path, possibly off the
+        // main queue, and the flag is one atomic load.
+        hooks.suppressScreenshotReport = {
+            return screenshotsAllowedGlobally()
+        }
+
         // The screenshots switch (RFS). Applied once, at startup and whenever a
         // setting changes, rather than per screen: the answer flips one flag in
         // the layer primitive that every protected layer goes through.

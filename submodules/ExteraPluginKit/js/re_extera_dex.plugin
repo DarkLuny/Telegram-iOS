@@ -520,6 +520,14 @@ ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited, delete
         is_out: !!message.is_out,
         media_kind: mediaKind === undefined || mediaKind === null ? "none" : String(mediaKind)
     };
+    // The media itself, already encoded by the host. A raw update from
+    // `on_update_hook` has none — a TL object does not carry the coding — so it
+    // is only recorded when the host supplied it, which it does on the delete
+    // path, and that is the path a saved row is drawn from. Without it the row
+    // falls back to the `media_kind` marker.
+    if (typeof message.media_data === "string" && message.media_data.length !== 0) {
+        entry.media_data = message.media_data;
+    }
     if (edited) {
         // An edit replaces the text rather than adding a row: the module showed
         // a message's current text plus, in its own screen, the earlier ones.
@@ -543,8 +551,21 @@ ReExteraPlugin.prototype.rememberMessage = function (messageJSON, edited, delete
             // existing entry has to be marked, or the sample would stay listed as
             // a live message. `rememberMessage` is not called twice for a plain
             // sighting of the same message, so this cannot mark a live one.
+            var changed = false;
             if (deleted && !store.deleted_keys[j].deleted) {
                 store.deleted_keys[j].deleted = true;
+                changed = true;
+            }
+            // The first sighting came from a raw update, which carries no
+            // encoding; the delete path does, and that copy is what the row is
+            // drawn from. Filling it in here is what lets a message that was
+            // seen before it was deleted still show its sticker.
+            if (entry.media_data && !store.deleted_keys[j].media_data) {
+                store.deleted_keys[j].media_data = entry.media_data;
+                store.deleted_keys[j].media_kind = entry.media_kind;
+                changed = true;
+            }
+            if (changed) {
                 return this.writeStore();
             }
             return false;
@@ -1030,6 +1051,7 @@ ReExteraPlugin.prototype.on_deleted_messages = function (account, payload) {
             date: Number(entry.date || 0),
             text: entry.text === undefined || entry.text === null ? "" : String(entry.text),
             media_kind: entry.media_kind === undefined || entry.media_kind === null ? "none" : String(entry.media_kind),
+            media_data: typeof entry.media_data === "string" ? entry.media_data : "",
             sender_id: Number(entry.sender_id || 0),
             is_out: !!entry.is_out
         });

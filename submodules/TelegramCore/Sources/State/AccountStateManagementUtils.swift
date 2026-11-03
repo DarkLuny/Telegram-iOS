@@ -4143,7 +4143,7 @@ private func reportRemotelyDeletedMessages(transaction: Transaction, capture: Pl
         guard let message = transaction.getMessage(id) else {
             continue
         }
-        described.append(pluginMessageDetailsJSON(message))
+        described.append(pluginMessageDetailsJSON(message, includingMediaData: true))
     }
     if described.isEmpty {
         return

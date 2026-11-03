@@ -910,20 +910,12 @@ func chatHistoryEntriesForView(
             }
 
             for storedMessage in storedMessages {
-                // A copy with neither text nor a media marker has nothing to
-                // show: an empty bubble would read as a message that was never
-                // sent. The plugin's own list drops such an entry too.
-                let displayText: String
-                if !storedMessage.text.isEmpty {
-                    displayText = storedMessage.text
-                } else if let mediaKind = storedMessage.mediaKind {
-                    // The plugin keeps a marker, not the file, so a deleted
-                    // photo cannot be shown again. This is the same placeholder
-                    // its deleted-messages screen used.
-                    displayText = "[" + mediaKind + "]"
-                } else {
-                    continue
-                }
+                // A copy of a message that is still in the chat would be a
+                // second, identical row, and one outside the loaded window is
+                // not drawn at all. Both are settled before the media is
+                // decoded: this loop runs on every rebuild of the list, and
+                // decoding a file description per stored message would put that
+                // work on the list's build path for rows nobody will see.
                 let messageId = MessageId(peerId: peerId, namespace: Namespaces.Message.Local, id: storedMessage.messageId)
                 if liveMessageIds.contains(storedMessage.messageId) {
                     continue
@@ -933,6 +925,33 @@ func chatHistoryEntriesForView(
                     continue
                 }
                 if let laterId = view.laterId, index > laterId {
+                    continue
+                }
+
+                // The media the plugin kept, if it managed to store one. A
+                // sticker, photo or video comes back as the same object the
+                // message carried, so the row is drawn by its ordinary node
+                // instead of showing a marker.
+                var storedMedia: [Media] = []
+                if let media = pluginDecodedMedia(base64: storedMessage.mediaData) {
+                    storedMedia.append(media)
+                }
+
+                // A copy with neither text, nor media, nor a marker has nothing
+                // to show: an empty bubble would read as a message that was
+                // never sent. The plugin's own list drops such an entry too.
+                let displayText: String
+                if !storedMessage.text.isEmpty {
+                    displayText = storedMessage.text
+                } else if !storedMedia.isEmpty {
+                    // The media is drawn, so a caption is not needed. An empty
+                    // text is what a media-only message has anyway.
+                    displayText = ""
+                } else if let mediaKind = storedMessage.mediaKind {
+                    // No stored bytes (an older entry, or media that could not
+                    // be encoded): the kind is all that is left to show.
+                    displayText = "[" + mediaKind + "]"
+                } else {
                     continue
                 }
 
@@ -982,7 +1001,7 @@ func chatHistoryEntriesForView(
                     author: author,
                     text: displayText,
                     attributes: [],
-                    media: [],
+                    media: storedMedia,
                     peers: peers,
                     associatedMessages: SimpleDictionary<MessageId, Message>(),
                     associatedMessageIds: [],

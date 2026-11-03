@@ -26,6 +26,13 @@ func _internal_setSecretChatMessageAutoremoveTimeoutInteractively(transaction: T
 }
 
 func _internal_addSecretChatMessageScreenshot(account: Account, peerId: PeerId) -> Signal<Void, NoError> {
+    // The report is a message, not a protection flag: a plugin that lets the user
+    // capture a secret chat has to silence this too, or the peer learns about a
+    // screenshot of content the plugin said was free to capture. The hook is read
+    // before the transaction so a quiet client pays one optional check.
+    if PluginHookPoints.shared.suppressScreenshotReport?() == true {
+        return .complete()
+    }
     return account.postbox.transaction { transaction -> Void in
         if let _ = transaction.getPeer(peerId) as? TelegramSecretChat, let state = transaction.getPeerChatState(peerId) as? SecretChatState {
             switch state.embeddedState {
