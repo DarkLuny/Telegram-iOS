@@ -71,6 +71,19 @@ public enum PluginProxyAccess {
             var changed = true
             _ = updateProxySettingsInteractively(transaction: transaction, { settings in
                 var settings = settings
+                // The local listener takes a fixed port when it can and any free
+                // one otherwise, so a session can leave behind an entry for the
+                // same tunnel on an older port. Such an entry can never connect
+                // again, and leaving it would fill the list with dead rows after
+                // every launch that had to fall back.
+                if case let .mtp(secret) = server.connection {
+                    settings.servers.removeAll(where: { other in
+                        guard other != server, other.host == server.host, case let .mtp(otherSecret) = other.connection else {
+                            return false
+                        }
+                        return otherSecret == secret
+                    })
+                }
                 let existing = settings.servers.firstIndex(of: server)
                 if existing == nil {
                     settings.servers.insert(server, at: 0)
