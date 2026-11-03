@@ -195,6 +195,11 @@ final class RustEngineRuntime: NSObject, MTNetworkAvailabilityDelegate {
             var callbacks = rustStreamHostCallbacks()
             mt_engine_set_stream_host(engine, &callbacks)
         }
+        if let engine = self.engine {
+            // The plugin's route can change while the app runs; watch for it so
+            // switching it on applies without a restart.
+            TgWsProxyConfig.startWatching(engine: engine)
+        }
         self.networkAvailability = MTNetworkAvailability(delegate: self)
         #if canImport(AppKit)
         let engine = self.engine

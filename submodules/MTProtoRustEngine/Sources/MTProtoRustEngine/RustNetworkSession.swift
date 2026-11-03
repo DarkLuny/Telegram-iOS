@@ -83,6 +83,8 @@ final class RustNetworkSession: NetworkEngineSession, RustEngineEventHandler {
     private let isStopped = Atomic<Bool>(value: false)
     private var handle: MTSessionHandle = 0
     private var logPrefix: String
+    /// Set while the plugin's route is watched, so a change reaches a running session.
+    private var tgWsProxyObserver: NSObjectProtocol?
 
     private var pendingById: [UInt64: RustPendingRequest] = [:]
     private var activeRequests: [RustPendingRequest] = []
@@ -263,6 +265,17 @@ final class RustNetworkSession: NetworkEngineSession, RustEngineEventHandler {
                 mt_session_set_transport(engine, handle, UInt8(MTTransportAuto), self.httpPort)
                 if #available(macOS 10.14, iOS 12.0, *) {
                     RustNetworkSession.setWebEndpoint(engine: engine, handle: handle, isTestingEnvironment: context.isTestingEnvironment, datacenterId: datacenterId)
+                    TgWsProxyConfig.recordApplied(host: TgWsProxyConfig.host(datacenterId: datacenterId) ?? "", datacenterId: datacenterId)
+                    // The plugin can be switched on or off at any time; follow it,
+                    // so the running client takes the new route without a restart.
+                    self.tgWsProxyObserver = NotificationCenter.default.addObserver(forName: TgWsProxyConfig.didChangeNotification, object: nil, queue: nil, using: { [weak self] _ in
+                        guard let self = self else {
+                            return
+                        }
+                        self.queue.async {
+                            self.reapplyWebEndpoint()
+                        }
+                    })
                 }
             }
         }
@@ -292,9 +305,25 @@ final class RustNetworkSession: NetworkEngineSession, RustEngineEventHandler {
 
     private func teardown() {
         let _ = self.exportable.swap(false)
+        if let observer = self.tgWsProxyObserver {
+            self.tgWsProxyObserver = nil
+            NotificationCenter.default.removeObserver(observer)
+        }
         self.registry.unregister(self)
         self.runtime.destroySession(handle: self.handle)
         self.context.remove(self.listener)
+    }
+
+    /// Only on `queue`. The plugin's document changed while the app runs: hand
+    /// the engine the new front, or Telegram's own when it was switched off.
+    private func reapplyWebEndpoint() {
+        guard !self.isStopped.with({ $0 }), !self.isCdn, self.handle != 0, let engine = self.engine else {
+            return
+        }
+        if #available(macOS 10.14, iOS 12.0, *) {
+            RustNetworkSession.setWebEndpoint(engine: engine, handle: self.handle, isTestingEnvironment: self.context.isTestingEnvironment, datacenterId: self.datacenterId)
+            TgWsProxyConfig.recordApplied(host: TgWsProxyConfig.host(datacenterId: self.datacenterId) ?? "", datacenterId: self.datacenterId)
+        }
     }
 
     /// A running main session: the account's authorization can be exported through it.

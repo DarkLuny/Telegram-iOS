@@ -14,26 +14,22 @@
  * tests make. So the tunnel runs in the app process, through the app's own
  * network stack: no local port, no VPN, no separate app.
  *
- * What this plugin does:
- *   - writes that document, after checking the domain is a hostname;
- *   - shows which host each datacenter will use (`kws1.<domain>` …);
- *   - probes the CloudFlare zones from this device before the user commits;
- *   - keeps the app's log rules for its own short journal.
+ * It is automatic, like the reference app is once its button is pressed:
+ *   - enabling the plugin picks a working zone itself and writes the document;
+ *   - the client watches that document and moves its live sessions at once,
+ *     so there is no restart and no Apply;
+ *   - switching the plugin off puts the client back on Telegram's own hosts;
+ *   - the client writes back what it applied, and the status row shows it.
  *
- * What it no longer needs, because the engine handles it: the MTProxy secret,
- * the listening port, the WebSocket pool size and the DC address list. The web
- * front carries the account's own authorized session, not a proxy entry.
- *
- * The setting is read when a network session is created, so a change applies
- * after the client is restarted (or after the sessions are rebuilt). The screen
- * says so rather than pretending a running connection moved.
+ * The only thing the reference app has that this plugin does not is the
+ * button: everything here happens from the switch itself.
  */
 
 var __id__ = "tg_ws_proxy";
 var __name__ = "TG WS Proxy";
-var __description__ = "MTProto через WebSocket CloudFlare внутри клиента: переводит встроенный веб-транспорт Telegram на CF-домены tg-ws-proxy (kws1…kws5.<домен>).\n\nБез отдельного приложения, VPN и локального порта. Настройка применяется после перезапуска клиента.";
+var __description__ = "MTProto через WebSocket CloudFlare внутри клиента. Подбирает рабочий CF-домен сам и подключается сразу при включении — без кнопки, перезапуска, VPN и локального порта.";
 var __author__ = "tg-ws-proxy (Flowseal), порт для ExteraPluginKit";
-var __version__ = "2.0.0";
+var __version__ = "2.1.0";
 var __min_version__ = "13.1.1";
 
 // `cfproxyEnc` from tg-ws-proxy.go. The core decodes each entry into the zone it
@@ -46,9 +42,19 @@ var CFPROXY_ENCODED = [
     "twdmbzcm.com",
 ];
 
-// The marker the client build reads. Keep in step with
-// `TgWsProxyConfig.fileName` in MTProtoRustEngine.
+// The document the client build reads. Keep in step with `TgWsProxyConfig.fileName`
+// in MTProtoRustEngine.
 var CONFIG_FILE = "tg_ws_proxy.json";
+
+// What the client wrote back after handing the endpoint to the engine. Keep in
+// step with `TgWsProxyConfig.statusFileName`.
+var STATUS_FILE = "tg_ws_proxy_status.json";
+
+// The host the probes ask for. `kws2` is a real front — every zone answers it —
+// and a plain GET is enough to prove DNS and TLS work, even when the answer
+// is 404.
+var PROBE_DATACENTER = 2;
+var PROBE_TIMEOUT = 4;
 
 // `LogManager` from the app: consecutive duplicates collapse into a count, the
 // list is capped, and these markers are always kept. Used for the plugin's own
@@ -145,42 +151,71 @@ function normalizeHost(value) {
     return text;
 }
 
+// The status document's clock, as local HH:MM.
+function formatAppliedTime(seconds) {
+    var date = new Date(seconds * 1000);
+    var hours = date.getHours();
+    var minutes = date.getMinutes();
+    return (hours < 10 ? "0" : "") + hours + ":" + (minutes < 10 ? "0" : "") + minutes;
+}
+
 // --- plugin ---------------------------------------------------------------
 
 class TgWsProxyPlugin extends BasePlugin {
+    // --- lifecycle --------------------------------------------------------
+
     on_plugin_load() {
         this.resetLog();
+        this._busy = false;
+        // `set_setting` can deliver the change callback synchronously, and this
+        // method mirrors stored values into the screen; without the guard that
+        // would start a connection from inside the load.
+        this._loading = true;
+
         var config = this.readConfig();
-        // Mirror an existing document into the screen's own settings, so the
-        // rows agree with what the client actually reads. With no document the
-        // stored settings are left alone: the user may have enabled the switch
-        // and not pressed Apply yet, and silently flipping it back would look
-        // like a lost choice. The status row says "not applied" instead.
-        if (config) {
-            this.set_setting("enabled", !!config.enabled);
-        }
-        if (config && config.domain) {
+        if (config && config.enabled) {
+            this.set_setting("enabled", true, false);
             var index = CF_DOMAINS.indexOf(config.domain);
             if (index >= 0) {
-                this.set_setting("domain_index", index);
-                this.set_setting("custom_domain", "");
+                this.set_setting("domain_index", index + 1, false);
+                this.set_setting("custom_domain", "", false);
             } else {
-                this.set_setting("custom_domain", config.domain);
+                this.set_setting("custom_domain", config.domain, false);
             }
         }
+
+        var enabled = !!this.get_setting("enabled", true);
+        this._loading = false;
         this.entry("плагин загружен", "info");
-        if (config && config.enabled) {
-            this.entry("транспорт включён: kws1…5." + config.domain + " (действует после перезапуска)", "info");
-        } else {
+
+        if (!enabled) {
             this.entry("транспорт выключен, клиент использует обычный маршрут", "info");
+            return;
         }
+        if (config && config.enabled) {
+            this.entry("маршрут уже действует: kws1…5." + config.domain, "info");
+            return;
+        }
+        // No document, but the plugin is on: reconnect by itself, exactly as
+        // enabling the plugin does in the reference app minus the button.
+        var remembered = normalizeHost(this.get_setting("last_domain", ""));
+        if (remembered) {
+            this.entry("восстанавливаю прежний домен: " + remembered, "info");
+            this.applyDomain(remembered, false);
+            return;
+        }
+        this.connect();
     }
 
     on_plugin_unload() {
-        this.entry("плагин выгружен", "info");
+        // The tunnel is the plugin: disabling it (or removing it) must put the
+        // client back on Telegram's own hosts. The last domain is kept in the
+        // settings, so the next load reconnects without probing again.
+        this.removeConfig(true);
+        this.entry("плагин выгружен, транспорт снят", "info");
     }
 
-    // --- the file the client build reads ----------------------------------
+    // --- the document the client build reads ------------------------------
 
     configPath() {
         var documents = file_utils.get_documents_dir();
@@ -188,6 +223,14 @@ class TgWsProxyPlugin extends BasePlugin {
             return "";
         }
         return documents + "/" + CONFIG_FILE;
+    }
+
+    statusPath() {
+        var documents = file_utils.get_documents_dir();
+        if (!documents) {
+            return "";
+        }
+        return documents + "/" + STATUS_FILE;
     }
 
     readConfig() {
@@ -235,7 +278,7 @@ class TgWsProxyPlugin extends BasePlugin {
         if (path && file_utils.file_exists(path) && !file_utils.delete_file(path)) {
             this.entry("не удалось удалить настройку транспорта", "error");
             if (!quiet) {
-                ui.bulletin.show_error("Не удалось удалить настройку");
+                ui.bulletin.show_error("Не удалось выключить транспорт");
             }
             return false;
         }
@@ -245,152 +288,265 @@ class TgWsProxyPlugin extends BasePlugin {
         return true;
     }
 
+    // What the client last handed to the engine, or null when it wrote nothing.
+    appliedStatus() {
+        var path = this.statusPath();
+        if (!path) {
+            return null;
+        }
+        var text = file_utils.read_file(path);
+        if (!text) {
+            return null;
+        }
+        var parsed = null;
+        try {
+            parsed = JSON.parse(text);
+        } catch (error) {
+            return null;
+        }
+        if (!parsed || typeof parsed !== "object") {
+            return null;
+        }
+        return {
+            host: typeof parsed.host === "string" ? parsed.host : "",
+            at: typeof parsed.at === "number" ? parsed.at : 0,
+        };
+    }
+
     // --- what the screen would write --------------------------------------
 
-    // The selector's own value, including the trailing "custom" entry.
+    // 0 is "Автоматически"; 1..CF_DOMAINS.length are the zones in order.
     rawDomainIndex() {
         var index = parseInt(this.get_setting("domain_index", 0), 10);
         return isFinite(index) ? index : 0;
     }
 
-    // The index into the zone list; the custom entry and anything out of range
-    // read as the first zone so a list lookup never misses.
     domainIndex() {
         var index = this.rawDomainIndex();
-        if (index < 0 || index >= CF_DOMAINS.length) {
+        if (index < 0 || index > CF_DOMAINS.length) {
             return 0;
         }
         return index;
+    }
+
+    isAuto() {
+        return this.domainIndex() === 0;
     }
 
     customDomain() {
         return normalizeHost(this.get_setting("custom_domain", ""));
     }
 
-    // Whether something is typed in the custom field at all. A field with a
-    // typo is not "use the list": it is a value the user meant to use, so the
-    // screen refuses it instead of quietly dialling a different zone.
     hasCustomInput() {
         return String(this.get_setting("custom_domain", "")).trim() !== "";
     }
 
-    // Picked "Свой домен…" in the list. With nothing typed this is an unfinished
-    // choice, not the first zone: applying it would send the user to a zone they
-    // did not pick.
-    usesCustomEntry() {
-        return this.rawDomainIndex() === CF_DOMAINS.length;
-    }
-
-    // The custom field wins when it holds a valid host; otherwise the selected
-    // zone. Unlike the list it may be any CF zone the user knows, because the
-    // defaults can be blocked over time.
-    effectiveDomain() {
+    // The zone the form asks for when it is not automatic; "" when it is.
+    desiredDomain() {
         if (this.hasCustomInput()) {
             return this.customDomain();
         }
-        if (this.usesCustomEntry()) {
-            return "";
+        var index = this.domainIndex();
+        if (index > 0) {
+            return CF_DOMAINS[index - 1] || "";
         }
-        return CF_DOMAINS[this.domainIndex()] || "";
+        return "";
     }
 
-    // The host the engine will dial for a datacenter is `kws<dc>.<zone>`,
-    // mirroring `wsDomains()` in tg-ws-proxy.go. The screen summarises it for
-    // the five production datacenters rather than listing every one.
+    // --- probing ----------------------------------------------------------
 
-    configSummary() {
-        var path = this.configPath();
-        var exists = path ? file_utils.file_exists(path) : false;
-        var config = this.readConfig();
-        if (config && config.enabled) {
-            var text = "Включено: kws1…5." + config.domain;
-            if (exists && this.effectiveDomain() !== config.domain) {
-                text += " · в форме другое значение, нажмите «Применить»";
+    probeOne(domain, timeout, callback) {
+        var host = "kws" + PROBE_DATACENTER + "." + domain;
+        http.get("https://" + host + "/", { timeout: timeout }, (response) => {
+            var status = response && typeof response.status === "number" ? response.status : 0;
+            if (status > 0) {
+                this.entry("CF " + host + " — ответ " + status, "info");
+            } else {
+                this.entry("CF " + host + " — нет ответа (" + ((response && response.error) || "таймаут") + ")", "error");
             }
-            return text;
+            callback(status);
+        });
+    }
+
+    // All at once, not one after another: the point of picking a zone is to
+    // take the first one that answers, and five sequential four-second timeouts
+    // would make a blocked network look like five dead zones in a row.
+    probeDomains(domains, timeout, done) {
+        var results = [];
+        var remaining = domains.length;
+        if (remaining === 0) {
+            done(results);
+            return;
         }
-        if (this.get_setting("enabled", false)) {
-            return "Не применено · в форме включено, нажмите «Применить»";
+        var finish = () => {
+            remaining -= 1;
+            if (remaining === 0) {
+                done(results);
+            }
+        };
+        for (var i = 0; i < domains.length; i += 1) {
+            this.probeInto(domains[i], i, results, timeout, finish);
         }
-        return "Выключено";
+    }
+
+    probeInto(domain, position, results, timeout, finish) {
+        this.probeOne(domain, timeout, (status) => {
+            results[position] = { domain: domain, status: status };
+            finish();
+        });
+    }
+
+    // Any answer below 500 means the front is there: DNS and TLS worked and the
+    // CloudFlare edge routed the host. 5xx means the edge could not reach the
+    // origin, which is exactly what a WebSocket through it would hit too.
+    firstReachable(results) {
+        for (var i = 0; i < results.length; i += 1) {
+            if (results[i] && results[i].status > 0 && results[i].status < 500) {
+                return results[i];
+            }
+        }
+        return null;
+    }
+
+    // --- connecting -------------------------------------------------------
+
+    // The automatic path, and the only thing the reference app needs a button
+    // for: probe every zone, take the first that answers, write it.
+    connect() {
+        if (this._busy) {
+            return;
+        }
+        var custom = String(this.get_setting("custom_domain", "")).trim();
+        if (custom) {
+            var domain = normalizeHost(custom);
+            if (!domain) {
+                this.entry("свой домен не похож на имя хоста", "error");
+                ui.bulletin.show_error("Свой домен не похож на имя хоста");
+                this.set_setting("enabled", false, true);
+                return;
+            }
+            this.connectFixed(domain);
+            return;
+        }
+        var index = this.domainIndex();
+        if (index > 0) {
+            this.connectFixed(CF_DOMAINS[index - 1]);
+            return;
+        }
+        this.autoConnect();
+    }
+
+    autoConnect() {
+        this._busy = true;
+        this.entry("автоподбор CF-домена: проверяю " + CF_DOMAINS.length, "info");
+        this.probeDomains(CF_DOMAINS, PROBE_TIMEOUT, (results) => {
+            this._busy = false;
+            var pick = this.firstReachable(results);
+            if (!pick) {
+                this.entry("ни один CF-домен не ответил", "error");
+                ui.bulletin.show_error("Ни один CF-домен не ответил — проверьте сеть");
+                this.set_setting("enabled", false, true);
+                return;
+            }
+            this.entry("выбран " + pick.domain + " (ответ " + pick.status + ")", "info");
+            this.applyDomain(pick.domain, false);
+        });
+    }
+
+    // A zone the user asked for by name is applied even when the probe gets
+    // nothing: the answer may be a filtered probe rather than a dead front, and
+    // refusing a deliberate choice is worse than honouring it with a warning.
+    connectFixed(domain) {
+        this._busy = true;
+        this.probeOne(domain, PROBE_TIMEOUT, (status) => {
+            this._busy = false;
+            if (status > 0 && status < 500) {
+                this.applyDomain(domain, false);
+                return;
+            }
+            this.entry("домен " + domain + " не ответил, всё равно включаю", "error");
+            this.applyDomain(domain, true);
+        });
+    }
+
+    applyDomain(domain, unreachable) {
+        if (!this.writeConfig(domain)) {
+            ui.bulletin.show_error("Не удалось сохранить настройку");
+            this.set_setting("enabled", false, true);
+            return;
+        }
+        this.set_setting("last_domain", domain, false);
+        this.entry("маршрут: kws1…5." + domain, "info");
+        if (unreachable) {
+            ui.bulletin.show_info("Включено: kws1…5." + domain + ". Домен не ответил на проверку.");
+        } else {
+            ui.bulletin.show_success("Подключено: kws1…5." + domain);
+        }
+        this.set_setting("transport_reload", Date.now(), true);
+    }
+
+    disconnect() {
+        var hadConfig = !!this.readConfig();
+        this.removeConfig(true);
+        this.entry("транспорт выключен", "info");
+        if (hadConfig) {
+            ui.bulletin.show_info("Выключено. Клиент вернётся на обычный маршрут.");
+        }
+        this.set_setting("transport_reload", Date.now(), true);
+    }
+
+    // --- the switch and the selector --------------------------------------
+
+    onEnabledChanged(value) {
+        if (this._loading) {
+            return;
+        }
+        var enabled = value === undefined || value === null ? !!this.get_setting("enabled", true) : !!value;
+        if (enabled) {
+            this.entry("включение: подбираю домен", "info");
+            this.connect();
+        } else {
+            this.disconnect();
+        }
+    }
+
+    onDomainChanged(value) {
+        if (this._loading) {
+            return;
+        }
+        // Choosing a zone while the transport is off only stores the choice.
+        // While it is on, the choice takes effect at once, as the reference app's
+        // button would.
+        if (!this.get_setting("enabled", true)) {
+            return;
+        }
+        this.connect();
     }
 
     // --- actions ----------------------------------------------------------
 
-    saveFromForm() {
-        var enabled = !!this.get_setting("enabled", false);
-        if (!enabled) {
-            this.removeConfig(true);
-            this.entry("транспорт выключен", "info");
-            ui.bulletin.show_info("Транспорт выключен. Клиент вернётся к обычному маршруту после перезапуска.");
-            return;
-        }
-        var domain = this.effectiveDomain();
-        if (!domain) {
-            this.entry("домен не задан или не похож на имя хоста", "error");
-            ui.bulletin.show_error("Домен не задан или не похож на имя хоста");
-            return;
-        }
-        if (!this.writeConfig(domain)) {
-            ui.bulletin.show_error("Не удалось сохранить настройку");
-            return;
-        }
-        this.entry("сохранено: kws1…5." + domain, "info");
-        ui.bulletin.show_success("Сохранено. Применится после перезапуска клиента.");
-    }
-
-    disableAndRemove() {
-        this.set_setting("enabled", false);
-        this.set_setting("transport_reload", Date.now(), true);
-        this.removeConfig(false);
-        ui.bulletin.show_info("Транспорт отключён. Применится после перезапуска клиента.");
-    }
-
-    // Probes the zones the user can pick (or the custom one) by asking the front
-    // for a host that is really used, `kws2.<zone>`. The HTTP bridge reports a
-    // non-2xx as `ok: false` but keeps the status, and any status at all means
-    // DNS and TLS answered. The probes run one after another so a slow zone does
-    // not turn the whole check into a burst of timeouts.
+    // Probes only, no write: the reference app's "check" button.
     checkDomains() {
-        var custom = this.customDomain();
-        if (this.hasCustomInput() && !custom) {
-            this.entry("свой домен не похож на имя хоста", "error");
-            ui.bulletin.show_error("Свой домен не похож на имя хоста");
-            return;
-        }
-        if (this.usesCustomEntry() && !custom) {
-            ui.bulletin.show_error("Укажите свой домен");
-            return;
-        }
-        var domains = this.hasCustomInput() ? [custom] : CF_DOMAINS;
-        if (!domains.length) {
-            ui.bulletin.show_error("Нет доменов для проверки");
-            return;
-        }
-        var index = 0;
-        var answered = 0;
-        this.entry("проверка CF-доменов: " + domains.length, "info");
-        var next = () => {
-            if (index >= domains.length) {
-                this.entry("проверено: " + domains.length + ", ответили: " + answered, "info");
-                ui.bulletin.show_info("Ответили " + answered + " из " + domains.length + " доменов");
+        var domains = CF_DOMAINS;
+        if (this.hasCustomInput()) {
+            var custom = this.customDomain();
+            if (!custom) {
+                ui.bulletin.show_error("Свой домен не похож на имя хоста");
                 return;
             }
-            var domain = domains[index];
-            index += 1;
-            var host = "kws2." + domain;
-            http.get("https://" + host + "/", { timeout: 6 }, (response) => {
-                var status = response && typeof response.status === "number" ? response.status : 0;
-                if (status > 0) {
+            domains = [custom];
+        }
+        this.entry("проверка CF-доменов: " + domains.length, "info");
+        this.probeDomains(domains, PROBE_TIMEOUT, (results) => {
+            var answered = 0;
+            for (var i = 0; i < results.length; i += 1) {
+                if (results[i] && results[i].status > 0 && results[i].status < 500) {
                     answered += 1;
-                    this.entry("CF " + host + " — ответ " + status, "info");
-                } else {
-                    this.entry("CF " + host + " — нет ответа (" + ((response && response.error) || "timeout") + ")", "error");
                 }
-                next();
-            });
-        };
-        next();
+            }
+            this.entry("проверено: " + results.length + ", ответили: " + answered, "info");
+            ui.bulletin.show_info("Ответили " + answered + " из " + results.length + " доменов");
+        });
     }
 
     copyDomainList() {
@@ -400,6 +556,7 @@ class TgWsProxyPlugin extends BasePlugin {
 
     copyReport() {
         var config = this.readConfig();
+        var applied = this.appliedStatus();
         var errors = [];
         var entries = this.logEntries();
         for (var i = 0; i < entries.length; i += 1) {
@@ -409,7 +566,8 @@ class TgWsProxyPlugin extends BasePlugin {
         }
         var report = "TG WS Proxy (плагин " + __version__ + ")\n";
         report += "Транспорт: " + (config && config.enabled ? "kws1…5." + config.domain : "выключен") + "\n";
-        report += "В форме: " + (this.effectiveDomain() || "—") + "\n";
+        report += "Выбор: " + (this.isAuto() ? "автоматически" : (this.desiredDomain() || "—")) + "\n";
+        report += "Клиент применил: " + (applied && applied.host ? applied.host + " в " + formatAppliedTime(applied.at) : "нет подтверждения") + "\n";
         report += "Домены: " + CF_DOMAINS.join(", ") + "\n";
         if (!errors.length) {
             report += "Ошибки: нет\n";
@@ -424,6 +582,30 @@ class TgWsProxyPlugin extends BasePlugin {
         if (!android_utils.open_url(url)) {
             ui.bulletin.show_error("Не удалось открыть ссылку");
         }
+    }
+
+    // --- the status row ---------------------------------------------------
+
+    configSummary() {
+        var config = this.readConfig();
+        var applied = this.appliedStatus();
+        if (!config || !config.enabled) {
+            if (this.get_setting("enabled", true)) {
+                return "Включается… подбираю CF-домен";
+            }
+            return "Выключено · клиент на обычном маршруте";
+        }
+        var text = "Включено: kws1…5." + config.domain;
+        if (applied && applied.host && applied.host.indexOf("." + config.domain) >= 0) {
+            text += " · клиент применил в " + formatAppliedTime(applied.at);
+        } else {
+            text += " · клиент ещё переключается";
+        }
+        var desired = this.desiredDomain();
+        if (desired && desired !== config.domain) {
+            text += " · выбрано " + desired;
+        }
+        return text;
     }
 
     // --- journal (LogManager) ---------------------------------------------
@@ -525,56 +707,49 @@ class TgWsProxyPlugin extends BasePlugin {
             new Header({ text: "Транспорт CloudFlare" }),
             new Switch({
                 key: "enabled",
-                text: "Включить WebSocket через CloudFlare",
-                default: false,
-                subtext: "Встроенный веб-транспорт клиента вместо обычного маршрута",
+                text: "MTProto через CloudFlare",
+                default: true,
+                subtext: "Включено — клиент сам выбирает рабочий CF-домен и переключается сразу",
                 icon: "msg_folders",
+                on_change: (value) => this.onEnabledChanged(value),
             }),
             new Selector({
                 key: "domain_index",
                 text: "CF-домен",
                 default: 0,
-                items: CF_DOMAINS.concat(["Свой домен…"]),
+                items: ["Автоматически"].concat(CF_DOMAINS),
                 icon: "msg_list",
+                on_change: (value) => this.onDomainChanged(value),
             }),
             new Input({
                 key: "custom_domain",
                 text: "Свой домен",
                 default: "",
-                subtext: "Если заполнен — важнее списка; зона должна отдавать kws1…kws5",
+                subtext: "Важнее списка. Применяется кнопкой ниже или повторным включением",
                 icon: "msg_link",
-            }),
-            this.row("apply", "Применить", {
-                subtext: "Запишет настройку для клиента",
-                icon: "msg_retry",
-                accent: true,
-                on_click: () => {
-                    this.saveFromForm();
-                    this.set_setting("transport_reload", Date.now(), true);
-                },
             }),
             this.row("status", "Состояние", {
                 subtext: this.configSummary(),
                 icon: "msg_settings",
             }),
-            this.row("restart_note", "Нужен перезапуск", {
-                subtext: "Маршрут выбирается при создании сетевых сессий — закройте и откройте клиент",
+            this.row("connect", this.hasCustomInput() ? "Подключиться к своему домену" : (this.isAuto() ? "Подобрать заново" : "Подключиться к выбранному"), {
+                subtext: "Проверит домены и переключит клиент сейчас",
+                icon: "msg_retry",
+                accent: true,
+                on_click: () => {
+                    this.set_setting("enabled", true, false);
+                    this.connect();
+                },
             }),
             new Header({ text: "Проверка" }),
             this.row("check", "Проверить CF-домены", {
-                subtext: "Запрос к kws2.<домен> с этого устройства",
+                subtext: "Запрос к kws" + PROBE_DATACENTER + ".<домен> с этого устройства",
                 icon: "msg_retry",
                 on_click: () => this.checkDomains(),
             }),
             this.row("copy_domains", "Скопировать список доменов", {
                 icon: "msg_share",
                 on_click: () => this.copyDomainList(),
-            }),
-            this.row("disable", "Отключить и удалить настройку", {
-                subtext: "Клиент вернётся к обычному маршруту",
-                icon: "msg_delete",
-                red: true,
-                on_click: () => this.disableAndRemove(),
             }),
             new Header({ text: "Журнал" }),
             new Switch({
@@ -655,16 +830,17 @@ class TgWsProxyPlugin extends BasePlugin {
     helpPage() {
         return [
             new Header({ text: "Что делает плагин" }),
-            new Text({ key: "help_1", text: "Переводит клиент на Telegram Web через CloudFlare", subtext: "Встроенный веб-транспорт клиента (WebSocket к Telegram Web) начинает ходить на kws1.<домен> … kws5.<домен> — те же зоны, что использует tg-ws-proxy." }),
+            new Text({ key: "help_1", text: "Включает MTProto через CloudFlare", subtext: "Встроенный веб-транспорт клиента (WebSocket к Telegram Web) ходит на kws1.<домен> … kws5.<домен> — те же зоны, что использует tg-ws-proxy." }),
             new Text({ key: "help_2", text: "Всё внутри клиента", subtext: "Нет локального порта, VPN, отдельного приложения и профиля расширения. Соединение несёт сам клиент, через свой сетевой стек." }),
             new Text({ key: "help_3", text: "Без секрета и без прокси-записи", subtext: "Секрет MTProxy, порт 1443 и пул WebSocket нужны были локальному серверу приложения. Здесь их роль выполняет движок клиента." }),
-            new Text({ key: "help_4", text: "Проверка доменов", subtext: "Плагин запрашивает kws2.<домен> и считает домен живым, если пришёл любой HTTP-ответ: это значит, что DNS и TLS работают." }),
-            new Header({ text: "Как применить" }),
-            new Text({ key: "help_5", text: "Выберите домен и нажмите «Применить»", subtext: "Плагин запишет настройку в Documents/tg_ws_proxy.json, откуда её читает этот сборка клиента." }),
-            new Text({ key: "help_6", text: "Перезапустите клиент", subtext: "Маршрут выбирается при создании сетевых сессий. После закрытия и открытия приложения новые соединения пойдут через CF-домен." }),
+            new Header({ text: "Как это работает" }),
+            new Text({ key: "help_4", text: "Домен выбирается сам", subtext: "При включении плагин одновременно опрашивает все зоны из списка, берёт первую ответившую и записывает её. Ничего нажимать не нужно — это единственное отличие от приложения-референса, где была кнопка." }),
+            new Text({ key: "help_5", text: "Подключается сразу", subtext: "Клиент следит за настройкой и переводит живые сессии на выбранный домен без перезапуска. Строка «Состояние» показывает, что клиент применил и во сколько." }),
+            new Text({ key: "help_6", text: "Выключение возвращает обычный маршрут", subtext: "Выключите переключатель или сам плагин — настройка снимается, и клиент возвращается на адреса Telegram." }),
+            new Text({ key: "help_7", text: "Свой домен", subtext: "Впишите зону, у которой есть поддомены kws1…kws5 на Telegram Web через CloudFlare, и нажмите строку подключения. Свой домен важнее списка." }),
             new Header({ text: "Границы" }),
-            new Text({ key: "help_7", text: "Прямой TCP остаётся первым", subtext: "Клиент пробует обычные адреса Telegram и переходит на веб-транспорт, когда они не отвечают. Это тот же сценарий, ради которого существует tg-ws-proxy: сеть режет TCP до Telegram." }),
-            new Text({ key: "help_8", text: "Домен должен быть настроен", subtext: "Свой домен подойдёт, если у него есть поддомены kws1…kws5, указывающие на Telegram Web через CloudFlare. Список по умолчанию взят из tg-ws-proxy и может устареть." }),
+            new Text({ key: "help_8", text: "Прямой TCP остаётся первым", subtext: "Клиент пробует обычные адреса Telegram и переходит на веб-транспорт, когда они не отвечают. Это тот же сценарий, ради которого существует tg-ws-proxy: сеть режет TCP до Telegram." }),
+            new Text({ key: "help_9", text: "Список может устареть", subtext: "Зоны взяты из tg-ws-proxy. Если ни одна не отвечает, плагин честно скажет об этом и не включится." }),
             new Header({ text: "Ссылки" }),
             this.row("help_src", "Оригинальный tg-ws-proxy", {
                 subtext: "Flowseal",

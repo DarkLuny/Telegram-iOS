@@ -1,4 +1,5 @@
 import Foundation
+import MTProtoEngineFFI
 
 /// The CloudFlare-fronted Telegram Web endpoint that `tg_ws_proxy.plugin` asks
 /// the engine to use.
@@ -25,8 +26,15 @@ import Foundation
 /// A missing, disabled or malformed document means "leave the engine alone", so
 /// an uninstalled plugin or a mistyped domain falls back to Telegram's own web
 /// hosts rather than breaking the account.
+///
+/// The document is polled while the app runs, so switching the plugin on takes
+/// effect in the running client: every live session is given the new endpoint
+/// and the engine is told to reset its connections, the same path a network
+/// change takes. No restart is needed. What the client actually applied is
+/// written back to `tg_ws_proxy_status.json`, so the plugin can show a
+/// confirmation instead of assuming one.
 enum TgWsProxyConfig {
-    struct Settings {
+    struct Settings: Equatable {
         let domain: String
         let datacenterOverrides: [Int: String]
 
@@ -36,14 +44,30 @@ enum TgWsProxyConfig {
             }
             return "kws\(datacenterId).\(self.domain)"
         }
+
+        /// The value the change watcher compares between polls.
+        var configurationKey: String {
+            let overrides = self.datacenterOverrides.keys.sorted().map {
+                "\($0)=\(self.datacenterOverrides[$0] ?? "")"
+            }
+            return "on:\(self.domain):\(overrides.joined(separator: ","))"
+        }
     }
 
     /// The file `tg_ws_proxy.plugin` writes.
     static let fileName = "tg_ws_proxy.json"
 
+    /// Where the client records the endpoint it last handed the engine, for the
+    /// plugin to display.
+    static let statusFileName = "tg_ws_proxy_status.json"
+
+    /// Posted when the plugin's document changes while the app is running. Live
+    /// sessions re-apply the endpoint and the engine's connections are reset.
+    static let didChangeNotification = Notification.Name("TgWsProxyConfigDidChange")
+
     /// The settings the plugin last wrote, or nil when the transport is off.
     static func current() -> Settings? {
-        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        guard let documents = self.documentsDirectory() else {
             return nil
         }
         let url = documents.appendingPathComponent(self.fileName)
@@ -76,6 +100,105 @@ enum TgWsProxyConfig {
     /// when the plugin did not ask for a custom front.
     static func host(datacenterId: Int) -> String? {
         return self.current()?.host(datacenterId: datacenterId)
+    }
+
+    // MARK: - Live changes
+
+    private static let watcherQueue = DispatchQueue(label: "org.telegram.MTProtoRust.tgwsproxy", qos: .utility)
+    private static let watcherLock = NSLock()
+    private static var watcherTimer: DispatchSourceTimer?
+    private static var lastConfigurationKey: String?
+    private static var engine: OpaquePointer?
+
+    /// Starts polling the plugin's document, once per process. Called from the
+    /// engine runtime, so the pointer is the one every session uses.
+    static func startWatching(engine: OpaquePointer) {
+        watcherLock.lock()
+        defer {
+            watcherLock.unlock()
+        }
+        guard self.watcherTimer == nil else {
+            return
+        }
+        self.engine = engine
+        let timer = DispatchSource.makeTimerSource(queue: self.watcherQueue)
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.5)
+        timer.setEventHandler {
+            self.pollConfiguration()
+        }
+        timer.resume()
+        self.watcherTimer = timer
+    }
+
+    /// Only on `watcherQueue`. The first poll only records what is there, so
+    /// launching the app does not reset connections for no reason.
+    private static func pollConfiguration() {
+        let key = self.current()?.configurationKey ?? "off"
+        self.watcherLock.lock()
+        let previous = self.lastConfigurationKey
+        self.lastConfigurationKey = key
+        let engine = self.engine
+        self.watcherLock.unlock()
+        guard let previous = previous, previous != key else {
+            return
+        }
+        rustEngineImportantLog("[TGWSProxy] transport configuration changed: \(key)")
+        NotificationCenter.default.post(name: self.didChangeNotification, object: nil)
+        // Sessions apply on their own queues; the reset follows once they had a
+        // moment, and is what makes the engine open new connections at once.
+        self.watcherQueue.asyncAfter(deadline: .now() + 0.25) {
+            guard let engine = engine else {
+                return
+            }
+            mt_engine_reset_connections(engine)
+        }
+    }
+
+    // MARK: - What the client applied
+
+    private static let statusQueue = DispatchQueue(label: "org.telegram.MTProtoRust.tgwsproxy.status", qos: .utility)
+    private static let statusLock = NSLock()
+    private static var lastRecordedHost: String?
+    private static var lastRecordedAt: TimeInterval = 0
+
+    /// Records the endpoint a session just configured, for the plugin to show.
+    /// `host` is empty when the client went back to Telegram's own web hosts.
+    /// Throttled: many sessions start within a second of each other.
+    static func recordApplied(host: String, datacenterId: Int) {
+        let now = Date().timeIntervalSince1970
+        self.statusLock.lock()
+        if self.lastRecordedHost == host, now - self.lastRecordedAt < 60.0 {
+            self.statusLock.unlock()
+            return
+        }
+        self.lastRecordedHost = host
+        self.lastRecordedAt = now
+        self.statusLock.unlock()
+        self.statusQueue.async {
+            guard let documents = self.documentsDirectory() else {
+                return
+            }
+            let url = documents.appendingPathComponent(self.statusFileName)
+            // Never create a status file for a device that does not use the
+            // plugin; only update or clear one that exists.
+            if host.isEmpty && !FileManager.default.fileExists(atPath: url.path) {
+                return
+            }
+            var object: [String: Any] = ["host": host, "at": Int(now)]
+            if !host.isEmpty {
+                object["dc"] = datacenterId
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+                return
+            }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private static func documentsDirectory() -> URL? {
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
     }
 
     /// A hostname the plugin wrote, or nil when it is not one: lower case, no
