@@ -12,8 +12,8 @@ import Postbox
 /// JavaScript: a plugin has no sockets, so a local proxy has to live in Swift.
 /// It is deliberately generic rather than shaped around that one plugin — any
 /// plugin that can name a CloudFlare zone can start it with
-/// `__extera.localProxy({action: "start", domain: …})`, and nothing about it
-/// needs the client to change again.
+/// `proxy.local_start(domain)` (`__extera.requestLocalProxy` underneath), and
+/// nothing about it needs the client to change again.
 ///
 /// What it does, and why it is the same thing the reference app does:
 ///
@@ -164,13 +164,13 @@ public final class PluginLocalProxy {
             self.setStatus(status)
 
             let server = LocalMTProxyServer(secret: secret, domain: domain)
-            server.onActivity = { [weak self] connections, upstreams, error in
-                self?.setActivity(connections: connections, upstreams: upstreams, error: error)
+            // `self` is the shared controller, which outlives every server, so
+            // these capture it strongly on purpose; `server` stays weak so a
+            // server is not kept alive by its own callback.
+            server.onActivity = { connections, upstreams, error in
+                self.setActivity(connections: connections, upstreams: upstreams, error: error)
             }
-            server.onReady = { [weak self, weak server] port in
-                guard let self = self else {
-                    return
-                }
+            server.onReady = { [weak server] port in
                 // The server calls back on its own queue; the controller's state
                 // lives on `operationQueue`, so it is only touched from there.
                 self.operationQueue.async {
@@ -180,10 +180,7 @@ public final class PluginLocalProxy {
                     self.activate(accountManager: accountManager, secret: secret, port: port, domain: domain, completion: completion)
                 }
             }
-            server.onFailure = { [weak self, weak server] message in
-                guard let self = self else {
-                    return
-                }
+            server.onFailure = { [weak server] message in
                 self.operationQueue.async {
                     guard let server = server, self.server === server else {
                         return
@@ -312,17 +309,17 @@ private enum LocalMTProxyCrypto {
             }
         }
         var digest = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
-        digest.withUnsafeMutableBytes { bytes in
-            CC_SHA256_Final(bytes.baseAddress!.assumingMemoryBound(to: UInt8.self), &context)
+        digest.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) -> Void in
+            _ = CC_SHA256_Final(bytes.baseAddress!.assumingMemoryBound(to: UInt8.self), &context)
         }
         return digest
     }
 
     static func sha1(_ data: Data) -> Data {
         var digest = Data(count: Int(CC_SHA1_DIGEST_LENGTH))
-        digest.withUnsafeMutableBytes { bytes in
-            data.withUnsafeBytes { input in
-                CC_SHA1(input.baseAddress, CC_LONG(input.count), bytes.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        digest.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) -> Void in
+            data.withUnsafeBytes { (input: UnsafeRawBufferPointer) -> Void in
+                _ = CC_SHA1(input.baseAddress, CC_LONG(input.count), bytes.baseAddress!.assumingMemoryBound(to: UInt8.self))
             }
         }
         return digest
@@ -330,8 +327,8 @@ private enum LocalMTProxyCrypto {
 
     static func randomBytes(_ count: Int) -> Data {
         var data = Data(count: count)
-        _ = data.withUnsafeMutableBytes { bytes in
-            SecRandomCopyBytes(kSecRandomDefault, count, bytes.baseAddress!)
+        data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) -> Void in
+            _ = SecRandomCopyBytes(kSecRandomDefault, count, bytes.baseAddress!)
         }
         return data
     }
@@ -774,7 +771,7 @@ private final class LocalMTProxyConnection {
             return
         }
         self.upstreamReady = ready
-        self.onUpstreamState?(ready)
+        self.onUpstreamState(ready)
     }
 
     private func receiveLoop() {
@@ -795,7 +792,7 @@ private final class LocalMTProxyConnection {
                     self.handleClientData(data)
                 }
             }
-            if let error = error {
+            if error != nil {
                 self.close()
                 return
             }
@@ -886,7 +883,7 @@ private final class LocalMTProxyConnection {
                 self?.setUpstreamReady(ready)
             },
             onError: { [weak self] message in
-                self?.onUpstreamError?(message)
+                self?.onUpstreamError(message)
             },
             onClose: { [weak self] in
                 self?.close()
@@ -1419,7 +1416,7 @@ private final class LocalMTProxyUpstream {
         }
         let mask = LocalMTProxyCrypto.randomBytes(4)
         frame.append(mask)
-        var bytes = [UInt8](mask)
+        let bytes = [UInt8](mask)
         payload.withUnsafeBytes { raw in
             if let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) {
                 for index in 0 ..< length {
