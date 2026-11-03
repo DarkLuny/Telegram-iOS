@@ -332,6 +332,13 @@ func openChatMessageImpl(_ params: OpenChatMessageParams) -> Bool {
                         location = playlistLocation
                     } else if params.standalone {
                         location = .recentActions(params.message)
+                    } else if params.message.isPluginRestoredDeletedMessage {
+                        // A row the plugin restored for a deleted message exists
+                        // only in the list: there is no stored message to queue
+                        // around. `singleMessage` and the tagged locations all
+                        // read their queue out of the database and would find
+                        // nothing, so the saved copy is the whole playlist.
+                        location = .custom(messages: .single(([params.message], 0, false)), canReorder: false, at: params.message.id, loadMore: nil, hidePanel: true)
                     } else {
                         location = .singleMessage(params.message.id)
                     }

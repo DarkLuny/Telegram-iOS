@@ -1000,7 +1000,7 @@ func chatHistoryEntriesForView(
                     forwardInfo: nil,
                     author: author,
                     text: displayText,
-                    attributes: [],
+                    attributes: [PluginDeletedMessageAttribute()],
                     media: storedMedia,
                     peers: peers,
                     associatedMessages: SimpleDictionary<MessageId, Message>(),

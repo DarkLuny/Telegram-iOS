@@ -111,6 +111,13 @@ public func chatMessageGalleryControllerData(
     var standalone = standalone
     if message.id.peerId.namespace == Namespaces.Peer.CloudUser && message.id.namespace != Namespaces.Message.Cloud {
         standalone = true
+    } else if message.isPluginRestoredDeletedMessage {
+        // A plugin's copy of a deleted message lives only in the list it rebuilt,
+        // so it is browsed on its own. Otherwise the gallery would ask the
+        // database for the message carrying the media and find nothing — which
+        // only went unnoticed in a private chat, where the check above already
+        // made every local row standalone.
+        standalone = true
     }
     var candidateMedia = message.effectiveMedia
     if case let .richTextMedia(mediaId) = mediaSubject {

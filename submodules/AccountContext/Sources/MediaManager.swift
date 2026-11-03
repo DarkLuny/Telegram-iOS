@@ -236,6 +236,13 @@ public func peerMessagesMediaPlaylistAndItemId(_ message: EngineMessage, isRecen
         return (PeerMessagesMediaPlaylistId.savedMusic(message.id.peerId), PeerMessagesMediaPlaylistItemId(messageId: message.id, messageIndex: message.index))
     } else if isAttachMusic || (isGlobalSearch && !isDownloadList) {
         return (PeerMessagesMediaPlaylistId.custom, PeerMessagesMediaPlaylistItemId(messageId: message.id, messageIndex: message.index))
+    } else if message._asMessage().isPluginRestoredDeletedMessage {
+        // The plugin's copy of a deleted message plays from a one-item custom
+        // playlist — the peer playlists below read their queue from the
+        // database, which no longer holds this message. The row's own status
+        // has to be read from that same playlist, or the row would never show
+        // that it is the one playing.
+        return (PeerMessagesMediaPlaylistId.custom, PeerMessagesMediaPlaylistItemId(messageId: message.id, messageIndex: message.index))
     } else if isRecentActions && !isDownloadList {
         return (PeerMessagesMediaPlaylistId.recentActions(message.id.peerId), PeerMessagesMediaPlaylistItemId(messageId: message.id, messageIndex: message.index))
     } else {

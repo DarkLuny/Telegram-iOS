@@ -99,7 +99,15 @@ public class ChatMessageInstantVideoItemNode: ChatMessageItemView, ASGestureReco
         self.interactiveVideoNode.shouldOpen = { [weak self] in
             if let strongSelf = self {
                 if let item = strongSelf.item, (item.message.id.namespace == Namespaces.Message.Local || item.message.id.namespace == Namespaces.Message.ScheduledLocal || item.message.id.namespace == Namespaces.Message.QuickReplyLocal) {
-                    return false
+                    // A local-namespace row is normally a message still waiting
+                    // to be sent, and opening its video would find nothing on
+                    // the server. The plugin's copy of a deleted message is
+                    // drawn in that namespace too, but it is neither pending
+                    // nor backed by the database, so the only way to watch it
+                    // is the normal opening path.
+                    if !item.message.isPluginRestoredDeletedMessage {
+                        return false
+                    }
                 }
                 return !strongSelf.animatingHeight
             } else {
