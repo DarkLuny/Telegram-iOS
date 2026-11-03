@@ -247,9 +247,17 @@ class TgWsProxyPlugin extends BasePlugin {
 
     // --- what the screen would write --------------------------------------
 
-    domainIndex() {
+    // The selector's own value, including the trailing "custom" entry.
+    rawDomainIndex() {
         var index = parseInt(this.get_setting("domain_index", 0), 10);
-        if (!isFinite(index) || index < 0 || index >= CF_DOMAINS.length) {
+        return isFinite(index) ? index : 0;
+    }
+
+    // The index into the zone list; the custom entry and anything out of range
+    // read as the first zone so a list lookup never misses.
+    domainIndex() {
+        var index = this.rawDomainIndex();
+        if (index < 0 || index >= CF_DOMAINS.length) {
             return 0;
         }
         return index;
@@ -266,12 +274,22 @@ class TgWsProxyPlugin extends BasePlugin {
         return String(this.get_setting("custom_domain", "")).trim() !== "";
     }
 
+    // Picked "Свой домен…" in the list. With nothing typed this is an unfinished
+    // choice, not the first zone: applying it would send the user to a zone they
+    // did not pick.
+    usesCustomEntry() {
+        return this.rawDomainIndex() === CF_DOMAINS.length;
+    }
+
     // The custom field wins when it holds a valid host; otherwise the selected
     // zone. Unlike the list it may be any CF zone the user knows, because the
     // defaults can be blocked over time.
     effectiveDomain() {
         if (this.hasCustomInput()) {
             return this.customDomain();
+        }
+        if (this.usesCustomEntry()) {
+            return "";
         }
         return CF_DOMAINS[this.domainIndex()] || "";
     }
@@ -335,12 +353,16 @@ class TgWsProxyPlugin extends BasePlugin {
     // not turn the whole check into a burst of timeouts.
     checkDomains() {
         var custom = this.customDomain();
-        var domains = this.hasCustomInput() ? [custom] : CF_DOMAINS;
         if (this.hasCustomInput() && !custom) {
             this.entry("свой домен не похож на имя хоста", "error");
             ui.bulletin.show_error("Свой домен не похож на имя хоста");
             return;
         }
+        if (this.usesCustomEntry() && !custom) {
+            ui.bulletin.show_error("Укажите свой домен");
+            return;
+        }
+        var domains = this.hasCustomInput() ? [custom] : CF_DOMAINS;
         if (!domains.length) {
             ui.bulletin.show_error("Нет доменов для проверки");
             return;

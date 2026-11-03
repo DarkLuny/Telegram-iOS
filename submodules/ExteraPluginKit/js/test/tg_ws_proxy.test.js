@@ -189,6 +189,22 @@ test('a domain that is not a hostname is refused', () => {
     assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('имя хоста')));
 });
 
+test('the custom entry with an empty field is refused, not sent to the first zone', () => {
+    const state = makeHost({ settings: { enabled: true, domain_index: DOMAINS.length } });
+    const ctx = load(state);
+    clickRow(ctx, 'Применить');
+    assert.ok(!(CONFIG_PATH in state.files), 'an unfinished custom choice reached the file');
+    assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('не задан')));
+});
+
+test('probing with the custom entry and no field asks for a domain', () => {
+    const state = makeHost({ settings: { domain_index: DOMAINS.length } });
+    const ctx = load(state);
+    clickRow(ctx, 'Проверить CF-домены');
+    assert.strictEqual(state.http.length, 0);
+    assert.ok(state.bulletins.some((b) => b.kind === 'error' && b.text.includes('Укажите свой домен')));
+});
+
 test('disabling removes the document and turns the switch off', () => {
     const state = makeHost({
         settings: { enabled: true, domain_index: 0 },
