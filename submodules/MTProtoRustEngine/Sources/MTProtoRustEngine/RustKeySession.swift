@@ -146,7 +146,7 @@ final class RustKeySession: RustEngineEventHandler {
         if let engine = self.engine {
             mt_session_set_transport(engine, handle, UInt8(MTTransportAuto), httpPort)
             if #available(macOS 10.14, iOS 12.0, *) {
-                RustNetworkSession.setWebEndpoint(engine: engine, handle: handle, isTestingEnvironment: context.isTestingEnvironment)
+                RustNetworkSession.setWebEndpoint(engine: engine, handle: handle, isTestingEnvironment: context.isTestingEnvironment, datacenterId: datacenterId)
             }
         }
         if schemes.isEmpty {

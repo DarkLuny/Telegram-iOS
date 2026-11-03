@@ -262,7 +262,7 @@ final class RustNetworkSession: NetworkEngineSession, RustEngineEventHandler {
             if let engine = self.engine, !self.isCdn {
                 mt_session_set_transport(engine, handle, UInt8(MTTransportAuto), self.httpPort)
                 if #available(macOS 10.14, iOS 12.0, *) {
-                    RustNetworkSession.setWebEndpoint(engine: engine, handle: handle, isTestingEnvironment: context.isTestingEnvironment)
+                    RustNetworkSession.setWebEndpoint(engine: engine, handle: handle, isTestingEnvironment: context.isTestingEnvironment, datacenterId: datacenterId)
                 }
             }
         }
@@ -1889,7 +1889,20 @@ extension RustNetworkSession {
 
     static var webEndpointOverride: (host: String, port: UInt16, path: String, wsPath: String, address: String)?
 
-    static func setWebEndpoint(engine: OpaquePointer, handle: MTSessionHandle, isTestingEnvironment: Bool) {
+    static func setWebEndpoint(engine: OpaquePointer, handle: MTSessionHandle, isTestingEnvironment: Bool, datacenterId: Int) {
+        // `tg_ws_proxy.plugin` can ask for a CloudFlare-fronted front instead of
+        // Telegram's own `kws<dc>.web.telegram.org`. This is the same call its
+        // tests make with `webEndpointOverride`, with the host built per
+        // datacenter because the front's name carries the datacenter.
+        if !isTestingEnvironment, datacenterId > 0, datacenterId < 1000, let host = TgWsProxyConfig.host(datacenterId: datacenterId) {
+            let arena = RustEngineArena()
+            var endpoint = MTWebEndpoint(host: arena.string(host), port: 443, path: arena.string("/apiw1"), address: arena.string(host), ws_path: arena.string("/apiws"))
+            withExtendedLifetime(arena) {
+                mt_session_set_web_endpoint(engine, handle, &endpoint)
+            }
+            rustEngineLog("[MTProtoRust#\(handle) dc\(datacenterId)] web endpoint \(host)")
+            return
+        }
         guard let override = RustNetworkSession.webEndpointOverride else {
             mt_session_use_telegram_web(engine, handle, isTestingEnvironment ? 1 : 0)
             return
