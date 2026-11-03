@@ -40,6 +40,7 @@ function makeHost(options) {
         http: [],
         clipboard: [],
         opened: [],
+        scheduled: [],
     };
 
     const host = {
@@ -83,7 +84,7 @@ function makeHost(options) {
         },
         selectedAccount: () => 0,
         pluginDirectory: () => '/plugins/tg_ws_proxy',
-        schedulePlugin: () => {},
+        schedulePlugin: (id, delay, token) => { state.scheduled.push({ id, delay, token }); },
         copyToClipboard: (id, text) => { state.clipboard.push(text); return true; },
         openUrl: (id, url) => { state.opened.push(url); return true; },
         // Answers through the token the bootstrap hands out, exactly as the
@@ -193,6 +194,8 @@ test('enabling connects by itself: probes every zone, takes the first that answe
     assert.deepStrictEqual(configOf(state), { enabled: true, domain: 'offshor.co.uk' });
     assert.strictEqual(state.settings.last_domain, 'offshor.co.uk');
     assert.ok(state.bulletins.some((b) => b.kind === 'success' && b.text.includes('offshor.co.uk')), JSON.stringify(state.bulletins));
+    // The confirmation lands a couple of seconds later; one refresh is asked for.
+    assert.ok(state.scheduled.some((s) => s.delay === 4000), JSON.stringify(state.scheduled));
 });
 
 test('a five-hundred answer from the edge is not a working zone', () => {

@@ -480,6 +480,13 @@ class TgWsProxyPlugin extends BasePlugin {
             ui.bulletin.show_success("Подключено: kws1…5." + domain);
         }
         this.set_setting("transport_reload", Date.now(), true);
+        // The client polls its document, resets the connections and writes the
+        // status file within a couple of seconds. One delayed refresh turns
+        // "клиент ещё переключается" into the confirmed host and time without
+        // the user leaving the screen.
+        this.run_on_queue(() => {
+            this.set_setting("transport_reload", Date.now(), true);
+        }, 4000);
     }
 
     disconnect() {
