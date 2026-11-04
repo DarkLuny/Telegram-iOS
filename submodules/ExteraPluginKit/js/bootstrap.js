@@ -3157,9 +3157,20 @@ var proxy = {
     // Starts the client's own MTProto proxy on 127.0.0.1 for `domain` (a
     // CloudFlare zone whose `kws<dc>.<domain>` names answer), adds the entry to
     // the list, and makes it active. `domain` is optional when a proxy is already
-    // running: the call then only restores the entry.
-    local_start: function (domain, callback) {
-        return __extera.requestLocalProxy({ action: 'start', domain: domain === undefined ? '' : domain }, callback);
+    // running: the call then only restores the entry. `domains` lists the
+    // fallbacks tried in order when `domain` does not answer; both overloads
+    // `local_start(domain, callback)` and `local_start(domain, domains, callback)`
+    // work.
+    local_start: function (domain, domains, callback) {
+        if (typeof domains === 'function') {
+            callback = domains;
+            domains = undefined;
+        }
+        var request = { action: 'start', domain: domain === undefined ? '' : domain };
+        if (Object.prototype.toString.call(domains) === '[object Array]') {
+            request.domains = domains;
+        }
+        return __extera.requestLocalProxy(request, callback);
     },
 
     // Stops it and removes its entry, unless the user had since picked another

@@ -848,11 +848,13 @@ private final class PluginActionsImpl: PluginActions {
     /// for itself: iOS gives a plugin no sockets and no way to open a port, so
     /// the client owns the listener and the plugin asks for it here.
     ///
-    /// The request is `{"action": "start" | "stop" | "status", "domain": "zone"}`.
+    /// The request is `{"action": "start" | "stop" | "status", "domain": "zone", "domains": ["zone", ...]}`.
     /// `start` begins listening on `127.0.0.1`, adds its `tg://proxy` entry to
     /// the list and makes that entry the active proxy, so messages go through it
     /// at once; `stop` removes the entry and goes back to a direct connection.
-    /// The answer is the same object `localProxyStatus` returns, under `status`.
+    /// `domain` is the preferred CloudFlare zone; `domains` lists the fallbacks
+    /// tried in order when it does not answer. The answer is the same object
+    /// `localProxyStatus` returns, under `status`.
     func localProxy(pluginId: String, requestJSON: String, callbackToken: String) {
         guard let sharedContext = self.sharedContext else {
             self.failBridge(pluginId: pluginId, token: callbackToken, error: "no account is available")
@@ -861,6 +863,10 @@ private final class PluginActionsImpl: PluginActions {
         let request = PluginRuntime.parseObject(requestJSON)
         let action = (request["action"] as? String)?.lowercased() ?? "status"
         let domain = request["domain"] as? String ?? ""
+        var zones: [String] = []
+        if let list = request["domains"] as? [Any] {
+            zones = list.compactMap { $0 as? String }
+        }
         let proxy = PluginLocalProxy.shared
         let respond: (PluginLocalProxy.Status) -> Void = { status in
             var response: [String: Any] = ["ok": status.error == nil, "status": status.json]
@@ -871,7 +877,7 @@ private final class PluginActionsImpl: PluginActions {
         }
         switch action {
         case "start":
-            proxy.start(domain: domain, accountManager: sharedContext.accountManager, completion: respond)
+            proxy.start(domain: domain, zones: zones, accountManager: sharedContext.accountManager, completion: respond)
         case "stop":
             proxy.stop(accountManager: sharedContext.accountManager, completion: respond)
         default:

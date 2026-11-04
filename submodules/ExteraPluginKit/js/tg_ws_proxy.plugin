@@ -30,7 +30,7 @@ var __id__ = "tg_ws_proxy";
 var __name__ = "TG WS Proxy";
 var __description__ = "Локальный MTProxy 127.0.0.1 внутри клиента через CloudFlare. Подбирает CF-домен сам, запускается при включении плагина и добавляет прокси в список Telegram — без кнопки, VPN и отдельного приложения.";
 var __author__ = "tg-ws-proxy (Flowseal), порт для ExteraPluginKit";
-var __version__ = "3.0.0";
+var __version__ = "3.0.1";
 var __min_version__ = "13.1.1";
 
 // `cfproxyEnc` from tg-ws-proxy.go. The core decodes each entry into the zone it
@@ -208,6 +208,23 @@ class TgWsProxyPlugin extends BasePlugin {
         return status;
     }
 
+    // The zone the host is told to use first, followed by every other known zone.
+    // The reference dials the rest before giving up on the CloudFlare route, so a
+    // single zone that stops answering mid-session does not end the tunnel: the
+    // host moves to the next name in this list.
+    transportZones(domain) {
+        var zones = [];
+        if (domain) {
+            zones.push(domain);
+        }
+        for (var i = 0; i < CF_DOMAINS.length; i += 1) {
+            if (CF_DOMAINS[i] !== domain && zones.indexOf(CF_DOMAINS[i]) < 0) {
+                zones.push(CF_DOMAINS[i]);
+            }
+        }
+        return zones;
+    }
+
     // `unverified` only changes what the user is told: a zone that did not
     // answer the probe is still tried, because the probe can be filtered where
     // the WebSocket tunnel is not.
@@ -216,8 +233,9 @@ class TgWsProxyPlugin extends BasePlugin {
             return;
         }
         this._busy = true;
-        this.entry("запуск локального MTProxy: kws1…5." + domain, "info");
-        proxy.local_start(domain, (response) => {
+        var zones = this.transportZones(domain);
+        this.entry("запуск локального MTProxy: kws1…5." + domain + " (+" + Math.max(0, zones.length - 1) + " запасных)", "info");
+        proxy.local_start(domain, zones, (response) => {
             this._busy = false;
             var status = response && response.status ? response.status : null;
             if (!response || response.ok !== true || !status || status.running !== true) {

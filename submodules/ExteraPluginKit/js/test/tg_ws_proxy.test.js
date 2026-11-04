@@ -213,7 +213,7 @@ test('metadata matches the plugin file', () => {
     const ctx = load(state);
     assert.strictEqual(ctx.__id__, 'tg_ws_proxy');
     assert.strictEqual(ctx.__name__, 'TG WS Proxy');
-    assert.strictEqual(ctx.__version__, '3.0.0');
+    assert.strictEqual(ctx.__version__, '3.0.1');
 });
 
 test('tg-ws-proxy zone list decodes to the five co.uk zones', () => {
@@ -260,6 +260,27 @@ test('enabling connects by itself: probes every zone, starts the proxy on the fi
     // The client connects a moment after the entry becomes active; one refresh
     // is asked for so the row can show the live counters.
     assert.ok(state.scheduled.some((s) => s.delay === 3000), JSON.stringify(state.scheduled));
+});
+
+test('the start request carries the chosen zone first and every other zone after it', () => {
+    const state = makeHost({
+        settings: { enabled: false },
+        front: (url) => (url.includes('noskomnadzor') ? { ok: false, status: 404 } : { ok: false, status: 0 }),
+    });
+    const ctx = load(state);
+    changeSetting(state, ctx, 'enabled', true);
+    const start = state.proxy.requests.filter((r) => r.action === 'start').pop();
+    assert.ok(start, 'no start request reached the host');
+    assert.strictEqual(start.domain, 'noskomnadzor.co.uk');
+    // The native side dials these in order, like the reference's fallback: a
+    // zone that dies mid-session does not end the tunnel.
+    assert.deepStrictEqual(start.domains, [
+        'noskomnadzor.co.uk',
+        'pclead.co.uk',
+        'offshor.co.uk',
+        'cakeisalie.co.uk',
+        'lovetrue.co.uk',
+    ]);
 });
 
 test('a five-hundred answer from the edge is not a working zone', () => {

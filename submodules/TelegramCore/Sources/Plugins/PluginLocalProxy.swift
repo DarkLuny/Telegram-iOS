@@ -117,9 +117,9 @@ public final class PluginLocalProxy {
         self.stateLock.lock()
         self.statusValue.connections = connections
         self.statusValue.upstreams = upstreams
-        if let error = error, !error.isEmpty {
-            self.statusValue.upstreamError = error
-        }
+        // `nil` means the listener has no failure to report any more (a later
+        // channel came up), so the old reason is cleared rather than kept.
+        self.statusValue.upstreamError = error.flatMap { $0.isEmpty ? nil : $0 }
         self.stateLock.unlock()
     }
 
@@ -129,8 +129,22 @@ public final class PluginLocalProxy {
     ///
     /// `completion` runs once the entry is in place (or once the reason it could
     /// not be is known) and always on a background queue.
-    public func start(domain rawDomain: String, accountManager: AccountManager<TelegramAccountManagerTypes>, completion: @escaping (Status) -> Void) {
+    public func start(domain rawDomain: String, zones rawZones: [String], accountManager: AccountManager<TelegramAccountManagerTypes>, completion: @escaping (Status) -> Void) {
         let domain = PluginLocalProxy.normalizeDomain(rawDomain)
+        // The reference dials every zone it knows before giving up on the CF
+        // route, so a single dead zone does not end the session. The chosen
+        // zone goes first and the rest follow in the list's order.
+        var zones: [String] = []
+        for raw in rawZones {
+            let zone = PluginLocalProxy.normalizeDomain(raw)
+            if !zone.isEmpty && !zones.contains(zone) {
+                zones.append(zone)
+            }
+        }
+        if !domain.isEmpty {
+            zones.removeAll(where: { $0 == domain })
+            zones.insert(domain, at: 0)
+        }
         self.operationQueue.async {
             guard !domain.isEmpty else {
                 var status = self.currentStatus()
@@ -163,7 +177,7 @@ public final class PluginLocalProxy {
             status.upstreamError = nil
             self.setStatus(status)
 
-            let server = LocalMTProxyServer(secret: secret, domain: domain)
+            let server = LocalMTProxyServer(secret: secret, domain: domain, zones: zones)
             // `self` is the shared controller, which outlives every server, so
             // these capture it strongly on purpose; `server` stays weak so a
             // server is not kept alive by its own callback.
@@ -505,6 +519,8 @@ private enum LocalMTProxyObfuscation {
 private final class LocalMTProxyServer {
     let secret: Data
     let domain: String
+    /// CloudFlare zones to try, the chosen one first.
+    let zones: [String]
     var onReady: ((UInt16) -> Void)?
     var onFailure: ((String) -> Void)?
     /// Client and live-upstream counts, and the last upstream failure.
@@ -533,18 +549,19 @@ private final class LocalMTProxyServer {
         203: "91.105.192.100",
     ]
 
-    init(secret: Data, domain: String) {
+    init(secret: Data, domain: String, zones: [String]) {
         self.secret = secret
         self.domain = domain
+        self.zones = zones
     }
 
     func start(preferredPort: UInt16) {
         self.queue.async {
-            self.startLocked(port: preferredPort, allowFallback: preferredPort != 0)
+            self.startLocked(port: preferredPort, bindLoopback: true)
         }
     }
 
-    private func startLocked(port: UInt16, allowFallback: Bool) {
+    private func startLocked(port: UInt16, bindLoopback: Bool) {
         guard !self.isStopped else {
             return
         }
@@ -556,7 +573,14 @@ private final class LocalMTProxyServer {
                 self.onFailure?("invalid port \(port)")
                 return
             }
-            let listener = try NWListener(using: parameters, on: endpointPort)
+            // Bind to the loopback address when the system allows it: the proxy
+            // exists for this device's own client, and a listener on 0.0.0.0
+            // would offer the tunnel to the local network as well. The accept
+            // filter below enforces the same rule when binding it is refused.
+            if bindLoopback {
+                parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(IPv4Address.loopback), port: endpointPort)
+            }
+            let listener = try NWListener(using: parameters)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.accept(connection)
             }
@@ -571,11 +595,13 @@ private final class LocalMTProxyServer {
                     self.onReady?(self.port)
                 case let .failed(error):
                     self.listener = nil
-                    if allowFallback {
-                        self.startLocked(port: 0, allowFallback: false)
-                    } else {
-                        self.onFailure?(error.localizedDescription)
-                    }
+                    self.retryAfterListenerFailure(port: port, bindLoopback: bindLoopback, error: error)
+                case let .waiting(error):
+                    // A listener that cannot bind yet never calls `onReady`,
+                    // which would leave the plugin saying "starting" forever.
+                    listener.cancel()
+                    self.listener = nil
+                    self.retryAfterListenerFailure(port: port, bindLoopback: bindLoopback, error: error)
                 default:
                     break
                 }
@@ -583,11 +609,24 @@ private final class LocalMTProxyServer {
             self.listener = listener
             listener.start(queue: self.queue)
         } catch {
-            if allowFallback {
-                self.startLocked(port: 0, allowFallback: false)
-            } else {
-                self.onFailure?(error.localizedDescription)
-            }
+            self.retryAfterListenerFailure(port: port, bindLoopback: bindLoopback, error: error)
+        }
+    }
+
+    /// Gives up the preferred port first, then the loopback binding, and only
+    /// then reports a failure. Both concessions keep a working local transport:
+    /// the port is cosmetic, and the accept filter still refuses every peer that
+    /// is not this device.
+    private func retryAfterListenerFailure(port: UInt16, bindLoopback: Bool, error: Error) {
+        guard !self.isStopped, !self.didBecomeReady else {
+            return
+        }
+        if port != 0 {
+            self.startLocked(port: 0, bindLoopback: bindLoopback)
+        } else if bindLoopback {
+            self.startLocked(port: 0, bindLoopback: false)
+        } else {
+            self.onFailure?(error.localizedDescription)
         }
     }
 
@@ -622,6 +661,7 @@ private final class LocalMTProxyServer {
             connection: connection,
             secret: self.secret.dropFirstData(),
             domain: self.domain,
+            zones: self.zones,
             datacenterAddress: { datacenter in
                 return LocalMTProxyServer.datacenterAddresses[datacenter] ?? ""
             },
@@ -643,6 +683,12 @@ private final class LocalMTProxyServer {
                 }
                 self.queue.async {
                     self.readyUpstreamCount = max(0, self.readyUpstreamCount + (ready ? 1 : -1))
+                    if ready {
+                        // The last failure describes an attempt that has since
+                        // been won by another zone; showing it next to a live
+                        // session reads as "broken" when the tunnel is up.
+                        self.lastUpstreamError = nil
+                    }
                     self.publishActivity()
                 }
             },
@@ -668,13 +714,22 @@ private final class LocalMTProxyServer {
         }
         switch host {
         case let .ipv4(address):
-            return address == IPv4Address("127.0.0.1")
+            let bytes = [UInt8](address.rawValue)
+            return bytes.count == 4 && bytes[0] == 127
         case let .ipv6(address):
-            return address == IPv6Address("::1")
-        case .name:
-            // `localhost` resolves before the connection is made; a name here is
-            // an interface-scoped peer, which is not this device.
-            return false
+            let bytes = [UInt8](address.rawValue)
+            guard bytes.count == 16 else {
+                return false
+            }
+            if bytes == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] {
+                return true
+            }
+            // A client that dials `127.0.0.1` may arrive as the IPv4-mapped
+            // IPv6 form `::ffff:127.x.x.x`, which is still this device.
+            return bytes.prefix(10).allSatisfy({ $0 == 0 }) && bytes[10] == 0xff && bytes[11] == 0xff && bytes[12] == 127
+        case let .name(name, _):
+            let lowered = name.lowercased()
+            return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
         @unknown default:
             return false
         }
@@ -698,6 +753,7 @@ private final class LocalMTProxyConnection {
     private let queue: DispatchQueue
     private let secret: Data
     private let domain: String
+    private let zones: [String]
     private let datacenterAddress: (Int) -> String
     private let onClose: () -> Void
     private let onUpstreamState: (Bool) -> Void
@@ -726,10 +782,11 @@ private final class LocalMTProxyConnection {
         return datacenter
     }
 
-    init(connection: NWConnection, secret: Data, domain: String, datacenterAddress: @escaping (Int) -> String, onClose: @escaping () -> Void, onUpstreamState: @escaping (Bool) -> Void, onUpstreamError: @escaping (String) -> Void) {
+    init(connection: NWConnection, secret: Data, domain: String, zones: [String], datacenterAddress: @escaping (Int) -> String, onClose: @escaping () -> Void, onUpstreamState: @escaping (Bool) -> Void, onUpstreamError: @escaping (String) -> Void) {
         self.connection = connection
         self.secret = secret
         self.domain = domain
+        self.zones = zones
         self.datacenterAddress = datacenterAddress
         self.onClose = onClose
         self.onUpstreamState = onUpstreamState
@@ -849,8 +906,16 @@ private final class LocalMTProxyConnection {
         if datacenter > 0 {
             // The CloudFlare zone fronts `kws<dc>` for every datacenter,
             // including the media ones (the reference's `tryCfproxyBaseDomain`
-            // uses the unsigned id there).
-            targets.append(.webSocket(host: "kws\(datacenter).\(self.domain)"))
+            // uses the unsigned id there). Every zone the plugin knows is tried
+            // in order, as `cfproxyFallback` does, so one dead zone does not
+            // end the session.
+            var cfZones = self.zones
+            if cfZones.isEmpty {
+                cfZones = [self.domain]
+            }
+            for zone in cfZones {
+                targets.append(.webSocket(host: "kws\(datacenter).\(zone)"))
+            }
             // Telegram's own web front numbers media datacenters differently and
             // has no `kws203`, so it uses the same override the reference does.
             let webDatacenter = LocalMTProxyConnection.webDatacenter(datacenter)
@@ -1097,9 +1162,14 @@ private final class LocalMTProxyUpstream {
         self.connection = nil
     }
 
-    private func fail() {
+    private func fail(reason: String? = nil) {
         guard !self.isClosed else {
             return
+        }
+        // The reason is what the plugin's status row shows while the session
+        // keeps retrying. Without it "connecting" has no cause attached.
+        if let reason = reason, !reason.isEmpty {
+            self.onError(reason)
         }
         self.reportReady(false)
         self.pingTimer?.cancel()
@@ -1191,11 +1261,13 @@ private final class LocalMTProxyUpstream {
                 let request = "GET /apiws HTTP/1.1\r\nHost: \(host)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n\r\n"
                 connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
                     if error != nil {
-                        self.fail()
+                        self.fail(reason: "front \(host): the upgrade request was not sent")
                     }
                 })
                 self.receiveLoop(on: connection)
-            case .failed, .cancelled:
+            case let .failed(error):
+                self.fail(reason: "front \(host): \(error.localizedDescription)")
+            case .cancelled:
                 self.fail()
             default:
                 break
@@ -1204,14 +1276,14 @@ private final class LocalMTProxyUpstream {
         connection.start(queue: self.queue)
         // A front that accepts the connection and then never answers the
         // upgrade would otherwise hold the session open forever with no
-        // fallback. The reference gives the upgrade five seconds; this gives it
-        // eight, which keeps a slow handshake alive but still moves on.
-        self.queue.asyncAfter(deadline: .now() + 8) { [weak self, weak connection] in
+        // fallback. The reference allows five seconds for dial and handshake,
+        // so the whole attempt is bounded by the same number here.
+        self.queue.asyncAfter(deadline: .now() + 5) { [weak self, weak connection] in
             guard let self = self, let connection = connection, !self.isClosed, !self.isReady,
                   self.connection === connection else {
                 return
             }
-            self.fail()
+            self.fail(reason: "front \(host): no answer to the upgrade within 5 s")
         }
     }
 
@@ -1232,7 +1304,9 @@ private final class LocalMTProxyUpstream {
                 self.writeInitial()
                 self.flushQueued()
                 self.receiveLoop(on: connection)
-            case .failed, .cancelled:
+            case let .failed(error):
+                self.fail(reason: "front \(host):\(port): \(error.localizedDescription)")
+            case .cancelled:
                 self.fail()
             default:
                 break
@@ -1325,7 +1399,8 @@ private final class LocalMTProxyUpstream {
         self.receiveBuffer.removeSubrange(0 ..< range.upperBound)
         let text = String(decoding: head, as: UTF8.self)
         guard text.hasPrefix("HTTP/1.1 101") else {
-            self.fail()
+            let statusLine = text.components(separatedBy: "\r\n").first ?? ""
+            self.fail(reason: "front \(self.lastTargetDescription): \(statusLine)")
             return
         }
         if let key = self.pendingWebSocketKey {
@@ -1333,7 +1408,7 @@ private final class LocalMTProxyUpstream {
             if let line = text.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("sec-websocket-accept:") }) {
                 let value = line.split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
                 if value != expected {
-                    self.fail()
+                    self.fail(reason: "front \(self.lastTargetDescription): bad Sec-WebSocket-Accept")
                     return
                 }
             }

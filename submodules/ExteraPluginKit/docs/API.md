@@ -610,13 +610,18 @@ entry is visible in Settings → Privacy → Proxy exactly as a hand-added one i
 `domain` is a CloudFlare zone whose `kws<dc>.<domain>` names answer (the
 `tg-ws-proxy` arrangement). The tunnel dials `kws<dc>.<domain>` over WSS, falls
 back to `kws<dc>.web.telegram.org` and then to the datacenter address, so a zone
-that stops answering does not take the transport down.
+that stops answering does not take the transport down. An optional `domains`
+array names further zones to dial, in order, when the first one fails — the
+fallback the reference app gets from its zone list.
 
 ```js
 proxy.local_start("pclead.co.uk", function (r) {
     // r = {ok, status: {running, host, port, domain, active, connections,
     //                   upstreams, link, error, upstream_error}}
 });
+
+// The chosen zone first, the rest as fallbacks.
+proxy.local_start("pclead.co.uk", ["offshor.co.uk", "cakeisalie.co.uk"], function (r) {});
 
 proxy.local_stop(function (r) { /* r = {ok, status: {...}} */ });
 
