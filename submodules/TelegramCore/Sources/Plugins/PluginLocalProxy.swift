@@ -1095,6 +1095,9 @@ private final class LocalMTProxyUpstream {
     private let queue: DispatchQueue
     private var targets: [Target]
     private let initialHeader: Data
+    /// The datacenter's direction: everything it sends is encrypted with the
+    /// reverse key of the header above, exactly like the bytes a client would
+    /// read in a direct obfuscated session.
     private let decryptor: LocalMTProxyAesCtr
     private let onPayload: (Data) -> Void
     private let onReadyState: (Bool) -> Void
@@ -1340,6 +1343,27 @@ private final class LocalMTProxyUpstream {
         }
     }
 
+    /// One chunk of the datacenter's stream, decrypted for the local client.
+    ///
+    /// The front encrypts its side with the reverse key of the header this
+    /// tunnel sent, the same way a direct obfuscated session would. Handing the
+    /// still-encrypted bytes to `onPayload` would make the client read random
+    /// packet lengths out of the ciphertext, so the stream is decrypted here,
+    /// one chunk at a time and in order, before it is re-encrypted with the
+    /// client's own key.
+    private func deliver(_ payload: Data) {
+        guard !payload.isEmpty else {
+            return
+        }
+        // Any byte from the front means this cipher has moved, so a switch to
+        // another target would restart it at the wrong offset.
+        self.hasTransferredPayload = true
+        let plain = self.decryptor.process(payload)
+        if !plain.isEmpty {
+            self.onPayload(plain)
+        }
+    }
+
     private func write(_ packet: Data) {
         guard let connection = self.connection else {
             return
@@ -1373,8 +1397,7 @@ private final class LocalMTProxyUpstream {
                 } else {
                     let payload = self.receiveBuffer
                     self.receiveBuffer = Data()
-                    self.hasTransferredPayload = true
-                    self.onPayload(payload)
+                    self.deliver(payload)
                 }
             }
             if let error = error {
@@ -1475,10 +1498,7 @@ private final class LocalMTProxyUpstream {
             self.receiveBuffer.removeFirst(offset + maskLength + length)
             switch opcode {
             case 0x2, 0x0:
-                if !payload.isEmpty {
-                    self.hasTransferredPayload = true
-                }
-                self.onPayload(payload)
+                self.deliver(payload)
             case 0x9:
                 if let connection = self.connection {
                     connection.send(content: LocalMTProxyUpstream.maskFrame(payload, opcode: 0xa), completion: .contentProcessed { _ in })
