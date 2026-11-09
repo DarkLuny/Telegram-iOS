@@ -36,7 +36,7 @@ public final class PluginManager: PluginHost {
     /// Hooks a plugin asked for while its script was still evaluating. A plugin
     /// may call `add_hook` at class-body level or in its constructor, not only
     /// from `on_plugin_load`, and at that point it is not in `loaded` yet.
-    private var pendingHooks: [String: (requests: [String], substrings: [String], wantsSend: Bool)] = [:]
+    private var pendingHooks: [String: (requests: [String], substrings: [String], wantsSend: Bool, priorities: [String: Int32], sendPriority: Int32)] = [:]
 
     /// Cached answer to "does any plugin implement `on_messages_will_be_deleted`".
     /// See `messagesWillBeDeletedHookAvailable`.
@@ -267,6 +267,10 @@ public final class PluginManager: PluginHost {
                 plugin.registeredRequestHooks = pending.requests
                 plugin.registeredSubstringHooks = pending.substrings
                 plugin.wantsSendMessageHook = pending.wantsSend
+                for (name, priority) in pending.priorities where plugin.hookPriorities[name] == nil {
+                    plugin.hookPriorities[name] = priority
+                }
+                plugin.sendMessageHookPriority = pending.sendPriority
             }
             self.lock.unlock()
             self.callLifecycle(plugin, "on_plugin_load")
@@ -471,6 +475,36 @@ public final class PluginManager: PluginHost {
     /// (`messages.setTyping`). A plugin ported from Android would otherwise
     /// register a hook that never fires, which is the worst failure mode: it
     /// looks like it works.
+    /// The priority a plugin registered this event under, or 0.
+    ///
+    /// Mirrors `pluginWants` so the chain order follows the registration a
+    /// plugin actually made: an exact registration answers first, then a
+    /// wildcard, then substring patterns.
+    private static func eventPriority(_ plugin: LoadedPlugin, pluginEvent: String, hookName: String) -> Int32 {
+        if pluginEvent == "on_send_message_hook" {
+            return plugin.sendMessageHookPriority
+        }
+        if pluginEvent == "on_messages_will_be_deleted" {
+            return 0
+        }
+        let candidates = PluginManager.hookNameCandidates(hookName)
+        for candidate in candidates where plugin.registeredRequestHooks.contains(candidate) {
+            return plugin.hookPriorities[candidate] ?? 0
+        }
+        if plugin.registeredRequestHooks.contains("*") {
+            return plugin.hookPriorities["*"] ?? 0
+        }
+        for pattern in plugin.registeredSubstringHooks {
+            if pattern == "*" {
+                return plugin.hookPriorities["*"] ?? 0
+            }
+            for candidate in candidates where candidate.contains(pattern) {
+                return plugin.hookPriorities[pattern] ?? 0
+            }
+        }
+        return 0
+    }
+
     private static func pluginWants(_ plugin: LoadedPlugin, hookName: String) -> Bool {
         let candidates = PluginManager.hookNameCandidates(hookName)
         for candidate in candidates where plugin.registeredRequestHooks.contains(candidate) {
@@ -556,7 +590,14 @@ public final class PluginManager: PluginHost {
                 return true
             }
             return PluginManager.pluginWants(plugin, hookName: hookName)
-        }.sorted { $0.loadIndex < $1.loadIndex }
+        }.sorted { left, right in
+            // exteraGram's `priority` orders the chain before load order does;
+            // the SDK does not document the tie-break, so equal priorities keep
+            // the load order this runtime already guarantees.
+            let leftPriority = PluginManager.eventPriority(left, pluginEvent: pluginEvent, hookName: hookName)
+            let rightPriority = PluginManager.eventPriority(right, pluginEvent: pluginEvent, hookName: hookName)
+            return leftPriority == rightPriority ? left.loadIndex < right.loadIndex : leftPriority > rightPriority
+        }
         self.lock.unlock()
 
         let field: String
@@ -703,39 +744,58 @@ public final class PluginManager: PluginHost {
         }
     }
 
-    public func pluginAddHook(pluginId: String, name: String, matchSubstring: Bool) {
+    public func pluginAddHook(pluginId: String, name: String, matchSubstring: Bool, priority: Int32) {
         self.lock.lock()
         if let plugin = self.loaded[pluginId] {
             // `add_hook` may run in the constructor and again in
-            // `on_plugin_load`; a duplicate would make the hook fire twice.
+            // `on_plugin_load`; a duplicate would make the hook fire twice, and
+            // the first registration also fixes the priority it runs under.
             if matchSubstring {
                 if !plugin.registeredSubstringHooks.contains(name) {
                     plugin.registeredSubstringHooks.append(name)
+                    if plugin.hookPriorities[name] == nil {
+                        plugin.hookPriorities[name] = priority
+                    }
                 }
             } else if !plugin.registeredRequestHooks.contains(name) {
                 plugin.registeredRequestHooks.append(name)
+                if plugin.hookPriorities[name] == nil {
+                    plugin.hookPriorities[name] = priority
+                }
             }
         } else {
-            var pending = self.pendingHooks[pluginId] ?? (requests: [], substrings: [], wantsSend: false)
+            var pending = self.pendingHooks[pluginId] ?? (requests: [], substrings: [], wantsSend: false, priorities: [:], sendPriority: 0)
             if matchSubstring {
                 if !pending.substrings.contains(name) {
                     pending.substrings.append(name)
+                    if pending.priorities[name] == nil {
+                        pending.priorities[name] = priority
+                    }
                 }
             } else if !pending.requests.contains(name) {
                 pending.requests.append(name)
+                if pending.priorities[name] == nil {
+                    pending.priorities[name] = priority
+                }
             }
             self.pendingHooks[pluginId] = pending
         }
         self.lock.unlock()
     }
 
-    public func pluginAddOnSendMessageHook(pluginId: String) {
+    public func pluginAddOnSendMessageHook(pluginId: String, priority: Int32) {
         self.lock.lock()
         if let plugin = self.loaded[pluginId] {
-            plugin.wantsSendMessageHook = true
+            if !plugin.wantsSendMessageHook {
+                plugin.wantsSendMessageHook = true
+                plugin.sendMessageHookPriority = priority
+            }
         } else {
-            var pending = self.pendingHooks[pluginId] ?? (requests: [], substrings: [], wantsSend: false)
-            pending.wantsSend = true
+            var pending = self.pendingHooks[pluginId] ?? (requests: [], substrings: [], wantsSend: false, priorities: [:], sendPriority: 0)
+            if !pending.wantsSend {
+                pending.wantsSend = true
+                pending.sendPriority = priority
+            }
             self.pendingHooks[pluginId] = pending
         }
         self.lock.unlock()
@@ -943,6 +1003,15 @@ public final class PluginManager: PluginHost {
         } catch {
             return "\(error)"
         }
+    }
+
+    /// Removes one swizzle, the iOS shape of `unhook_method(unhook_obj)`.
+    ///
+    /// `install` is once per class and selector, so removing the pair and asking
+    /// for it again is a fresh install, which is what a plugin that unhooks and
+    /// re-hooks mid-session expects.
+    public func pluginRemoveSwizzle(pluginId: String, className: String, selector: String, isClassMethod: Bool) -> Bool {
+        return PluginSwizzle.shared.remove(className: className, selector: selector, isClassMethod: isClassMethod)
     }
 
     /// Resolves a module path inside one plugin's directory, or nil when the

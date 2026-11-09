@@ -319,6 +319,23 @@ final class PluginSwizzle {
         return nil
     }
 
+    /// Removes one hook and restores the original IMP, the reverse of `install`.
+    ///
+    /// Unhook is per class and selector, so `install` for the same pair after a
+    /// remove is a fresh install rather than the no-op it would be if the entry
+    /// were still there.
+    @discardableResult
+    func remove(className: String, selector: String, isClassMethod: Bool) -> Bool {
+        let key = PluginSwizzle.key(className, selector, isClassMethod)
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        guard let entry = self.installed.removeValue(forKey: key) else {
+            return false
+        }
+        method_setImplementation(entry.method, entry.originalIMP)
+        return true
+    }
+
     /// Restores every hooked method. Called when the plugin runtime unloads:
     /// after this no plugin block is reachable from the runtime.
     func removeAll() {

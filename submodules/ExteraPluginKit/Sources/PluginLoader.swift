@@ -13,9 +13,13 @@ public protocol PluginHost: AnyObject {
     /// Current persisted values for the plugin, handed to `get_setting`.
     func pluginSettings(pluginId: String) -> [String: Any]
     func pluginSetSetting(pluginId: String, key: String, value: Any?, reload: Bool)
-    /// Remember that the plugin wants a request/update/send hook.
-    func pluginAddHook(pluginId: String, name: String, matchSubstring: Bool)
-    func pluginAddOnSendMessageHook(pluginId: String)
+    /// Remember that the plugin wants a request/update/send hook. `priority` is
+    /// exteraGram's `add_hook(..., priority=)` and
+    /// `add_on_send_message_hook(priority=)`: higher runs earlier in the chain.
+    /// The SDK does not document the tie-break, so equal priorities keep load
+    /// order, which is what this runtime already guarantees.
+    func pluginAddHook(pluginId: String, name: String, matchSubstring: Bool, priority: Int32)
+    func pluginAddOnSendMessageHook(pluginId: String, priority: Int32)
     func pluginAddMenuItem(pluginId: String, item: PluginMenuItem)
     func pluginRemoveMenuItem(pluginId: String, itemId: String)
     /// `account` is the exteraGram account id, or nil for "the selected one".
@@ -105,6 +109,10 @@ public protocol PluginHost: AnyObject {
         afterToken: String?,
         context: JSContext
     ) -> String?
+    /// Removes one swizzle by class, selector and kind: the iOS shape of
+    /// `unhook_method(unhook_obj)`. Returns true when a hook was installed for
+    /// that pair, so hooking again after an unhook is a fresh install.
+    func pluginRemoveSwizzle(pluginId: String, className: String, selector: String, isClassMethod: Bool) -> Bool
 
     // Network and proxy. All five are asynchronous: the answer is delivered by
     // calling `__extera.resolveBridge(token, json)` once the work finishes, so a
@@ -189,6 +197,20 @@ public struct PluginSendOptions {
     public let entitiesJSON: String?
     /// Same, for a media caption.
     public let captionEntitiesJSON: String?
+    /// When the message should be sent, as unix seconds; the engine turns it
+    /// into the scheduled-message attribute, so it lands in the "scheduled"
+    /// list the composer shows.
+    public let scheduleDate: Int32?
+    /// exteraGram's `has_media_spoilers`: the media bubble arrives covered.
+    /// Only the media send honours it; the engine's edit request has no
+    /// attribute slot, so an edit cannot add a spoiler the message lacks.
+    public let hasMediaSpoilers: Bool
+    /// A media replacement for `edit_message`, from its `file_path` argument.
+    /// A send ignores both of these.
+    public let filePath: String?
+    /// How `filePath` should be treated (`photo` decodes as an image bubble);
+    /// nil means the edit is text-only.
+    public let fileKind: String?
 
     public init(json: [String: Any]) {
         self.replyToMessageId = (json["replyToMsg"] as? NSNumber)?.int64Value
@@ -197,6 +219,16 @@ public struct PluginSendOptions {
         self.parseMode = json["parse_mode"] as? String
         self.entitiesJSON = PluginSendOptions.jsonString(json["entities"])
         self.captionEntitiesJSON = PluginSendOptions.jsonString(json["caption_entities"])
+        // Both spellings are accepted on purpose: the SDK's typed helpers take
+        // snake_case keywords while `send_message`'s dict and a ported plugin's
+        // own objects mix in camelCase.
+        self.scheduleDate = (json["scheduleDate"] as? NSNumber)?.int32Value
+            ?? (json["schedule_date"] as? NSNumber)?.int32Value
+        self.hasMediaSpoilers = (json["hasMediaSpoilers"] as? Bool) == true
+            || (json["has_media_spoilers"] as? Bool) == true
+            || (json["with_spoiler"] as? Bool) == true
+        self.filePath = json["file_path"] as? String ?? json["filePath"] as? String
+        self.fileKind = json["file_kind"] as? String ?? json["fileKind"] as? String
     }
 
     private static func jsonString(_ value: Any?) -> String? {
@@ -317,8 +349,18 @@ public final class PluginLoader {
             icon: self.literalString(in: source, named: "__icon__"),
             appVersionRequirement: self.literalString(in: source, named: "__app_version__") ?? self.literalString(in: source, named: "__min_version__"),
             sdkVersionRequirement: self.literalString(in: source, named: "__sdk_version__"),
-            requirements: self.literalStringArray(in: source, named: "__requirements__") ?? []
+            requirements: self.literalStringArray(in: source, named: "__requirements__") ?? [],
+            categories: self.declaredCategories(in: source)
         )
+    }
+
+    /// The categories a plugin declares: `__category__` as a list literal, or as
+    /// a single string a port may carry. Unknown names are dropped rather than
+    /// rejected, and the manifest caps the list at three.
+    private func declaredCategories(in source: String) -> [String] {
+        let raw = self.literalStringArray(in: source, named: "__category__")
+            ?? (self.literalString(in: source, named: "__category__").map { [$0] } ?? [])
+        return raw.filter { PluginManifest.knownCategories.contains($0) }
     }
 
     /// Finds `__name__ = "value"`, `__name__ = 'value'`, or the `var __name__ =`
@@ -495,13 +537,13 @@ public final class PluginLoader {
         }
         hostObject.setObject(importSettings as AnyObject, forKeyedSubscript: "importSettings" as NSString)
 
-        let addHook: @convention(block) (String, String, Bool) -> Void = { id, name, matchSubstring in
-            host.pluginAddHook(pluginId: id, name: name, matchSubstring: matchSubstring)
+        let addHook: @convention(block) (String, String, Bool, Double) -> Void = { id, name, matchSubstring, priority in
+            host.pluginAddHook(pluginId: id, name: name, matchSubstring: matchSubstring, priority: Int32(priority))
         }
         hostObject.setObject(addHook as AnyObject, forKeyedSubscript: "addHook" as NSString)
 
-        let addSendHook: @convention(block) (String) -> Void = { id in
-            host.pluginAddOnSendMessageHook(pluginId: id)
+        let addSendHook: @convention(block) (String, Double) -> Void = { id, priority in
+            host.pluginAddOnSendMessageHook(pluginId: id, priority: Int32(priority))
         }
         hostObject.setObject(addSendHook as AnyObject, forKeyedSubscript: "addOnSendMessageHook" as NSString)
 
@@ -640,6 +682,13 @@ public final class PluginLoader {
             return NSClassFromString(name) != nil
         }
         hostObject.setObject(classExists as AnyObject, forKeyedSubscript: "classExists" as NSString)
+
+        // The reverse of `installSwizzle`, for `unhook_method`: removing the
+        // pair makes a later hook for it a fresh install again.
+        let removeSwizzle: @convention(block) (String, String, String, Bool) -> Bool = { id, className, selector, isClassMethod in
+            return host.pluginRemoveSwizzle(pluginId: id, className: className, selector: selector, isClassMethod: isClassMethod)
+        }
+        hostObject.setObject(removeSwizzle as AnyObject, forKeyedSubscript: "removeSwizzle" as NSString)
 
         // Runtime class construction, the iOS shape of DexMaker. The plugin
         // describes the methods in JSON; the host allocates the subclass, adds a

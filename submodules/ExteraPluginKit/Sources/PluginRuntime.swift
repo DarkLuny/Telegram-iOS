@@ -512,6 +512,8 @@ private final class PluginActionsImpl: PluginActions {
                     peerId: peerId,
                     replyToMessageId: options.replyToMessageId,
                     silentPosting: options.silent,
+                    scheduleDate: options.scheduleDate,
+                    hasMediaSpoilers: options.hasMediaSpoilers,
                     content: .text(content.text, content.entities)
                 ).start()
             }
@@ -525,12 +527,31 @@ private final class PluginActionsImpl: PluginActions {
                 return
             }
             let content = Self.messageContent(text: text, entitiesJSON: options.entitiesJSON)
+
+            // `file_path` turns the edit into a media replacement: the same
+            // decoding the send path does, so an image the plugin can decode
+            // arrives as a picture bubble. Without it the edit stays text-only,
+            // which is what every port until now has used.
+            var replacement: EngineOutgoingPluginMessage?
+            if let filePath = options.filePath {
+                guard FileManager.default.fileExists(atPath: filePath) else {
+                    self.presentBulletin(json: "{\"kind\":\"error\",\"text\":\"Plugin file not found\"}", pluginId: nil)
+                    return
+                }
+                replacement = Self.outgoingFileContent(
+                    kind: options.fileKind ?? "document",
+                    path: filePath,
+                    caption: content
+                )
+            }
+
             let _ = editPluginMessage(
                 account: context.account,
                 peerId: peerId,
                 messageId: messageId,
                 text: content.text,
-                entities: content.entities
+                entities: content.entities,
+                content: replacement
             ).start()
         }
     }
@@ -541,26 +562,13 @@ private final class PluginActionsImpl: PluginActions {
                 self.reportMissingAccount()
                 return
             }
-            let fileManager = FileManager.default
-            guard fileManager.fileExists(atPath: path) else {
+            guard FileManager.default.fileExists(atPath: path) else {
                 self.presentBulletin(json: "{\"kind\":\"error\",\"text\":\"Plugin file not found\"}", pluginId: nil)
                 return
             }
-            let size = (try? fileManager.attributesOfItem(atPath: path))?[.size] as? NSNumber
-
-            // A photo is uploaded as an image so it arrives as a picture bubble;
-            // anything else (including an undecodable image) goes as a document.
-            // Only this layer has a `UIImage`, so the pixel size is measured here
-            // and the engine builds the matching media.
-            var photoDimensions: PixelDimensions?
-            if kind == "photo", let image = UIImage(contentsOfFile: path), image.size.width > 0.0, image.size.height > 0.0 {
-                photoDimensions = PixelDimensions(
-                    width: Int32(min(image.size.width * image.scale, 4096.0)),
-                    height: Int32(min(image.size.height * image.scale, 4096.0))
-                )
-            }
 
             let caption = Self.messageContent(text: options.caption ?? "", entitiesJSON: options.captionEntitiesJSON)
+            let content = Self.outgoingFileContent(kind: kind, path: path, caption: caption)
 
             let _ = PluginRuntime.withPluginSend {
                 enqueuePluginMessage(
@@ -568,18 +576,39 @@ private final class PluginActionsImpl: PluginActions {
                     peerId: peerId,
                     replyToMessageId: options.replyToMessageId,
                     silentPosting: options.silent,
-                    content: .localFile(
-                        path: path,
-                        mimeType: Self.mimeType(forPath: path),
-                        fileName: (path as NSString).lastPathComponent,
-                        size: size?.int64Value,
-                        photoDimensions: photoDimensions,
-                        caption: caption.text,
-                        captionEntities: caption.entities
-                    )
+                    scheduleDate: options.scheduleDate,
+                    hasMediaSpoilers: options.hasMediaSpoilers,
+                    content: content
                 ).start()
             }
         }
+    }
+
+    /// The outgoing message a local file becomes, shared by the send and the
+    /// media-replacing edit so the same file lands as the same bubble in both.
+    ///
+    /// A photo is uploaded as an image so it arrives as a picture bubble;
+    /// anything else (including an undecodable image) goes as a document. Only
+    /// this layer has a `UIImage`, so the pixel size is measured here and the
+    /// engine builds the matching media.
+    private static func outgoingFileContent(kind: String, path: String, caption: (text: String, entities: [MessageTextEntity])) -> EngineOutgoingPluginMessage {
+        let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber
+        var photoDimensions: PixelDimensions?
+        if kind == "photo", let image = UIImage(contentsOfFile: path), image.size.width > 0.0, image.size.height > 0.0 {
+            photoDimensions = PixelDimensions(
+                width: Int32(min(image.size.width * image.scale, 4096.0)),
+                height: Int32(min(image.size.height * image.scale, 4096.0))
+            )
+        }
+        return .localFile(
+            path: path,
+            mimeType: Self.mimeType(forPath: path),
+            fileName: (path as NSString).lastPathComponent,
+            size: size?.int64Value,
+            photoDimensions: photoDimensions,
+            caption: caption.text,
+            captionEntities: caption.entities
+        )
     }
 
     func selectedAccountId() -> Int64? {
@@ -620,6 +649,44 @@ private final class PluginActionsImpl: PluginActions {
                 result[name] = theme.rootController.navigationBar.buttonColor.rgb
             case "actionSheet":
                 result[name] = theme.actionSheet.controlAccentColor.rgb
+            case "inText":
+                result[name] = theme.chat.message.incoming.primaryTextColor.rgb
+            case "outgoingText":
+                result[name] = theme.chat.message.outgoing.primaryTextColor.rgb
+            case "inBubble":
+                result[name] = theme.chat.message.incoming.bubble.withWallpaper.fill.first?.rgb
+                    ?? theme.chat.message.incoming.bubble.withoutWallpaper.fill.first?.rgb
+                    ?? theme.list.itemAccentColor.rgb
+            case "chatList":
+                result[name] = theme.chatList.backgroundColor.rgb
+            case "plainBackground":
+                result[name] = theme.list.plainBackgroundColor.rgb
+            case "separator":
+                result[name] = theme.list.itemBlocksSeparatorColor.rgb
+            case "inputPanel":
+                result[name] = theme.chat.inputPanel.panelBackgroundColor.rgb
+            // The Android key names a port reaches for first, mapped here to
+            // the slot with the same meaning; the plugin keeps its own string.
+            case "key_chat_inText":
+                result[name] = theme.chat.message.incoming.primaryTextColor.rgb
+            case "key_chat_outText":
+                result[name] = theme.chat.message.outgoing.primaryTextColor.rgb
+            case "key_chat_inBubble":
+                result[name] = theme.chat.message.incoming.bubble.withWallpaper.fill.first?.rgb
+                    ?? theme.chat.message.incoming.bubble.withoutWallpaper.fill.first?.rgb
+                    ?? theme.list.itemAccentColor.rgb
+            case "key_chat_outBubble":
+                result[name] = theme.chat.message.outgoing.bubble.withWallpaper.fill.first?.rgb
+                    ?? theme.chat.message.outgoing.bubble.withoutWallpaper.fill.first?.rgb
+                    ?? theme.list.itemAccentColor.rgb
+            case "key_chat_listBackground":
+                result[name] = theme.chatList.backgroundColor.rgb
+            case "key_windowBackgroundWhite":
+                result[name] = theme.list.plainBackgroundColor.rgb
+            case "key_graySection":
+                result[name] = theme.list.itemBlocksSeparatorColor.rgb
+            case "key_chat_inputPanelBackground":
+                result[name] = theme.chat.inputPanel.panelBackgroundColor.rgb
             default:
                 break
             }

@@ -51,6 +51,77 @@
  * the shape of the API, not the implementation.
  */
 
+// Translates the MVEL subset a ported condition can carry into the JavaScript
+// the compiled form needs. Pure function: `instanceof` becomes literal false
+// (there are no Java classes to test against, and the dotted class name is not
+// even a valid JS operand), `contains` becomes indexOf, `isdef`/`undef` become
+// undefined checks. Everything else MVEL and JS spell the same way.
+var warnedMvelInstanceof = false;
+function translateMVEL(expression) {
+    var result = String(expression);
+    var hadInstanceof = /\binstanceof\b/.test(result);
+    // The left side of `contains`/`instanceof` is a property path, possibly an
+    // indexed one (`param.args[0]`) or a call (`param.getArg(0)`), which is the
+    // shape the SDK's own examples use.
+    var operand = '[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*(?:\\s*\\[[^\\]]+\\])?(?:\\s*\\([^()]*\\))?';
+    result = result.replace(new RegExp('(' + operand + ')\\s+instanceof\\s+[A-Za-z_$][\\w$.]*', 'g'), 'false');
+    result = result.replace(new RegExp('(' + operand + ')\\s+contains\\s+(\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*"|[A-Za-z_$][\\w$.]*)', 'g'), '$1.indexOf($2) >= 0');
+    result = result.replace(/\bisdef\s+([A-Za-z_$][\w$]*)/g, '$1 !== undefined');
+    result = result.replace(/\bundef\s+([A-Za-z_$][\w$]*)/g, '$1 === undefined');
+    if (hadInstanceof && !warnedMvelInstanceof) {
+        warnedMvelInstanceof = true;
+        __extera.log('mvel: instanceof has no iOS equivalent and evaluates to false');
+    }
+    return result;
+}
+
+// Renders a value for `logger.dump` and `log_utils.dump`: own properties only,
+// cycles marked, depth cut with "{...}", long arrays and objects capped at
+// `maxItems` entries. Reads never call getters, so a dump has no side effects.
+function pluginDumpValue(value, depth, maxItems, seen) {
+    if (value === null) { return 'null'; }
+    if (value === undefined) { return 'undefined'; }
+    var kind = typeof value;
+    if (kind === 'number' || kind === 'boolean') { return String(value); }
+    if (kind === 'string') {
+        var text = JSON.stringify(value);
+        return text.length > 200 ? text.slice(0, 197) + '..."' : text;
+    }
+    if (kind === 'function') { return 'function ' + (value.name || '(anonymous)'); }
+    if (value instanceof Error) { return value.name + ': ' + value.message; }
+        if (Array.isArray(value)) {
+        var head = value.slice(0, maxItems).map(function (item) {
+            return pluginDumpValue(item, depth - 1, maxItems, seen);
+        });
+        var more = value.length > maxItems ? ', + ' + (value.length - maxItems) + ' more' : '';
+        return 'Array(' + value.length + ') [' + head.join(', ') + more + ']';
+    }
+    if (value instanceof Date) { return value.toISOString(); }
+    if (kind !== 'object') { return String(value); }
+    if (seen.indexOf(value) !== -1) { return '<cycle>'; }
+    if (depth <= 0) { return '{...}'; }
+    seen.push(value);
+    var keys = Object.getOwnPropertyNames(value);
+    var shown = keys.slice(0, maxItems).map(function (key) {
+        var item;
+        try { item = value[key]; } catch (error) { item = '<getter threw>'; }
+        return key + ': ' + pluginDumpValue(item, depth - 1, maxItems, seen);
+    });
+    seen.pop();
+    var extra = keys.length > maxItems ? ', + ' + (keys.length - maxItems) + ' more' : '';
+    return '{' + shown.join(', ') + extra + '}';
+}
+
+function pluginDump(value, label, depth, maxItems) {
+    var line = (label ? String(label) + ': ' : '') + pluginDumpValue(
+        value,
+        depth === undefined ? 2 : depth,
+        maxItems === undefined ? 20 : maxItems,
+        []
+    );
+    return line.length > 4000 ? line.slice(0, 3997) + '...' : line;
+}
+
 var __extera = (function () {
     'use strict';
 
@@ -1332,12 +1403,128 @@ var __extera = (function () {
         this.collapsed = options.collapsed;
     }
 
+    // --- logging ------------------------------------------------------------
+    //
+    // exteraGram's `self.logger`: levels, %-substitution, `dump`, `timed`,
+    // `child`, `add_handler`. Everything rides the existing `log` bridge with a
+    // `[LEVEL] plugin.id: message` prefix, so the log screen and file show
+    // levels without a new bridge member. The default threshold is INFO: the
+    // SDK's DEBUG-in-developer-mode toggle has no counterpart here, and a port
+    // sets `logger.level = LogLevel.DEBUG` for verbose runs.
+
+    var DEFAULT_LOG_LEVEL = 30;
+    var LOG_LEVEL_NAMES = { verbose: 10, debug: 20, info: 30, warning: 40, error: 50, off: 100 };
+
+    function makeLogger(suffix, parent) {
+        var tag = 'plugin.' + (pluginId || '') + (suffix ? '.' + suffix : '');
+        var handlers = [];
+        var ownLevel = null;
+
+        function effective() {
+            if (ownLevel !== null) { return ownLevel; }
+            return parent ? parent._effective() : DEFAULT_LOG_LEVEL;
+        }
+
+        function fmt(message, args) {
+            if (!args || !args.length) { return String(message); }
+            var index = 0;
+            return String(message).replace(/%[sdf%]/g, function (token) {
+                if (token === '%%') { return '%'; }
+                if (index >= args.length) { return token; }
+                var value = args[index];
+                index += 1;
+                if (token === '%d') { return String(Math.trunc(Number(value) || 0)); }
+                if (token === '%f') { return String(Number(value) || 0); }
+                return String(value);
+            });
+        }
+
+        function handle(record) {
+            for (var i = 0; i < handlers.length; i += 1) {
+                try { handlers[i](record); } catch (error) { /* a broken handler must not break logging */ }
+            }
+            // A child's records reach the parent's handlers, the way the SDK's
+            // child loggers report through the plugin's own logger.
+            if (parent) {
+                parent._handle(record);
+            }
+        }
+
+        function emit(levelName, levelNum, message, args, traceback) {
+            // The message is not even formatted when the level is off, which is
+            // the SDK's own performance rule for hooks that fire thousands of
+            // times.
+            if (levelNum < effective()) { return; }
+            var body = fmt(message, args);
+            var text = '[' + levelName + '] ' + tag + ': ' + body;
+            bridgeMissing('log')(pluginId, traceback ? text + '\n' + traceback : text);
+            handle({
+                level: levelName,
+                tag: tag,
+                message: body,
+                location: null,
+                traceback: traceback || null,
+                created: Date.now() / 1000,
+                text: text,
+            });
+        }
+
+        var logger = {
+            verbose: function (message) { emit('VERBOSE', 10, message, Array.prototype.slice.call(arguments, 1), null); },
+            debug: function (message) { emit('DEBUG', 20, message, Array.prototype.slice.call(arguments, 1), null); },
+            info: function (message) { emit('INFO', 30, message, Array.prototype.slice.call(arguments, 1), null); },
+            warning: function (message) { emit('WARNING', 40, message, Array.prototype.slice.call(arguments, 1), null); },
+            error: function (message, excInfo) {
+                var stack = excInfo && excInfo.stack ? excInfo.stack : null;
+                emit('ERROR', 50, message, Array.prototype.slice.call(arguments, 1), stack);
+            },
+            exception: function (error) {
+                var stack = error && error.stack ? error.stack : null;
+                emit('ERROR', 50, (error && error.message) || String(error), [], stack);
+            },
+            dump: function (value, label, depth, maxItems) { emit('DEBUG', 20, pluginDump(value, label, depth, maxItems), []); },
+            timed: function (label) {
+                // The SDK's form is a context manager; JavaScript has none, so
+                // the call hands back an object with the one method that
+                // matters: `end(failed)`.
+                var startedAt = Date.now();
+                return {
+                    end: function (failed) {
+                        emit('DEBUG', 20, String(label) + (failed ? ' (failed)' : '') + ' took ' + (Date.now() - startedAt) + ' ms', []);
+                    },
+                };
+            },
+            child: function (name) { return makeLogger((suffix ? suffix + '.' : '') + String(name), logger); },
+            add_handler: function (fn) { if (typeof fn === 'function') { handlers.push(fn); } },
+            _effective: effective,
+            _handle: handle,
+        };
+        Object.defineProperty(logger, 'level', {
+            get: function () { return ownLevel === null ? null : ownLevel; },
+            set: function (value) {
+                if (value === null || value === undefined) { ownLevel = null; return; }
+                if (typeof value === 'string') {
+                    var named = LOG_LEVEL_NAMES[value.toLowerCase()];
+                    ownLevel = named === undefined ? null : named;
+                } else if (typeof value === 'number' && isFinite(value)) {
+                    ownLevel = Math.trunc(value);
+                }
+            },
+        });
+        return logger;
+    }
+
     // --- BasePlugin -------------------------------------------------------
 
     function BasePlugin() {
         this.log = function (message) {
             bridgeMissing('log')(pluginId, String(message));
         };
+
+        // exteraGram's structured logger; the legacy `log` above stays for
+        // ports. The threshold starts at INFO, `logger.level` accepts the SDK's
+        // level names, numbers, or null for the default.
+        this.logger = makeLogger(null);
 
         this.getName = function () {
             return pluginName;
@@ -1371,13 +1558,24 @@ var __extera = (function () {
             registeredHooks.push(name);
             // exteraGram's second argument lets one registration cover a whole
             // request family (`messages.`). It has to reach the host, or a plugin
-            // using it would silently never fire.
-            bridgeMissing('addHook')(pluginId, name, !!match_substring);
+            // using it would silently never fire. The third is the chain order:
+            // higher priorities run earlier; the host keeps load order for ties.
+            bridgeMissing('addHook')(pluginId, name, !!match_substring, typeof priority === 'number' ? priority : 0);
         };
 
-        this.add_on_send_message_hook = function () {
+        this.add_on_send_message_hook = function (priority) {
             sendHookEnabled = true;
-            bridgeMissing('addOnSendMessageHook')(pluginId);
+            bridgeMissing('addOnSendMessageHook')(pluginId, typeof priority === 'number' ? priority : 0);
+        };
+
+        // The token `find_class(...).hook(...)` returns, the iOS shape of
+        // `unhook_method(unhook_obj)`: removing the pair makes a later hook for
+        // it a fresh install.
+        this.unhook_method = function (token) {
+            if (token && typeof token.unhook === 'function') {
+                return token.unhook();
+            }
+            return false;
         };
 
         this.add_menu_item = function (data) {
@@ -1460,7 +1658,15 @@ var __extera = (function () {
                 caption: params.caption,
                 parse_mode: parseMode || params.parse_mode,
                 account: params.account,
+                scheduleDate: params.scheduleDate !== undefined ? params.scheduleDate : params.schedule_date,
+                hasMediaSpoilers: params.hasMediaSpoilers !== undefined ? !!params.hasMediaSpoilers : !!params.has_media_spoilers,
             };
+            if (params.ttl) {
+                // Per-message TTL does not exist in this engine: TTL is a
+                // property of secret chats, not of a single message. Refused out
+                // loud rather than dropped, so a port sees why nothing happened.
+                bridgeMissing('log')(pluginId, 'send_message: ttl is not supported on iOS and was ignored');
+            }
             if (params.path || params.document || params.photo || params.video || params.audio) {
                 var path = params.path || params.document || params.photo || params.video || params.audio;
                 var kind = params.photo ? 'photo' : (params.video ? 'video' : (params.audio ? 'audio' : 'document'));
@@ -1497,6 +1703,19 @@ var __extera = (function () {
             options = options || {};
             if (!message || message.peer === undefined || message.id === undefined) {
                 throw new Error('edit_message expects {peer, id}');
+            }
+            if (options.file_path || options.filePath) {
+                // The SDK's edit replaces the media when file_path is given. The
+                // kind follows the same rule the typed send helpers use, so an
+                // image decodes as a picture bubble.
+                options.file_path = options.file_path || options.filePath;
+                options.file_kind = options.photo ? 'photo' : (options.video ? 'video' : (options.audio ? 'audio' : 'document'));
+                if (options.with_spoiler) {
+                    // The engine's edit request has no attribute slot, so a
+                    // spoiler cannot be attached while editing; say so instead
+                    // of pretending the edit carried one.
+                    bridgeMissing('log')(pluginId, 'edit_message: with_spoiler has no effect when editing on iOS');
+                }
             }
             var payload = prepareText(text, options);
             options.entities = payload.entities;
@@ -1884,10 +2103,13 @@ var __extera = (function () {
         var cacheKey = names.join(',') + '\n' + condition;
         var compiled = compiledConditions[cacheKey];
         if (compiled === undefined) {
-            try {
-                // eslint-disable-next-line no-new-func
-                compiled = new Function(names.join(','), 'return (' + condition + ');');
-            } catch (error) {
+                try {
+                    // eslint-disable-next-line no-new-func
+                    // The MVEL-only forms (`instanceof`, `contains`, `isdef`)
+                    // are translated first, so a ported condition keeps
+                    // reading the way it did on Android.
+                    compiled = new Function(names.join(','), 'return (' + translateMVEL(condition) + ');');
+                } catch (error) {
                 __extera.log('menu item condition is not valid: ' + condition + ' (' + error + ')');
                 compiled = null;
             }
@@ -2219,13 +2441,13 @@ var __extera = (function () {
             return {
                 __objc_class_name__: name,
                 getName: function () { return name; },
-                hook: function (selector, hook, kind) {
-                    return __extera.installHook(name, String(selector), hook, kind);
+                hook: function (selector, hook, kind, options) {
+                    return __extera.installHook(name, String(selector), hook, kind, options);
                 },
-                hookAll: function (selector, hook, kind) {
+                hookAll: function (selector, hook, kind, options) {
                     // There is one method per selector on a class here, so the
                     // singular and all-methods forms are the same call.
-                    return __extera.installHook(name, String(selector), hook, kind);
+                    return __extera.installHook(name, String(selector), hook, kind, options);
                 },
             };
         },
@@ -2233,18 +2455,38 @@ var __extera = (function () {
         // when the class or method is not there. `hook` is a `MethodHook`
         // instance or any object with `before`/`after`, matching both spellings
         // a ported plugin may use.
-        installHook: function (className, selector, hook, kind) {
+        installHook: function (className, selector, hook, kind, options) {
             if (!hasBridge('installSwizzle')) {
                 bridgeMissing('log')(pluginId, 'installSwizzle is not available on this build');
                 return null;
             }
-            var before = hook && typeof hook.beforeHookedMethod === 'function' ? hook.beforeHookedMethod : null;
+            var replace = hook && typeof hook.replace_hooked_method === 'function' ? hook.replace_hooked_method : null;
+            var before = replace || (hook && typeof hook.beforeHookedMethod === 'function' ? hook.beforeHookedMethod : null);
             var after = hook && typeof hook.afterHookedMethod === 'function' ? hook.afterHookedMethod : null;
+            // `before_filters`/`after_filters` gate the matching callback, the
+            // SDK's `hook_method(..., before_filters=[...])`; a single function
+            // or a nested list both work.
+            function filterList(value) {
+                if (!value) { return null; }
+                var list = Array.isArray(value) ? value : [value];
+                var functions = [];
+                for (var i = 0; i < list.length; i += 1) {
+                    if (typeof list[i] === 'function') { functions.push(list[i]); }
+                }
+                return functions.length ? functions : null;
+            }
+            var beforeFilters = filterList(options && (options.before_filters || options.filters));
+            var afterFilters = filterList(options && options.after_filters);
             var beforeToken = holdCallback(before ? function (receiver, argsJSON, resultJSON) {
-                return __extera.runSwizzleHook(before, receiver, argsJSON, resultJSON);
+                // A replacement's return value *is* the method's result; a
+                // `before` hook instead states it through `param.setResult`.
+                if (replace) {
+                    return __extera.runSwizzleReplacement(replace, receiver, argsJSON, beforeFilters);
+                }
+                return __extera.runSwizzleHook(before, receiver, argsJSON, resultJSON, beforeFilters);
             } : null);
             var afterToken = holdCallback(after ? function (receiver, argsJSON, resultJSON) {
-                return __extera.runSwizzleHook(after, receiver, argsJSON, resultJSON);
+                return __extera.runSwizzleHook(after, receiver, argsJSON, resultJSON, afterFilters);
             } : null);
             // A filter names the classes a broad hook applies to; with one hook
             // per named class here, the filter is accepted and the single class
@@ -2255,7 +2497,20 @@ var __extera = (function () {
                 bridgeMissing('log')(pluginId, 'hook ' + className + '.' + selector + ': ' + failure);
                 return null;
             }
-            return { className: className, selector: selector };
+            // The token is the SDK's unhook object: removing the pair makes a
+            // later hook for it a fresh install.
+            return {
+                className: className,
+                selector: selector,
+                isClassMethod: isClassMethod,
+                unhook: function () {
+                    if (!hasBridge('removeSwizzle')) {
+                        bridgeMissing('log')(pluginId, 'removeSwizzle is not available on this build');
+                        return false;
+                    }
+                    return host().removeSwizzle(pluginId, className, selector, isClassMethod) === true;
+                },
+            };
         },
         // Called by the host from a swizzled method. `fn` is the plugin's
         // `beforeHookedMethod`/`afterHookedMethod`; it gets a fresh param, and
@@ -2265,7 +2520,7 @@ var __extera = (function () {
         // `after` hook — Xposed hands that to `afterHookedMethod` through
         // `param.getResult()`, so a plugin that only wants to observe the result
         // can read it, and one that wants to replace it calls `setResult`.
-        runSwizzleHook: function (fn, receiver, argsJSON, resultJSON) {
+        runSwizzleHook: function (fn, receiver, argsJSON, resultJSON, filters) {
             var args;
             try {
                 args = argsJSON ? JSON.parse(argsJSON) : [];
@@ -2286,6 +2541,21 @@ var __extera = (function () {
                 // merely looked at.
                 param.__state__.hasResult = false;
             }
+            // A filter that answers false skips this callback only; the
+            // original method and the after hook still run, which is the SDK's
+            // own before_filters semantics.
+            if (filters) {
+                for (var i = 0; i < filters.length; i += 1) {
+                    try {
+                        if (!filters[i](param)) {
+                            return null;
+                        }
+                    } catch (error) {
+                        bridgeMissing('log')(pluginId, 'hook filter threw: ' + error);
+                        return null;
+                    }
+                }
+            }
             try {
                 fn.call(param, param);
             } catch (error) {
@@ -2303,6 +2573,42 @@ var __extera = (function () {
                 return null;
             }
             return fn(receiver, argsJSON, resultJSON);
+        },
+        // A `MethodReplacement`: the value `replace_hooked_method` returns is
+        // the method's result, which is the SDK's rule. Filters gate the call
+        // the same way they gate a `before` hook; `undefined` means "nothing
+        // was returned", which the host reads as "run the original".
+        runSwizzleReplacement: function (fn, receiver, argsJSON, filters) {
+            var args;
+            try {
+                args = argsJSON ? JSON.parse(argsJSON) : [];
+            } catch (error) {
+                args = [];
+            }
+            var param = __exteraHookParam(args);
+            param.thisObject = receiver;
+            if (filters) {
+                for (var i = 0; i < filters.length; i += 1) {
+                    try {
+                        if (!filters[i](param)) {
+                            return null;
+                        }
+                    } catch (error) {
+                        bridgeMissing('log')(pluginId, 'hook filter threw: ' + error);
+                        return null;
+                    }
+                }
+            }
+            try {
+                var value = fn.call(param, param);
+                if (value === undefined) {
+                    return null;
+                }
+                return JSON.stringify(value === null ? null : value);
+            } catch (error) {
+                bridgeMissing('log')(pluginId, 'hook error: ' + error);
+                return null;
+            }
         },
         // --- runtime class construction (DexMaker's shape) ----------------
         //
@@ -2475,6 +2781,7 @@ var __extera = (function () {
         // encryption of a control key into a stable id lives with it.
         settingKey: settingKey,
         makeAccountClient: makeAccountClient,
+        makeLogger: makeLogger,
         log: function (message) {
             bridgeMissing('log')(pluginId, String(message));
         },
@@ -2680,6 +2987,22 @@ var android_utils = {
     },
 };
 
+// The SDK's `log_utils`: the module-level logger factory and the pure `dump`.
+// `get_logger(__name__)` gives a helper module its own tag under the plugin's
+// id, exactly the way `from log_utils import get_logger` works there.
+var log_utils = {
+    LogLevel: { VERBOSE: 10, DEBUG: 20, INFO: 30, WARNING: 40, ERROR: 50, OFF: 100 },
+    get_logger: function (name) {
+        return __extera.makeLogger(name === undefined || name === null ? null : String(name));
+    },
+    dump: function (value, label, depth, maxItems) {
+        return pluginDump(value, label, depth, maxItems);
+    },
+};
+var LogLevel = log_utils.LogLevel;
+var get_logger = log_utils.get_logger;
+var dump = log_utils.dump;
+
 var hook_utils = {
     // `find_class` resolves an Objective-C class by name, the way Xposed's
     // `XposedHelpers.findClass` resolves a Java one. What comes back is a handle
@@ -2736,6 +3059,63 @@ HookFilter.prototype.addContainingClass = function (name) {
     this.containing.push(String(name));
     return this;
 };
+
+// The SDK's `hook_filters` helpers. The RESULT_* and argument/equality
+// factories are predicates over the hook param; the two IsInstanceOf
+// variants cannot test a Java class here, so they log once and pass (fail
+// open: a restricting filter that cannot run must not silently disable the
+// hook — the callback itself guards, as the SDK's own examples do).
+var warnedUnsupportedFilters = {};
+function warnUnsupportedFilter(kind, clazz) {
+    var key = kind + ':' + String(clazz);
+    if (!warnedUnsupportedFilters[key]) {
+        warnedUnsupportedFilters[key] = true;
+        __extera.log('HookFilter.' + kind + ' has no iOS equivalent and is treated as passing');
+    }
+}
+
+HookFilter.RESULT_IS_NULL = function (param) { return param.getResult() === null; };
+HookFilter.RESULT_NOT_NULL = function (param) { return param.getResult() !== null; };
+HookFilter.RESULT_IS_TRUE = function (param) { return param.getResult() === true; };
+HookFilter.RESULT_IS_FALSE = function (param) { return param.getResult() === false; };
+HookFilter.ResultIsInstanceOf = function (clazz) { warnUnsupportedFilter('ResultIsInstanceOf', clazz); return function () { return true; }; };
+HookFilter.ResultEqual = function (value) { return function (param) { return param.getResult() === value; }; };
+HookFilter.ResultNotEqual = function (value) { return function (param) { return param.getResult() !== value; }; };
+HookFilter.ArgumentIsNull = function (index) { return function (param) { return param.getArg(index) === null; }; };
+HookFilter.ArgumentNotNull = function (index) { return function (param) { return param.getArg(index) !== null; }; };
+HookFilter.ArgumentIsFalse = function (index) { return function (param) { return param.getArg(index) === false; }; };
+HookFilter.ArgumentIsTrue = function (index) { return function (param) { return param.getArg(index) === true; }; };
+HookFilter.ArgumentIsInstanceOf = function (index, clazz) { warnUnsupportedFilter('ArgumentIsInstanceOf', clazz); return function () { return true; }; };
+HookFilter.ArgumentEqual = function (index, value) { return function (param) { return param.getArg(index) === value; }; };
+HookFilter.ArgumentNotEqual = function (index, value) { return function (param) { return param.getArg(index) !== value; }; };
+HookFilter.Condition = function (expression, object) {
+    return function (param) {
+        try {
+            return !!(new Function('param', 'object', 'return (' + translateMVEL(expression) + ');')(param, object === undefined ? null : object));
+        } catch (error) {
+            __extera.log('HookFilter.Condition threw: ' + error);
+            return false;
+        }
+    };
+};
+HookFilter.Or = function () {
+    var filters = Array.prototype.slice.call(arguments);
+    return function (param) {
+        for (var i = 0; i < filters.length; i += 1) {
+            if (typeof filters[i] === 'function' && filters[i](param)) { return true; }
+        }
+        return false;
+    };
+};
+
+// `MethodReplacement` from the SDK: `replace_hooked_method` is the whole
+// implementation. The swizzle path treats its return value as a "before"
+// result, which skips the original method.
+function MethodReplacement() {}
+MethodReplacement.prototype.priority = 50;
+MethodReplacement.prototype.replace_hooked_method = function () {};
+MethodReplacement.prototype.setPriority = function (value) { this.priority = value; };
+MethodReplacement.prototype.getPriority = function () { return this.priority; };
 
 // What `find_class(...).hook(...)` runs. The param is built fresh per call and
 // its `setResult` records the replacement the host reads back.

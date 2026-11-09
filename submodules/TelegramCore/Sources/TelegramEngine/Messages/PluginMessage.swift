@@ -37,6 +37,8 @@ public func enqueuePluginMessage(
     peerId: Int64,
     replyToMessageId: Int64?,
     silentPosting: Bool,
+    scheduleDate: Int32? = nil,
+    hasMediaSpoilers: Bool = false,
     content: EngineOutgoingPluginMessage
 ) -> Signal<Never, NoError> {
     // Plugins speak in raw `Int64` ids, because a plugin has no Postbox types;
@@ -46,6 +48,9 @@ public func enqueuePluginMessage(
     var attributes: [MessageAttribute] = []
     if silentPosting {
         attributes.append(NotificationInfoMessageAttribute(flags: .muted))
+    }
+    if let scheduleDate = scheduleDate {
+        attributes.append(OutgoingScheduleInfoMessageAttribute(scheduleTime: scheduleDate, repeatPeriod: nil))
     }
 
     // A plugin names the message it answers by id alone; the peer is the one the
@@ -76,47 +81,18 @@ public func enqueuePluginMessage(
         text = value
 
     case let .localFile(path, mimeType, fileName, size, photoDimensions, caption, captionEntities):
-        let randomId = Int64.random(in: Int64.min ... Int64.max)
-        let resource = LocalFileReferenceMediaResource(
-            localFilePath: path,
-            randomId: randomId,
-            isUniquelyReferencedTemporaryFile: false,
-            size: size
+        mediaReference = AnyMediaReference.standalone(
+            media: pluginLocalMedia(path: path, mimeType: mimeType, fileName: fileName, size: size, photoDimensions: photoDimensions)
         )
-
-        if let photoDimensions = photoDimensions {
-            let image = TelegramMediaImage(
-                imageId: MediaId(namespace: Namespaces.Media.LocalImage, id: randomId),
-                representations: [TelegramMediaImageRepresentation(
-                    dimensions: photoDimensions,
-                    resource: resource,
-                    progressiveSizes: [],
-                    immediateThumbnailData: nil
-                )],
-                immediateThumbnailData: nil,
-                reference: nil,
-                partialReference: nil,
-                flags: []
-            )
-            mediaReference = AnyMediaReference.standalone(media: image)
-        } else {
-            let file = TelegramMediaFile(
-                fileId: MediaId(namespace: Namespaces.Media.LocalFile, id: randomId),
-                partialReference: nil,
-                resource: resource,
-                previewRepresentations: [],
-                videoThumbnails: [],
-                immediateThumbnailData: nil,
-                mimeType: mimeType,
-                size: size,
-                attributes: [.FileName(fileName: fileName)],
-                alternativeRepresentations: []
-            )
-            mediaReference = AnyMediaReference.standalone(media: file)
-        }
 
         if !captionEntities.isEmpty {
             attributes.append(TextEntitiesMessageAttribute(entities: captionEntities))
+        }
+        // The same marker attribute the composer attaches when the user enables
+        // a cover before sending; a text-only message never gets one, because a
+        // spoiler without media is not a thing the API carries.
+        if hasMediaSpoilers {
+            attributes.append(MediaSpoilerMessageAttribute())
         }
         text = caption
     }
@@ -146,19 +122,20 @@ public func pluginSavedMessagesPeerId(account: Account) -> Int64 {
     return account.peerId.toInt64()
 }
 
-/// Edits an existing message's text on behalf of a plugin.
+/// Edits an existing message on behalf of a plugin.
 ///
-/// exteraGram's `edit_message(message_obj, text=...)` reaches into the Android
-/// `MessagesController`; on iOS the same operation is the engine's own edit
-/// request, which this wraps so `ExteraPluginKit` still never imports Postbox.
-/// Only the text changes: replacing media needs a file upload and a media kind
-/// the plugin cannot express across a string-only bridge.
+/// exteraGram's `edit_message(message_obj, text=..., file_path=...)` reaches
+/// into the Android `MessagesController`; on iOS the same operation is the
+/// engine's own edit request, which this wraps so `ExteraPluginKit` still never
+/// imports Postbox. The text changes, and `file_path` replaces the media
+/// through the same local-file shape the send path uses.
 public func editPluginMessage(
     account: Account,
     peerId: Int64,
     messageId: Int64,
     text: String,
-    entities: [MessageTextEntity]
+    entities: [MessageTextEntity],
+    content: EngineOutgoingPluginMessage? = nil
 ) -> Signal<Never, NoError> {
     let engineMessageId = EngineMessage.Id(
         peerId: EnginePeer.Id(peerId),
@@ -171,6 +148,20 @@ public func editPluginMessage(
         attributes = TextEntitiesMessageAttribute(entities: entities)
     }
 
+    // `file_path` turns the edit into a media replacement, riding the same
+    // `update` case the composer's own edit uses. Without it the edit stays
+    // text-only, exactly as before. A spoiler cannot be attached here: the edit
+    // request has no attribute slot, so the message keeps the spoiler state it
+    // already carries.
+    var media: RequestEditMessageMedia = .keep
+    if let content = content, case let .localFile(path, mimeType, fileName, size, photoDimensions, _, _) = content {
+        media = .update(
+            AnyMediaReference.standalone(
+                media: pluginLocalMedia(path: path, mimeType: mimeType, fileName: fileName, size: size, photoDimensions: photoDimensions)
+            )
+        )
+    }
+
     // The result (progress, then done) is not something a plugin can act on
     // synchronously, so a failure is logged and the signal completes either way
     // rather than surfacing an error type the plugin module would have to know.
@@ -178,7 +169,7 @@ public func editPluginMessage(
         account: account,
         messageId: engineMessageId,
         text: text,
-        media: .keep,
+        media: media,
         entities: attributes,
         richText: nil,
         inlineStickers: [:],
@@ -191,4 +182,45 @@ public func editPluginMessage(
     |> `catch` { _ -> Signal<Never, NoError> in
         return .complete()
     }
+}
+
+/// Builds the media a local file becomes, so the send and the media-replacing
+/// edit produce the same bubble type for the same file.
+private func pluginLocalMedia(path: String, mimeType: String, fileName: String, size: Int64?, photoDimensions: PixelDimensions?) -> Media {
+    let randomId = Int64.random(in: Int64.min ... Int64.max)
+    let resource = LocalFileReferenceMediaResource(
+        localFilePath: path,
+        randomId: randomId,
+        isUniquelyReferencedTemporaryFile: false,
+        size: size
+    )
+    if let photoDimensions = photoDimensions {
+        return TelegramMediaImage(
+            imageId: MediaId(namespace: Namespaces.Media.LocalImage, id: randomId),
+            representations: [
+                TelegramMediaImageRepresentation(
+                    dimensions: photoDimensions,
+                    resource: resource,
+                    progressiveSizes: [],
+                    immediateThumbnailData: nil
+                )
+            ],
+            immediateThumbnailData: nil,
+            reference: nil,
+            partialReference: nil,
+            flags: []
+        )
+    }
+    return TelegramMediaFile(
+        fileId: MediaId(namespace: Namespaces.Media.LocalFile, id: randomId),
+        partialReference: nil,
+        resource: resource,
+        previewRepresentations: [],
+        videoThumbnails: [],
+        immediateThumbnailData: nil,
+        mimeType: mimeType,
+        size: size,
+        attributes: [.FileName(fileName: fileName)],
+        alternativeRepresentations: []
+    )
 }

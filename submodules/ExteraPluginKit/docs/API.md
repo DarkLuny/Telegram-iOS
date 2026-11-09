@@ -151,9 +151,14 @@ on_plugin_load() {
     this.add_hook("messages.setTyping");     // dotted TL name
     this.add_hook("TL_account_updateStatus");// TL_ spelling also matches
     this.add_hook("messages.", true);        // match_substring: whole namespace
-    this.add_on_send_message_hook();         // outgoing messages
+    this.add_hook("account.updateStatus", false, 10); // priority 10
+    this.add_on_send_message_hook(7);        // outgoing messages, priority 7
 }
 ```
+
+`priority` is exteraGram's third argument: a higher number runs earlier in the
+chain. The SDK does not document what equal priorities do, so this runtime keeps
+load order for ties, which is the order every other chain here already uses.
 
 | Hook method | Signature | Can change |
 |---|---|---|
@@ -242,6 +247,30 @@ hook replaced the result:
 
 Hooks are installed once per class+selector (a second install is a no-op) and are
 all restored when plugins unload, so a removed plugin's block cannot keep running.
+
+`cls.hook(selector, hook, kind, options)` accepts the SDK's filter lists:
+`options.before_filters` / `after_filters` take an array (or a single)
+`HookFilter` predicate. A filter that answers false skips that callback only —
+the original method and the `after` hook still run. The full `HookFilter` set is
+real here: `RESULT_IS_NULL/NOT_NULL/IS_TRUE/IS_FALSE`, `ResultEqual/NotEqual`,
+`ResultIsInstanceOf` (logs once and passes — there is no Java class to test),
+`ArgumentIsNull/NotNull/IsFalse/IsTrue`, `ArgumentEqual/NotEqual`,
+`ArgumentIsInstanceOf` (same treatment), `Condition(expression, object)` with the
+MVEL subset below, and `Or(...)`.
+
+`MethodReplacement` works: `replace_hooked_method(param)`'s return value becomes
+the method's result and the original is skipped; `undefined` means "nothing was
+replaced", so the original runs.
+
+The token `hook` returns can be unhooked mid-session:
+
+```js
+var token = cls.hook("someSelector:", hook);
+...
+this.unhook_method(token);   // true when a hook was removed
+```
+
+Removing the pair makes a later `hook` for it a fresh install.
 
 `hook_utils.get_private_field` / `set_private_field` have no equivalent — a Swift
 property with no `@objc` cannot be reached by name — and log rather than guess.
@@ -444,8 +473,23 @@ client detects bare links and mentions itself.
 For media, `parse_mode` applies to `caption`. `high_quality` is read from
 `high_quality`/`sendingHighQuality`.
 
-Common options: `account`, `replyToMsg`, `notify`, `scheduleDate`, `caption`,
-`parse_mode`, `file_path`, `with_spoiler`, `hasMediaSpoilers`, `ttl`.
+Common options and what each really does here:
+
+- honoured everywhere: `account`, `replyToMsg`, `notify`, `caption`, `parse_mode`,
+  `entities`;
+- `scheduleDate` (unix seconds) puts the message into the scheduled list, the
+  same one the composer's own "send later" uses; both spellings
+  (`scheduleDate`/`schedule_date`) are read;
+- `hasMediaSpoilers` / `with_spoiler` / `has_media_spoilers` cover the media with
+  a spoiler on **sends** — the attribute rides the message attributes the
+  composer attaches;
+- `file_path` (+ `photo`/`video`/`audio` for the kind) on `edit_message`
+  **replaces the media**: the same local-file decoding the send path uses, so an
+  image decodes as a picture bubble; without it the edit is text-only;
+- `ttl` is refused out loud in the log and ignored — per-message TTL does not
+  exist in this engine (TTL is a property of secret chats, not of one message);
+- `with_spoiler` **while editing** is refused in the log too — the engine's edit
+  request has no attribute slot, so an edit cannot add a spoiler.
 
 The module-level forms are the same functions:
 
@@ -821,6 +865,17 @@ If a plugin changes a colour after the screen was drawn, it calls
 `__extera.notifyAppearanceChanged()` (`this.set_setting(..., true)` does it too)
 and the palette is rebuilt.
 
+A plugin can also read the colours the running theme uses right now:
+`__extera.themeColors(["outgoing", "inBubble", ...])` answers `{name: 0xRRGGBB}`,
+and a name this build has no equivalent for is simply absent. The readable names:
+the original slots `accent`, `accentTextColor`, `button`, `header`, `link`,
+`floatingButton`, `outgoing`, `navigationBar`, `actionSheet`; the added
+`inText`, `outgoingText`, `inBubble`, `chatList`, `plainBackground`, `separator`,
+`inputPanel`; and the Android key names a port reaches for first —
+`key_chat_outBubble`, `key_chat_inBubble`, `key_chat_inText`, `key_chat_outText`,
+`key_chat_listBackground`, `key_windowBackgroundWhite`, `key_graySection`,
+`key_chat_inputPanelBackground` — mapped to the slot with the same meaning.
+
 ---
 
 ## 17. Saved deleted messages
@@ -878,9 +933,33 @@ own store.
 ## 18. Logging
 
 ```js
-this.log("loaded");
+this.log("loaded");                     // legacy, always written
 android_utils.log({some: "object"});   // non-primitives are inspected
 ```
+
+The structured logger the SDK documents is real here:
+
+```js
+this.logger.debug("chat %s: %s", chatId, state);  // %-substitution, formatted
+                                                 // only if the level is on
+this.logger.info("ready");
+this.logger.warning("odd but survived");
+this.logger.error("request failed", excInfo);     // excInfo.stack rides the line
+this.logger.exception(err);                      // inside catch: message + stack
+this.logger.dump(obj, "user", 3, 20);            // DEBUG-level inspection dump
+var t = this.logger.timed("sync"); ... t.end();   // "took N ms", end(true) adds "(failed)"
+var net = this.logger.child("net");              // tag plugin.<id>.net, inherits the threshold
+this.logger.add_handler(record => { ... });      // record: {level, tag, message, traceback, created, text}
+this.logger.level = LogLevel.DEBUG;              // or "debug" or 20; null restores the default
+```
+
+Levels gate the write before the message is formatted, so a hot hook logging at
+DEBUG costs nothing while DEBUG is off. `dump` marks cycles `<cycle>`, cuts depth
+with `{...}`, caps arrays and objects at `max_items` with a `+ N more` tail, and
+never calls getters. `log_utils` is a real module: `get_logger("name")`,
+`LogLevel`, and the pure `dump(value, label, depth, max_items)`; the default
+threshold is INFO, and there is no developer-mode toggle — set
+`logger.level = LogLevel.DEBUG` for a verbose run.
 
 The log is one file for every plugin (`Library/extera-plugins.log`), readable
 from the client's plugin screen. A value that is not a primitive is rendered as
@@ -910,7 +989,7 @@ than pretending:
 | `client_utils.get_last_fragment`, `get_account_instance`, `get_connections_manager`, `send_request`, and the other controller getters | return `null` and log once, so a plugin's own guard takes the safe branch |
 | `NotificationCenterDelegate` | instantiates; there is no notification centre to observe |
 | `FilesController.register` | returns a token and logs that nothing will fire |
-| `elyx.mvel_execute`, `gen`, `gen2` | throw with a clear reason; MVEL and the Java-proxy generators have no iOS counterpart |
+| MVEL as a language (`mvel_execute`, `gen`, `gen2`, `jMVEL*`) | throw with a clear reason. The **expression subset** a condition needs is real and translated: `contains` → `indexOf(...) >= 0`, `isdef`/`undef` → undefined checks, `instanceof` → `false` (logged once). Menu-item conditions and `HookFilter.Condition` both go through it. |
 
 `TLRPC` carries the message-entity classes and nothing else.
 
@@ -1039,8 +1118,8 @@ this list, and because `js/test/bootstrap.test.js` is the contract check for it.
 | `getSetting(pluginId, key)` | value or null |
 | `setSetting(pluginId, key, value, reload)` | — |
 | `exportSettings`, `importSettings` | object / — |
-| `addHook(pluginId, name, matchSubstring)` | — |
-| `addOnSendMessageHook(pluginId)` | — |
+| `addHook(pluginId, name, matchSubstring, priority)` | — |
+| `addOnSendMessageHook(pluginId, priority)` | — |
 | `addMenuItem`, `removeMenuItem` | itemId / — |
 | `sendText`, `sendFile`, `editMessage` | — |
 | `showBulletin`, `showAlert`, `dismissAlert` | — |
@@ -1055,6 +1134,7 @@ this list, and because `js/test/bootstrap.test.js` is the contract check for it.
 | `themeColors(pluginId, namesJSON)` | JSON text |
 | `classExists(pluginId, className)` | bool |
 | `installSwizzle(pluginId, class, selector, isClassMethod, beforeToken, afterToken)` | reason or null |
+| `removeSwizzle(pluginId, class, selector, isClassMethod)` | bool |
 | `buildClass(pluginId, superclassName, methodsJSON)` | class name, or `"!" + reason` |
 | `makeInstanceClass(pluginId, className)` | object handle or null |
 | `httpGet`, `httpRequest`, `proxyList`, `proxyAdd`, `proxyRemoveAll`, `localProxy`, `ownPeerId`, `peerInfo`, `chatMessages` | — (answers through `__extera.resolveBridge(token, json)`) |

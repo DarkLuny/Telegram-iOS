@@ -15,6 +15,13 @@ public struct PluginManifest: Equatable {
     public let appVersionRequirement: String?
     public let sdkVersionRequirement: String?
     public let requirements: [String]
+    /// The `__category__` entries a plugin declared, capped at three and kept
+    /// only when the SDK knows the name; an unknown name is ignored rather than
+    /// rejected, which is what exteraGram does with it.
+    public let categories: [String]
+
+    /// The category names a plugin may declare, in the order the SDK lists them.
+    public static let knownCategories = ["appearance", "chats", "media", "privacy", "tools", "integrations", "fun", "libraries"]
 
     public init(
         id: String,
@@ -25,7 +32,8 @@ public struct PluginManifest: Equatable {
         icon: String? = nil,
         appVersionRequirement: String? = nil,
         sdkVersionRequirement: String? = nil,
-        requirements: [String] = []
+        requirements: [String] = [],
+        categories: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -36,6 +44,7 @@ public struct PluginManifest: Equatable {
         self.appVersionRequirement = appVersionRequirement
         self.sdkVersionRequirement = sdkVersionRequirement
         self.requirements = requirements
+        self.categories = Array(categories.prefix(3))
     }
 }
 
@@ -152,6 +161,13 @@ public final class LoadedPlugin {
     /// Position in the load order. Hook chains run in this order, so a plugin's
     /// decision is reproducible instead of depending on dictionary iteration.
     public internal(set) var loadIndex: Int = 0
+    /// The priority each hook registration asked for, keyed by the name (or
+    /// substring pattern) it was registered under. Missing means 0, and the
+    /// first registration wins, matching the duplicate skip in `pluginAddHook`.
+    public internal(set) var hookPriorities: [String: Int32] = [:]
+    /// The priority `add_on_send_message_hook(priority=)` asked for; 0 is the
+    /// SDK's default.
+    public internal(set) var sendMessageHookPriority: Int32 = 0
 
     init(manifest: PluginManifest, directory: URL, context: JSContext, instance: JSValue) {
         self.manifest = manifest
