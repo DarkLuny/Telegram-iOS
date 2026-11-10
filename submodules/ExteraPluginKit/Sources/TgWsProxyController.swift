@@ -34,7 +34,7 @@ private enum TgWsProxySettings {
     ]
 
     static var zones: [String] {
-        return self.encodedZones.map(TgWsProxySettings.decode)
+        return self.encodedZones.map { TgWsProxySettings.decode($0) }
     }
 
     static var enabled: Bool {
@@ -334,13 +334,13 @@ private final class TgWsProxyControllerArguments {
     private let context: AccountContext
     private let statePromise: ValuePromise<Int32>
     private let stateValue: Atomic<Int32>
-    private var refreshTimer: Timer?
+    private var refreshTimer: Foundation.Timer?
 
     init(context: AccountContext) {
         self.context = context
         self.statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
         self.stateValue = Atomic(value: Int32(0))
-        self.refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true, block: { [weak self] _ in
+        self.refreshTimer = Foundation.Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true, block: { [weak self] _ in
             self?.bump()
         })
     }
