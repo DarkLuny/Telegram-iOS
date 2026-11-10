@@ -200,10 +200,18 @@ public final class PluginCrashGuard {
 
     private func migrateCrashLogIfNeeded() {
         let stored = UserDefaults.standard.integer(forKey: PluginCrashGuard.crashLogFormatKey)
-        if stored < PluginCrashGuard.currentCrashLogFormat {
-            try? FileManager.default.removeItem(at: PluginCrashGuard.crashLogURL)
-            UserDefaults.standard.set(PluginCrashGuard.currentCrashLogFormat, forKey: PluginCrashGuard.crashLogFormatKey)
+        guard stored < PluginCrashGuard.currentCrashLogFormat else {
+            return
         }
+        // Keep an entry that already carries a fatal-signal report. It may have
+        // been written seconds ago, before UserDefaults flushed the format
+        // marker; deleting it here would throw away exactly the cause this
+        // build is meant to capture. Old entries without a signal are dropped.
+        let existing = (try? String(contentsOf: PluginCrashGuard.crashLogURL, encoding: .utf8)) ?? ""
+        if !existing.contains("Type: Fatal signal") {
+            try? FileManager.default.removeItem(at: PluginCrashGuard.crashLogURL)
+        }
+        UserDefaults.standard.set(PluginCrashGuard.currentCrashLogFormat, forKey: PluginCrashGuard.crashLogFormatKey)
     }
 
     public func logText() -> String {
