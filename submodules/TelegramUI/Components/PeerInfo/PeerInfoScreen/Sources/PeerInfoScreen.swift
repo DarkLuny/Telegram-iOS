@@ -181,6 +181,7 @@ enum PeerInfoSettingsSection {
     case passport
     case watch
     case plugins
+    case extensions
     case support
     case faq
     case tips

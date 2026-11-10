@@ -5,7 +5,7 @@
  * button: loading with the switch on (or turning it on) picks a CloudFlare zone
  * by itself, asks the client to run its local MTProxy for that zone, and reports
  * exactly what the client answered. The native side is faked with the same
- * request JSON and response shape PluginLocalProxy uses, so the plugin is
+ * request JSON and response shape TgWsProxyService uses, so the plugin is
  * checked against the real contract rather than a mock of its own invention.
  */
 const fs = require('fs');

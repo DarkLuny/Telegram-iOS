@@ -98,18 +98,11 @@ public final class PluginRuntime {
 
         self.installHooks()
 
-        // Must run before `observeLifecycle` and `startLoading`: a sentinel left
-        // by the previous process turns Safe Mode on, and the manager checks
-        // that flag before it evaluates any plugin. Running it first also means
-        // the lifecycle subscription's first emission cannot be mistaken for the
+        // `AppDelegate` runs the crash guard before this method, so a sentinel
+        // left by the previous process has already turned Safe Mode on and the
+        // manager checks that flag before it evaluates any plugin. The lifecycle
+        // subscription's first emission therefore cannot be mistaken for the
         // previous session's sentinel.
-        PluginCrashGuard.shared.beginSession()
-
-        // The TG WS Proxy extension is not a plugin, so Safe Mode does not have
-        // to stop it; the start helper checks the flag itself and does nothing
-        // while Safe Mode is on.
-        startTgWsProxyIfEnabled(sharedContext: sharedContext)
-
         self.observeLifecycle(sharedContext: sharedContext)
 
         // Loading and `START` both happen on the script queue, so launch is not
@@ -963,8 +956,8 @@ private final class PluginActionsImpl: PluginActions {
         if let list = request["domains"] as? [Any] {
             zones = list.compactMap { $0 as? String }
         }
-        let proxy = PluginLocalProxy.shared
-        let respond: (PluginLocalProxy.Status) -> Void = { status in
+        let proxy = TgWsProxyService.shared
+        let respond: (TgWsProxyService.Status) -> Void = { status in
             var response: [String: Any] = ["ok": status.error == nil, "status": status.json]
             if let error = status.error {
                 response["error"] = error
@@ -985,7 +978,7 @@ private final class PluginActionsImpl: PluginActions {
     /// has to be built synchronously. Reads locked state only, so it is safe on
     /// the script queue.
     func localProxyStatus(pluginId: String) -> String {
-        var object = PluginLocalProxy.shared.currentStatus().json
+        var object = TgWsProxyService.shared.currentStatus().json
         object["ok"] = true
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else {

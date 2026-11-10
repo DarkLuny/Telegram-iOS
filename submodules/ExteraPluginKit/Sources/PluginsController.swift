@@ -21,7 +21,7 @@ import ItemListUI
 private enum PluginsSection: Int32 {
     case safeMode
     case plugins
-    case extensions
+    case crashReports
     case log
 }
 
@@ -34,12 +34,11 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
     case pluginsEmpty
     case install
     case pluginsFooter
-    case extensionsHeader
-    case tgWsProxy(running: Bool)
-    case extensionsFooter
+    case crashReportsHeader
+    case crashReportsValue
+    case crashReportsFooter
     case logHeader
     case logValue
-    case crashLog
     case logFooter
 
     var section: ItemListSectionId {
@@ -48,9 +47,9 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
             return PluginsSection.safeMode.rawValue
         case .pluginsHeader, .plugin, .pluginsEmpty, .install, .pluginsFooter:
             return PluginsSection.plugins.rawValue
-        case .extensionsHeader, .tgWsProxy, .extensionsFooter:
-            return PluginsSection.extensions.rawValue
-        case .logHeader, .logValue, .crashLog, .logFooter:
+        case .crashReportsHeader, .crashReportsValue, .crashReportsFooter:
+            return PluginsSection.crashReports.rawValue
+        case .logHeader, .logValue, .logFooter:
             return PluginsSection.log.rawValue
         }
     }
@@ -73,20 +72,18 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
             return 9001
         case .pluginsFooter:
             return 9002
-        case .extensionsHeader:
+        case .crashReportsHeader:
             return 9100
-        case .tgWsProxy:
+        case .crashReportsValue:
             return 9101
-        case .extensionsFooter:
+        case .crashReportsFooter:
             return 9102
         case .logHeader:
             return 9200
         case .logValue:
             return 9201
-        case .crashLog:
-            return 9202
         case .logFooter:
-            return 9203
+            return 9202
         }
     }
 
@@ -175,25 +172,25 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
             )
         case .pluginsFooter:
             return ItemListTextItem(presentationData: presentationData, text: .plain("Plugins are JavaScript (.plugin or .js) files written against exteraGram's plugin API. “Install Plugin…” opens the system file picker; the chosen file is checked and copied into the app's private folder, which no other app can read. Files.app does not show that folder, so this picker is the only way to get a plugin in."), sectionId: self.section)
-        case .extensionsHeader:
-            return ItemListSectionHeaderItem(presentationData: presentationData, text: "Extensions", sectionId: self.section)
-        case let .tgWsProxy(running):
+        case .crashReportsHeader:
+            return ItemListSectionHeaderItem(presentationData: presentationData, text: "Crash Reports", sectionId: self.section)
+        case .crashReportsValue:
             return ItemListDisclosureItem(
                 presentationData: presentationData,
                 systemStyle: .glass,
-                title: "TG WS Proxy",
-                label: running ? "On" : "Off",
+                title: "View Crash Reports",
+                label: "",
                 labelStyle: .text,
-                additionalDetailLabel: "CloudFlare WebSocket tunnel",
+                additionalDetailLabel: "Only when a session ended unexpectedly",
                 sectionId: self.section,
                 style: .blocks,
                 disclosureStyle: .arrow,
                 action: {
-                    arguments.openTgWsProxy()
+                    arguments.openCrashLog()
                 }
             )
-        case .extensionsFooter:
-            return ItemListTextItem(presentationData: presentationData, text: .plain("Built-in features that used to need a separate app. TG WS Proxy runs inside Telegram's process and never schedules background work."), sectionId: self.section)
+        case .crashReportsFooter:
+            return ItemListTextItem(presentationData: presentationData, text: .plain("A crash report is written only when the previous session ended without reaching the background handler. It contains the crash type, the last plugin activity, the exception or call stack, and a short context excerpt — not a copy of the live plugin log. The full live log is under Log."), sectionId: self.section)
         case .logHeader:
             return ItemListSectionHeaderItem(presentationData: presentationData, text: "Log", sectionId: self.section)
         case .logValue:
@@ -210,22 +207,8 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
                     arguments.openLog()
                 }
             )
-        case .crashLog:
-            return ItemListDisclosureItem(
-                presentationData: presentationData,
-                systemStyle: .glass,
-                title: "Crash Log",
-                label: "",
-                labelStyle: .text,
-                sectionId: self.section,
-                style: .blocks,
-                disclosureStyle: .arrow,
-                action: {
-                    arguments.openCrashLog()
-                }
-            )
         case .logFooter:
-            return ItemListTextItem(presentationData: presentationData, text: .plain("Log lines from every plugin, newest last. The crash log keeps the last activity and the plugin log tail from a session that ended unexpectedly, which is what identifies the plugin that brought the client down."), sectionId: self.section)
+            return ItemListTextItem(presentationData: presentationData, text: .plain("Log lines from every plugin, newest last. This is the live diagnostic log; crash reports are kept separately under Crash Reports."), sectionId: self.section)
         }
     }
 }
@@ -234,7 +217,6 @@ private final class PluginsControllerArguments {
     let openPlugin: (String) -> Void
     let openLog: () -> Void
     let openCrashLog: () -> Void
-    let openTgWsProxy: () -> Void
     let installPlugin: () -> Void
     let setPluginEnabled: (String, Bool) -> Void
     let setSafeMode: (Bool) -> Void
@@ -243,11 +225,10 @@ private final class PluginsControllerArguments {
     /// is open. `deinit` unsubscribes once the controller is gone.
     private let changesDisposable: Disposable
 
-    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, openCrashLog: @escaping () -> Void, openTgWsProxy: @escaping () -> Void, installPlugin: @escaping () -> Void, setPluginEnabled: @escaping (String, Bool) -> Void, setSafeMode: @escaping (Bool) -> Void, changesDisposable: Disposable) {
+    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, openCrashLog: @escaping () -> Void, installPlugin: @escaping () -> Void, setPluginEnabled: @escaping (String, Bool) -> Void, setSafeMode: @escaping (Bool) -> Void, changesDisposable: Disposable) {
         self.openPlugin = openPlugin
         self.openLog = openLog
         self.openCrashLog = openCrashLog
-        self.openTgWsProxy = openTgWsProxy
         self.installPlugin = installPlugin
         self.setPluginEnabled = setPluginEnabled
         self.setSafeMode = setSafeMode
@@ -273,12 +254,11 @@ private func pluginsControllerEntries(installed: [PluginManager.PluginSummary], 
     }
     entries.append(.install)
     entries.append(.pluginsFooter)
-    entries.append(.extensionsHeader)
-    entries.append(.tgWsProxy(running: PluginLocalProxy.shared.currentStatus().running))
-    entries.append(.extensionsFooter)
+    entries.append(.crashReportsHeader)
+    entries.append(.crashReportsValue)
+    entries.append(.crashReportsFooter)
     entries.append(.logHeader)
     entries.append(.logValue)
-    entries.append(.crashLog)
     entries.append(.logFooter)
     return entries
 }
@@ -318,9 +298,6 @@ public func pluginsController(context: AccountContext) -> ViewController {
         },
         openCrashLog: {
             pushPluginController(context: context, from: host, controller: pluginCrashLogController(context: context))
-        },
-        openTgWsProxy: {
-            pushPluginController(context: context, from: host, controller: tgWsProxyController(context: context))
         },
         installPlugin: {
             // The importer outlives this closure: `UIDocumentPickerViewController`
@@ -1003,6 +980,7 @@ public func pluginLogController(context: AccountContext) -> ViewController {
 // MARK: - Crash log viewer
 
 private enum PluginCrashLogEntry: ItemListNodeEntry {
+    case intro
     case empty
     case line(index: Int, text: String)
     case clear
@@ -1018,10 +996,12 @@ private enum PluginCrashLogEntry: ItemListNodeEntry {
 
     var stableId: Int32 {
         switch self {
-        case .empty:
+        case .intro:
             return 0
+        case .empty:
+            return 1
         case let .line(index, _):
-            return Int32(index) + 1
+            return Int32(index) + 10
         case .clear:
             return 1000000
         }
@@ -1033,12 +1013,14 @@ private enum PluginCrashLogEntry: ItemListNodeEntry {
 
     func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
         switch self {
+        case .intro:
+            return ItemListTextItem(presentationData: presentationData, text: .plain("Crash reports only. A report is written when the previous session ended unexpectedly, before the client could reach its background handler. The live plugin log is under Log → Show Log."), sectionId: self.section)
         case .empty:
-            return ItemListTextItem(presentationData: presentationData, text: .plain("No crashes have been recorded."), sectionId: self.section)
+            return ItemListTextItem(presentationData: presentationData, text: .plain("No crash reports have been recorded."), sectionId: self.section)
         case let .line(_, text):
             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
         case .clear:
-            return ItemListActionItem(presentationData: presentationData, title: "Clear Crash Log", kind: .destructive, alignment: .natural, sectionId: self.section, style: .blocks, action: {
+            return ItemListActionItem(presentationData: presentationData, title: "Clear Crash Reports", kind: .destructive, alignment: .natural, sectionId: self.section, style: .blocks, action: {
                 PluginCrashGuard.shared.clearLog()
             })
         }
@@ -1052,7 +1034,7 @@ public func pluginCrashLogController(context: AccountContext) -> ViewController 
         let lines = PluginCrashGuard.shared.logText()
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
-        var entries: [PluginCrashLogEntry] = []
+        var entries: [PluginCrashLogEntry] = [.intro]
         if lines.count <= 1 && lines.first?.isEmpty == true {
             entries.append(.empty)
         } else {
@@ -1063,7 +1045,7 @@ public func pluginCrashLogController(context: AccountContext) -> ViewController 
         entries.append(.clear)
         let controllerState = ItemListControllerState(
             presentationData: ItemListPresentationData(presentationData),
-            title: .text("Crash Log"),
+            title: .text("Crash Reports"),
             leftNavigationButton: nil,
             rightNavigationButton: nil,
             backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back)

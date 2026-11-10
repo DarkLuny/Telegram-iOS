@@ -10,14 +10,14 @@ import ItemListUI
 
 /// The settings page for the TG WS Proxy transport.
 ///
-/// The transport itself already lives in the client (`PluginLocalProxy` in
+/// The transport itself already lives in the client (`TgWsProxyService` in
 /// TelegramCore), and the standalone tg-ws-proxy app is a UI plus a background
 /// task around the same idea. Embedding it here means the listener runs in
 /// Telegram's own process: no `BackgroundManager`, no second app, and nothing
 /// keeps running after Telegram leaves the foreground. The switch adds and
 /// removes the `127.0.0.1` entry in Telegram's proxy list exactly as the plugin
 /// did, so traffic uses the tunnel as soon as it is started.
-private enum TgWsProxySettings {
+enum TgWsProxySettings {
     static let enabledKey = "extera.extensions.tgwsproxy.enabled"
     static let zoneKey = "extera.extensions.tgwsproxy.zone_index"
     static let customDomainKey = "extera.extensions.tgwsproxy.custom_domain"
@@ -74,7 +74,10 @@ private enum TgWsProxySettings {
         return self.zones[index - 1]
     }
 
-    /// The zone the host is asked to try first, or `""` for "let it pick".
+    /// The zone the listener is asked to try first. "Automatic" still needs a
+    /// concrete host, so it starts with the first known zone and keeps the rest
+    /// as fallbacks; returning `""` here made the switch fail with
+    /// "not a host name:".
     static func preferredDomain() -> String {
         let custom = self.normalizeHost(self.customDomain)
         if !custom.isEmpty {
@@ -84,7 +87,7 @@ private enum TgWsProxySettings {
         if index > 0 {
             return self.zones[index - 1]
         }
-        return ""
+        return self.zones.first ?? ""
     }
 
     /// The preferred zone followed by every other known zone. The listener tries
@@ -361,7 +364,7 @@ private final class TgWsProxyControllerArguments {
     }
 
     func startIfNeeded() {
-        guard TgWsProxySettings.enabled, !PluginLocalProxy.shared.currentStatus().running else {
+        guard TgWsProxySettings.enabled, !TgWsProxyService.shared.currentStatus().running else {
             return
         }
         self.start()
@@ -384,7 +387,7 @@ private final class TgWsProxyControllerArguments {
 
     func setZone(_ index: Int) {
         TgWsProxySettings.setZoneIndex(index)
-        if PluginLocalProxy.shared.currentStatus().running {
+        if TgWsProxyService.shared.currentStatus().running {
             self.start()
         } else {
             self.bump()
@@ -415,14 +418,14 @@ private final class TgWsProxyControllerArguments {
     }
 
     func restart() {
-        guard PluginLocalProxy.shared.currentStatus().running || TgWsProxySettings.enabled else {
+        guard TgWsProxyService.shared.currentStatus().running || TgWsProxySettings.enabled else {
             return
         }
         self.start()
     }
 
     func copyLink() {
-        guard let link = PluginLocalProxy.shared.currentStatus().link else {
+        guard let link = TgWsProxyService.shared.currentStatus().link else {
             return
         }
         UIPasteboard.general.string = link
@@ -433,7 +436,7 @@ private final class TgWsProxyControllerArguments {
         let zones = TgWsProxySettings.zonesInOrder(preferred: preferred)
         TgWsProxySettings.setEnabled(true)
         self.bump()
-        PluginLocalProxy.shared.start(
+        TgWsProxyService.shared.start(
             domain: preferred,
             zones: zones,
             accountManager: self.context.sharedContext.accountManager,
@@ -453,7 +456,7 @@ private final class TgWsProxyControllerArguments {
 
     private func stop() {
         self.bump()
-        PluginLocalProxy.shared.stop(
+        TgWsProxyService.shared.stop(
             accountManager: self.context.sharedContext.accountManager,
             completion: { [weak self] _ in
                 Queue.mainQueue().async {
@@ -485,7 +488,7 @@ private func tgWsProxyEntries(enabled: Bool, running: Bool, zoneLabel: String, c
 }
 
 private func tgWsProxyStatusText() -> String {
-    let status = PluginLocalProxy.shared.currentStatus()
+    let status = TgWsProxyService.shared.currentStatus()
     if status.running {
         var lines = ["Running on \(status.host):\(status.port)"]
         lines.append("Zone: \(status.domain.isEmpty ? "automatic" : status.domain)")
@@ -505,21 +508,23 @@ private func tgWsProxyStatusText() -> String {
     return "Stopped."
 }
 
-/// Starts the extension at launch when the user left its switch on. Called from
-/// `PluginRuntime.activate` after the crash guard has read the sentinel, so a
-/// session that ended in a crash does not immediately start the same extension
-/// again. No UI is touched here; the settings screen observes the same shared
-/// `PluginLocalProxy`.
-func startTgWsProxyIfEnabled(sharedContext: SharedAccountContext) {
-    guard TgWsProxySettings.enabled, !PluginCrashGuard.shared.isSafeModeEnabled else {
+/// Starts the extension at launch when the user left its switch on.
+///
+/// Called from `AppDelegate` as part of the app's own launch path, not from the
+/// plugin runtime. The caller skips it while Safe Mode is on, so a session that
+/// ended in a crash does not immediately start the same extension again. No UI
+/// is touched here; the settings screen observes the same shared
+/// `TgWsProxyService`.
+public func startTgWsProxyIfEnabled(sharedContext: SharedAccountContext) {
+    guard TgWsProxySettings.enabled else {
         return
     }
-    guard !PluginLocalProxy.shared.currentStatus().running else {
+    guard !TgWsProxyService.shared.currentStatus().running else {
         return
     }
     let preferred = TgWsProxySettings.preferredDomain()
     let zones = TgWsProxySettings.zonesInOrder(preferred: preferred)
-    PluginLocalProxy.shared.start(
+    TgWsProxyService.shared.start(
         domain: preferred,
         zones: zones,
         accountManager: sharedContext.accountManager,
@@ -533,7 +538,7 @@ func startTgWsProxyIfEnabled(sharedContext: SharedAccountContext) {
 
 public func tgWsProxyController(context: AccountContext) -> ViewController {
     let arguments = TgWsProxyControllerArguments(context: context)
-    if PluginLocalProxy.shared.currentStatus().running {
+    if TgWsProxyService.shared.currentStatus().running {
         // The installed plugin may have started the same listener. The switch
         // should show the truth instead of "off" while traffic is tunnelled.
         TgWsProxySettings.setEnabled(true)
@@ -547,7 +552,7 @@ public func tgWsProxyController(context: AccountContext) -> ViewController {
     )
     |> deliverOnMainQueue
     |> map { presentationData, _ -> (ItemListControllerState, (ItemListNodeState, Any)) in
-        let status = PluginLocalProxy.shared.currentStatus()
+        let status = TgWsProxyService.shared.currentStatus()
         let controllerState = ItemListControllerState(
             presentationData: ItemListPresentationData(presentationData),
             title: .text("TG WS Proxy"),

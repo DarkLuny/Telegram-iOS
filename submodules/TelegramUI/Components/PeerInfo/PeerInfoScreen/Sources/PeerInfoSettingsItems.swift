@@ -362,6 +362,11 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
     items[.extra]!.append(PeerInfoScreenDisclosureItem(id: 2, text: "Plugins", icon: PresentationResourcesSettings.settings, action: {
         interaction.openSettings(.plugins)
     }))
+    // Extensions are built into the client, so they get their own top-level
+    // entry instead of a section inside Plugins.
+    items[.extra]!.append(PeerInfoScreenDisclosureItem(id: 3, text: "Extensions", icon: PresentationResourcesSettings.proxy, action: {
+        interaction.openSettings(.extensions)
+    }))
     
     if showsSettingsRow("support") {
         items[.support]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_Support, icon: PresentationResourcesSettings.support, action: {

@@ -5,15 +5,13 @@ import Security
 import SwiftSignalKit
 import Postbox
 
-/// A local MTProto proxy a plugin can switch on, and the proxy entry that makes
-/// the client use it.
+/// The client's built-in local MTProto proxy: the TG WS Proxy extension, plus
+/// the proxy entry that makes the client use it.
 ///
-/// This is the capability `tg_ws_proxy.plugin` needed and could not build in
-/// JavaScript: a plugin has no sockets, so a local proxy has to live in Swift.
-/// It is deliberately generic rather than shaped around that one plugin — any
-/// plugin that can name a CloudFlare zone can start it with
-/// `proxy.local_start(domain)` (`__extera.requestLocalProxy` underneath), and
-/// nothing about it needs the client to change again.
+/// This is an app service, not a plugin. The Extensions UI starts it directly,
+/// and the same service is exposed to plugins through `proxy.local_start` /
+/// `__extera.requestLocalProxy` when a plugin needs to name a CloudFlare zone
+/// itself. A plugin has no sockets, so the transport has to live in Swift.
 ///
 /// What it does, and why it is the same thing the reference app does:
 ///
@@ -32,8 +30,8 @@ import Postbox
 /// A network that drops packets to Telegram's addresses reaches the same
 /// datacenters through the zone; a network that does not still works, because
 /// the proxy's upstream is a normal Telegram Web socket.
-public final class PluginLocalProxy {
-    public static let shared = PluginLocalProxy()
+public final class TgWsProxyService {
+    public static let shared = TgWsProxyService()
 
     public struct Status {
         public var running: Bool
@@ -130,13 +128,13 @@ public final class PluginLocalProxy {
     /// `completion` runs once the entry is in place (or once the reason it could
     /// not be is known) and always on a background queue.
     public func start(domain rawDomain: String, zones rawZones: [String], accountManager: AccountManager<TelegramAccountManagerTypes>, completion: @escaping (Status) -> Void) {
-        let domain = PluginLocalProxy.normalizeDomain(rawDomain)
+        var domain = TgWsProxyService.normalizeDomain(rawDomain)
         // The reference dials every zone it knows before giving up on the CF
         // route, so a single dead zone does not end the session. The chosen
         // zone goes first and the rest follow in the list's order.
         var zones: [String] = []
         for raw in rawZones {
-            let zone = PluginLocalProxy.normalizeDomain(raw)
+            let zone = TgWsProxyService.normalizeDomain(raw)
             if !zone.isEmpty && !zones.contains(zone) {
                 zones.append(zone)
             }
@@ -144,12 +142,19 @@ public final class PluginLocalProxy {
         if !domain.isEmpty {
             zones.removeAll(where: { $0 == domain })
             zones.insert(domain, at: 0)
+        } else if let first = zones.first {
+            // "Automatic" reaches us as an empty preferred domain. The listener
+            // still needs one concrete zone for its status and entry, so the
+            // first known zone becomes the preferred one and the rest stay as
+            // fallbacks. Without this the switch snapped back off with
+            // "not a host name:".
+            domain = first
         }
         self.operationQueue.async {
             guard !domain.isEmpty else {
                 var status = self.currentStatus()
                 status.running = false
-                status.error = "not a host name: \(rawDomain)"
+                status.error = "No proxy zone is configured."
                 self.setStatus(status)
                 completion(status)
                 return
@@ -210,7 +215,7 @@ public final class PluginLocalProxy {
                 }
             }
             self.server = server
-            server.start(preferredPort: PluginLocalProxy.preferredPort)
+            server.start(preferredPort: TgWsProxyService.preferredPort)
         }
     }
 
@@ -270,11 +275,11 @@ public final class PluginLocalProxy {
     /// working; the marker is `dd`, which is what a padded-intermediate MTProxy
     /// secret looks like and what the reference app puts in its link.
     private func storedSecret() -> Data {
-        if let stored = UserDefaults.standard.data(forKey: PluginLocalProxy.secretDefaultsKey), stored.count == 17, stored.first == 0xdd {
+        if let stored = UserDefaults.standard.data(forKey: TgWsProxyService.secretDefaultsKey), stored.count == 17, stored.first == 0xdd {
             return stored
         }
         let secret = Data([0xdd]) + LocalMTProxyCrypto.randomBytes(16)
-        UserDefaults.standard.set(secret, forKey: PluginLocalProxy.secretDefaultsKey)
+        UserDefaults.standard.set(secret, forKey: TgWsProxyService.secretDefaultsKey)
         return secret
     }
 

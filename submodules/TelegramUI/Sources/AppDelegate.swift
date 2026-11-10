@@ -55,6 +55,7 @@ import PasscodeCore
 import LiquidGlassShapes
 import MTProtoRustEngine
 import ExteraPluginKit
+import ExtensionsUI
 
 #if DEBUG
 import AlertComponent
@@ -1205,6 +1206,13 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
             // queue: plugin code is arbitrary, and a slow one must not hold up
             // the first frame after launch.
             Queue.mainQueue().justDispatch {
+                // Crash detection decides Safe Mode for this session, and the
+                // built-in extensions start without going through the plugin
+                // runtime. Both belong to the app's launch path.
+                PluginCrashGuard.shared.beginSession()
+                if !PluginCrashGuard.shared.isSafeModeEnabled {
+                    startTgWsProxyIfEnabled(sharedContext: sharedContext)
+                }
                 PluginRuntime.shared.activate(sharedContext: sharedContext)
             }
             sharedContext.presentCrossfadeController = { [weak self] in

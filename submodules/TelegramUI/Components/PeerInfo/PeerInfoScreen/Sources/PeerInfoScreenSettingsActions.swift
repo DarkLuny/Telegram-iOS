@@ -18,6 +18,7 @@ import InstantPageCache
 import WalletContext
 import UndoUI
 import ExteraPluginKit
+import ExtensionsUI
 
 extension PeerInfoScreenNode {
     func openSettings(section: PeerInfoSettingsSection) {
@@ -181,6 +182,8 @@ extension PeerInfoScreenNode {
             push(watchSettingsController(context: self.context))
         case .plugins:
             push(pluginsController(context: self.context))
+        case .extensions:
+            push(extensionsController(context: self.context))
         case .support:
             let supportPeer = Promise<EnginePeer.Id?>()
             supportPeer.set(context.engine.peers.supportPeerId())

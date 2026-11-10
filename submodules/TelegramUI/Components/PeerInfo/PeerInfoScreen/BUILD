@@ -127,6 +127,7 @@ swift_library(
         "//submodules/TranslateUI",
         "//submodules/UndoUI",
         "//submodules/ExteraPluginKit:ExteraPluginKit",
+        "//submodules/ExtensionsUI:ExtensionsUI",
         "//submodules/MediaPlayer:UniversalMediaPlayer",
         "//submodules/WebUI",
         "//submodules/WalletContext",

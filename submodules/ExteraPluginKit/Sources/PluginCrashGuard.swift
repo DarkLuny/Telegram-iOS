@@ -11,11 +11,11 @@ import Foundation
 /// reaching a normal background transition, so a plugin was the most likely
 /// cause and no plugin should run this time.
 ///
-/// The crash log is deliberately a plain text file next to `PluginLog`, not a
-/// symbolicated crash report. It records the last plugin activity the manager
-/// saw and the tail of the plugin log, which is what identifies the plugin that
-/// was running when the client died; the system's own crash report remains the
-/// place to look for a stack trace.
+/// The crash log is a retained report file next to `PluginLog`, not a copy of
+/// the live log. Each entry is a short structured report: when the session died,
+/// what kind of failure it was, the last plugin activity, an exception or call
+/// stack when one exists, and only a few context lines from the plugin log. The
+/// system's own crash report remains the place to look for a full stack trace.
 public final class PluginCrashGuard {
     public static let shared = PluginCrashGuard()
 
@@ -27,6 +27,11 @@ public final class PluginCrashGuard {
     private static let sentinelFileName = "extera-plugin-session.txt"
     private static let crashLogFileName = "extera-plugin-crashes.log"
     private static let crashLogLimit = 512 * 1024
+    /// Bumped when the report format changes. Older entries pasted the live log
+    /// tail, which made the crash screen look like the normal log; the first
+    /// launch of this format drops those entries instead of showing them again.
+    private static let crashLogFormatKey = "extera.plugins.crash_log_format"
+    private static let currentCrashLogFormat = 2
 
     private let lock = NSLock()
     private var hasBegunSession = false
@@ -84,6 +89,7 @@ public final class PluginCrashGuard {
         }
 
         self.installExceptionHandler()
+        self.migrateCrashLogIfNeeded()
 
         var crashed = false
         if let sentinel = try? String(contentsOf: PluginCrashGuard.sentinelURL, encoding: .utf8) {
@@ -134,9 +140,17 @@ public final class PluginCrashGuard {
 
     // MARK: - Crash log
 
+    private func migrateCrashLogIfNeeded() {
+        let stored = UserDefaults.standard.integer(forKey: PluginCrashGuard.crashLogFormatKey)
+        if stored < PluginCrashGuard.currentCrashLogFormat {
+            try? FileManager.default.removeItem(at: PluginCrashGuard.crashLogURL)
+            UserDefaults.standard.set(PluginCrashGuard.currentCrashLogFormat, forKey: PluginCrashGuard.crashLogFormatKey)
+        }
+    }
+
     public func logText() -> String {
         guard let text = try? String(contentsOf: PluginCrashGuard.crashLogURL, encoding: .utf8) else {
-            return "No crashes have been recorded."
+            return ""
         }
         return text
     }
@@ -169,19 +183,24 @@ public final class PluginCrashGuard {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let stamp = formatter.string(from: Date())
 
-        var text = "=== \(stamp) ===\n\(title)\n"
+        var text = "================================================================\n"
+        text += "CRASH REPORT\n"
+        text += "When: \(stamp)\n"
+        text += "Type: \(title)\n"
         for detail in details {
             text += "\(detail)\n"
         }
-        let tail = PluginLog.recentLines(limit: 200)
+        // Only a short context excerpt. The live log is a separate screen; a
+        // crash report that pasted 200 log lines looked identical to it.
+        let tail = PluginLog.recentLines(limit: 10)
         if tail.isEmpty {
-            text += "Plugin log: empty\n"
+            text += "Context: no plugin log lines were recorded.\n"
         } else {
-            text += "Plugin log (last \(tail.count) lines):\n"
+            text += "Context (last \(tail.count) plugin log lines, not the live log):\n"
             text += tail.joined(separator: "\n")
             text += "\n"
         }
-        text += "\n"
+        text += "================================================================\n\n"
 
         let data = Data(text.utf8)
         let url = PluginCrashGuard.crashLogURL
