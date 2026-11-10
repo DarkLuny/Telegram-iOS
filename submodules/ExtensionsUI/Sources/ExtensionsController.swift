@@ -147,13 +147,14 @@ public func extensionsController(context: AccountContext) -> ViewController {
             rightNavigationButton: nil,
             backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back)
         )
-        let listState = ItemListNodeState(
-            presentationData: ItemListPresentationData(presentationData),
-            entries: [
+        let entries: [ExtensionsEntry] = [
                 .header,
                 .tgWsProxy(enabled: TgWsProxySettings.enabled, running: status.running),
                 .footer
-            ],
+            ]
+        let listState = ItemListNodeState(
+            presentationData: ItemListPresentationData(presentationData),
+            entries: entries,
             style: .blocks,
             animateChanges: true
         )
