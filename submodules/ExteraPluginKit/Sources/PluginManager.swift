@@ -221,18 +221,28 @@ public final class PluginManager: PluginHost {
 
         if !defaults.bool(forKey: migrationKey) {
             let settings = defaults.dictionary(forKey: settingsKey)
-            if let enabled = settings?["enabled"] as? NSNumber {
-                defaults.set(enabled.boolValue, forKey: "extera.extensions.tgwsproxy.enabled")
-            } else if installed {
-                // The plugin defaulted to enabled and started the tunnel as soon
-                // as it loaded. Preserve that intent when there is no saved switch.
-                defaults.set(true, forKey: "extera.extensions.tgwsproxy.enabled")
+            let enabledKey = "extera.extensions.tgwsproxy.enabled"
+            let zoneKey = "extera.extensions.tgwsproxy.zone_index"
+            let customKey = "extera.extensions.tgwsproxy.custom_domain"
+            // An upgraded client may already have a configured Extension and
+            // the old plugin file side by side. Only fill keys the Extension
+            // has never written; otherwise the plugin's older values would
+            // silently overwrite the switch the user just set.
+            if defaults.object(forKey: enabledKey) == nil {
+                if let enabled = settings?["enabled"] as? NSNumber {
+                    defaults.set(enabled.boolValue, forKey: enabledKey)
+                } else if installed {
+                    // The plugin defaulted to enabled and started the tunnel as
+                    // soon as it loaded. Preserve that intent when there is no
+                    // saved switch.
+                    defaults.set(true, forKey: enabledKey)
+                }
             }
-            if let zone = settings?["zone_index"] as? NSNumber {
-                defaults.set(zone.intValue, forKey: "extera.extensions.tgwsproxy.zone_index")
+            if defaults.object(forKey: zoneKey) == nil, let zone = settings?["zone_index"] as? NSNumber {
+                defaults.set(zone.intValue, forKey: zoneKey)
             }
-            if let custom = settings?["custom_domain"] as? String {
-                defaults.set(custom, forKey: "extera.extensions.tgwsproxy.custom_domain")
+            if defaults.object(forKey: customKey) == nil, let custom = settings?["custom_domain"] as? String {
+                defaults.set(custom, forKey: customKey)
             }
             defaults.set(true, forKey: migrationKey)
         }
