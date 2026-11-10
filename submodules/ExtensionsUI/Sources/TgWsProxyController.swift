@@ -278,12 +278,20 @@ private enum TgWsProxyEntry: ItemListNodeEntry {
                 text: value,
                 placeholder: "Use the zone above",
                 type: .regular(capitalization: false, autocorrection: false),
+                returnKeyType: .done,
                 clearType: .always,
                 sectionId: self.section,
                 textUpdated: { text in
                     arguments.setCustomDomain(text)
                 },
-                action: {}
+                updatedFocus: { focused in
+                    if !focused {
+                        arguments.applyCustomDomain()
+                    }
+                },
+                action: {
+                    arguments.applyCustomDomain()
+                }
             )
         case .settingsFooter:
             return ItemListTextItem(presentationData: presentationData, text: .plain("Leave the zone on Automatic to let the client try the known CloudFlare fronts. A custom domain overrides the zone selector. The proxy starts with the switch above and stops when the client goes to the background, so there is no background task to keep alive."), sectionId: self.section)
@@ -381,8 +389,31 @@ private final class TgWsProxyControllerArguments {
     }
 
     func setCustomDomain(_ value: String) {
+        // The field already shows what was typed. Rebuilding the list on every
+        // keystroke would fight the text field's focus; the value is applied
+        // when editing ends, in `applyCustomDomain`.
         TgWsProxySettings.setCustomDomain(value)
-        self.bump()
+    }
+
+    /// Applies the text field when the user presses Done or leaves the field.
+    /// Editing used to be stored but not dialled: the tunnel kept the old zone
+    /// until "Restart Proxy" was tapped, which read as if the domain was ignored.
+    func applyCustomDomain() {
+        guard TgWsProxySettings.enabled else {
+            self.bump()
+            return
+        }
+        let preferred = TgWsProxySettings.preferredDomain()
+        let status = TgWsProxyService.shared.currentStatus()
+        // `domain` is already set while the listener is starting, so this also
+        // ignores a second Done from the same edit instead of restarting the
+        // tunnel that is still coming up. A recorded error means the previous
+        // attempt failed and the new value is worth another try.
+        if status.domain == preferred && status.error == nil {
+            self.bump()
+            return
+        }
+        self.start()
     }
 
     func setZone(_ index: Int) {

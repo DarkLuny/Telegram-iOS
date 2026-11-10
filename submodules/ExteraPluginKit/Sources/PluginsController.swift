@@ -1021,16 +1021,44 @@ private enum PluginCrashLogEntry: ItemListNodeEntry {
             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
         case .clear:
             return ItemListActionItem(presentationData: presentationData, title: "Clear Crash Reports", kind: .destructive, alignment: .natural, sectionId: self.section, style: .blocks, action: {
-                PluginCrashGuard.shared.clearLog()
+                (arguments as? PluginCrashLogControllerArguments)?.clear()
             })
         }
     }
 }
 
+/// Keeps the crash viewer in sync with the retained report file. Clearing used
+/// to remove the file but leave the rows on screen until the screen was opened
+/// again; the state signal makes the list rebuild immediately.
+private final class PluginCrashLogControllerArguments {
+    private let statePromise = ValuePromise<Int32>(0, ignoreRepeated: true)
+    private let stateValue = Atomic(value: Int32(0))
+
+    var state: Signal<Int32, NoError> {
+        return self.statePromise.get()
+    }
+
+    func bump() {
+        _ = self.stateValue.modify { value in
+            return value &+ 1
+        }
+        self.statePromise.set(self.stateValue.with { $0 })
+    }
+
+    func clear() {
+        PluginCrashGuard.shared.clearLog()
+        self.bump()
+    }
+}
+
 public func pluginCrashLogController(context: AccountContext) -> ViewController {
-    let signal = context.sharedContext.presentationData
+    let arguments = PluginCrashLogControllerArguments()
+    let signal = combineLatest(
+        context.sharedContext.presentationData,
+        arguments.state
+    )
     |> deliverOnMainQueue
-    |> map { presentationData -> (ItemListControllerState, (ItemListNodeState, Any)) in
+    |> map { presentationData, _ -> (ItemListControllerState, (ItemListNodeState, Any)) in
         let lines = PluginCrashGuard.shared.logText()
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -1056,7 +1084,7 @@ public func pluginCrashLogController(context: AccountContext) -> ViewController 
             style: .plain,
             animateChanges: false
         )
-        return (controllerState, (listState, ()))
+        return (controllerState, (listState, arguments))
     }
 
     let controller = ItemListController(context: context, state: signal)
