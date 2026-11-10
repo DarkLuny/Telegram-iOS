@@ -97,6 +97,19 @@ public final class PluginRuntime {
         manager.configure(bootstrapSource: pluginBootstrapJavaScript)
 
         self.installHooks()
+
+        // Must run before `observeLifecycle` and `startLoading`: a sentinel left
+        // by the previous process turns Safe Mode on, and the manager checks
+        // that flag before it evaluates any plugin. Running it first also means
+        // the lifecycle subscription's first emission cannot be mistaken for the
+        // previous session's sentinel.
+        PluginCrashGuard.shared.beginSession()
+
+        // The TG WS Proxy extension is not a plugin, so Safe Mode does not have
+        // to stop it; the start helper checks the flag itself and does nothing
+        // while Safe Mode is on.
+        startTgWsProxyIfEnabled(sharedContext: sharedContext)
+
         self.observeLifecycle(sharedContext: sharedContext)
 
         // Loading and `START` both happen on the script queue, so launch is not
@@ -416,8 +429,24 @@ public final class PluginRuntime {
             }
             let previous = self.wasInForeground
             self.wasInForeground = value
-            if previous == nil || previous == value {
+            if previous == nil {
+                // The first emission is the state the app is already in. A
+                // launch straight into the background must clear the sentinel
+                // rather than leave a crash marker behind.
+                if value {
+                    PluginCrashGuard.shared.beginForegroundSession()
+                } else {
+                    PluginCrashGuard.shared.endForegroundSession()
+                }
                 return
+            }
+            if previous == value {
+                return
+            }
+            if value {
+                PluginCrashGuard.shared.beginForegroundSession()
+            } else {
+                PluginCrashGuard.shared.endForegroundSession()
             }
             PluginManager.shared.broadcastAppEvent(value ? "RESUME" : "PAUSE")
         })

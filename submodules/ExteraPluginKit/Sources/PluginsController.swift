@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import Display
 import AccountContext
+import TelegramCore
 import TelegramPresentationData
 import PresentationDataUtils
 import SwiftSignalKit
@@ -18,47 +19,74 @@ import ItemListUI
 /// only a signal push.
 
 private enum PluginsSection: Int32 {
+    case safeMode
     case plugins
+    case extensions
     case log
 }
 
 private enum PluginsControllerEntry: ItemListNodeEntry {
+    case safeModeHeader
+    case safeModeSwitch(isOn: Bool)
+    case safeModeFooter(summary: String?)
     case pluginsHeader
-    case plugin(index: Int, summary: PluginManager.PluginSummary)
+    case plugin(index: Int, summary: PluginManager.PluginSummary, safeMode: Bool)
     case pluginsEmpty
     case install
     case pluginsFooter
+    case extensionsHeader
+    case tgWsProxy(running: Bool)
+    case extensionsFooter
     case logHeader
     case logValue
+    case crashLog
     case logFooter
 
     var section: ItemListSectionId {
         switch self {
+        case .safeModeHeader, .safeModeSwitch, .safeModeFooter:
+            return PluginsSection.safeMode.rawValue
         case .pluginsHeader, .plugin, .pluginsEmpty, .install, .pluginsFooter:
             return PluginsSection.plugins.rawValue
-        case .logHeader, .logValue, .logFooter:
+        case .extensionsHeader, .tgWsProxy, .extensionsFooter:
+            return PluginsSection.extensions.rawValue
+        case .logHeader, .logValue, .crashLog, .logFooter:
             return PluginsSection.log.rawValue
         }
     }
 
     var stableId: Int32 {
         switch self {
-        case .pluginsHeader:
+        case .safeModeHeader:
             return 0
-        case let .plugin(index, _):
-            return 1 + Int32(index)
+        case .safeModeSwitch:
+            return 1
+        case .safeModeFooter:
+            return 2
+        case .pluginsHeader:
+            return 10
+        case let .plugin(index, _, _):
+            return 11 + Int32(index)
         case .pluginsEmpty:
             return 9000
         case .install:
             return 9001
         case .pluginsFooter:
             return 9002
+        case .extensionsHeader:
+            return 9100
+        case .tgWsProxy:
+            return 9101
+        case .extensionsFooter:
+            return 9102
         case .logHeader:
-            return 9003
+            return 9200
         case .logValue:
-            return 9004
+            return 9201
+        case .crashLog:
+            return 9202
         case .logFooter:
-            return 9005
+            return 9203
         }
     }
 
@@ -69,9 +97,30 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
     func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
         let arguments = arguments as! PluginsControllerArguments
         switch self {
+        case .safeModeHeader:
+            return ItemListSectionHeaderItem(presentationData: presentationData, text: "Safe Mode", sectionId: self.section)
+        case let .safeModeSwitch(isOn):
+            return ItemListSwitchItem(
+                presentationData: presentationData,
+                systemStyle: .glass,
+                title: "Safe Mode",
+                text: isOn ? "All plugins are disabled" : "Plugins are allowed to load",
+                value: isOn,
+                sectionId: self.section,
+                style: .blocks,
+                updated: { value in
+                    arguments.setSafeMode(value)
+                }
+            )
+        case let .safeModeFooter(summary):
+            var text = "One switch for every plugin. When a plugin crashes the client, Safe Mode turns on automatically on the next launch, before any plugin code runs. Turn it off to load the plugins again."
+            if let summary = summary, !summary.isEmpty {
+                text += "\n\nLast crash: \(summary)"
+            }
+            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
         case .pluginsHeader:
             return ItemListSectionHeaderItem(presentationData: presentationData, text: "Plugins", sectionId: self.section)
-        case let .plugin(_, summary):
+        case let .plugin(_, summary, safeMode):
             // The row is the switch and the way in at the same time, which is
             // what exteraGram's list does: the checkbox turns the plugin on and
             // off without opening anything, and a tap anywhere else opens its
@@ -91,12 +140,16 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
             if summary.isEnabled, let loadError = summary.loadError {
                 detail = loadError
             }
+            if safeMode {
+                detail = "Disabled by Safe Mode"
+            }
             return ItemListSwitchItem(
                 presentationData: presentationData,
                 systemStyle: .glass,
                 title: summary.name,
                 text: detail,
                 value: summary.isEnabled,
+                enabled: !safeMode,
                 sectionId: self.section,
                 style: .blocks,
                 updated: { value in
@@ -122,6 +175,25 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
             )
         case .pluginsFooter:
             return ItemListTextItem(presentationData: presentationData, text: .plain("Plugins are JavaScript (.plugin or .js) files written against exteraGram's plugin API. “Install Plugin…” opens the system file picker; the chosen file is checked and copied into the app's private folder, which no other app can read. Files.app does not show that folder, so this picker is the only way to get a plugin in."), sectionId: self.section)
+        case .extensionsHeader:
+            return ItemListSectionHeaderItem(presentationData: presentationData, text: "Extensions", sectionId: self.section)
+        case let .tgWsProxy(running):
+            return ItemListDisclosureItem(
+                presentationData: presentationData,
+                systemStyle: .glass,
+                title: "TG WS Proxy",
+                label: running ? "On" : "Off",
+                labelStyle: .text,
+                additionalDetailLabel: "CloudFlare WebSocket tunnel",
+                sectionId: self.section,
+                style: .blocks,
+                disclosureStyle: .arrow,
+                action: {
+                    arguments.openTgWsProxy()
+                }
+            )
+        case .extensionsFooter:
+            return ItemListTextItem(presentationData: presentationData, text: .plain("Built-in features that used to need a separate app. TG WS Proxy runs inside Telegram's process and never schedules background work."), sectionId: self.section)
         case .logHeader:
             return ItemListSectionHeaderItem(presentationData: presentationData, text: "Log", sectionId: self.section)
         case .logValue:
@@ -138,8 +210,22 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
                     arguments.openLog()
                 }
             )
+        case .crashLog:
+            return ItemListDisclosureItem(
+                presentationData: presentationData,
+                systemStyle: .glass,
+                title: "Crash Log",
+                label: "",
+                labelStyle: .text,
+                sectionId: self.section,
+                style: .blocks,
+                disclosureStyle: .arrow,
+                action: {
+                    arguments.openCrashLog()
+                }
+            )
         case .logFooter:
-            return ItemListTextItem(presentationData: presentationData, text: .plain("Log lines from every plugin, newest last. Useful when a plugin does not behave as expected."), sectionId: self.section)
+            return ItemListTextItem(presentationData: presentationData, text: .plain("Log lines from every plugin, newest last. The crash log keeps the last activity and the plugin log tail from a session that ended unexpectedly, which is what identifies the plugin that brought the client down."), sectionId: self.section)
         }
     }
 }
@@ -147,18 +233,24 @@ private enum PluginsControllerEntry: ItemListNodeEntry {
 private final class PluginsControllerArguments {
     let openPlugin: (String) -> Void
     let openLog: () -> Void
+    let openCrashLog: () -> Void
+    let openTgWsProxy: () -> Void
     let installPlugin: () -> Void
     let setPluginEnabled: (String, Bool) -> Void
+    let setSafeMode: (Bool) -> Void
     /// The signal that builds the rows captures these arguments, so the plugin
     /// manager's change notifications keep rebuilding the list while the screen
     /// is open. `deinit` unsubscribes once the controller is gone.
     private let changesDisposable: Disposable
 
-    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, installPlugin: @escaping () -> Void, setPluginEnabled: @escaping (String, Bool) -> Void, changesDisposable: Disposable) {
+    init(openPlugin: @escaping (String) -> Void, openLog: @escaping () -> Void, openCrashLog: @escaping () -> Void, openTgWsProxy: @escaping () -> Void, installPlugin: @escaping () -> Void, setPluginEnabled: @escaping (String, Bool) -> Void, setSafeMode: @escaping (Bool) -> Void, changesDisposable: Disposable) {
         self.openPlugin = openPlugin
         self.openLog = openLog
+        self.openCrashLog = openCrashLog
+        self.openTgWsProxy = openTgWsProxy
         self.installPlugin = installPlugin
         self.setPluginEnabled = setPluginEnabled
+        self.setSafeMode = setSafeMode
         self.changesDisposable = changesDisposable
     }
 
@@ -167,19 +259,26 @@ private final class PluginsControllerArguments {
     }
 }
 
-private func pluginsControllerEntries(installed: [PluginManager.PluginSummary]) -> [PluginsControllerEntry] {
+private func pluginsControllerEntries(installed: [PluginManager.PluginSummary], safeMode: Bool) -> [PluginsControllerEntry] {
     var entries: [PluginsControllerEntry] = []
+    entries.append(.safeModeHeader)
+    entries.append(.safeModeSwitch(isOn: safeMode))
+    entries.append(.safeModeFooter(summary: PluginCrashGuard.shared.lastCrashSummary))
     entries.append(.pluginsHeader)
     for (index, summary) in installed.enumerated() {
-        entries.append(.plugin(index: index, summary: summary))
+        entries.append(.plugin(index: index, summary: summary, safeMode: safeMode))
     }
     if installed.isEmpty {
         entries.append(.pluginsEmpty)
     }
     entries.append(.install)
     entries.append(.pluginsFooter)
+    entries.append(.extensionsHeader)
+    entries.append(.tgWsProxy(running: PluginLocalProxy.shared.currentStatus().running))
+    entries.append(.extensionsFooter)
     entries.append(.logHeader)
     entries.append(.logValue)
+    entries.append(.crashLog)
     entries.append(.logFooter)
     return entries
 }
@@ -217,6 +316,12 @@ public func pluginsController(context: AccountContext) -> ViewController {
         openLog: {
             pushPluginController(context: context, from: host, controller: pluginLogController(context: context))
         },
+        openCrashLog: {
+            pushPluginController(context: context, from: host, controller: pluginCrashLogController(context: context))
+        },
+        openTgWsProxy: {
+            pushPluginController(context: context, from: host, controller: tgWsProxyController(context: context))
+        },
         installPlugin: {
             // The importer outlives this closure: `UIDocumentPickerViewController`
             // holds its delegate weakly, so `PluginFileImporter` keeps a reference
@@ -237,6 +342,9 @@ public func pluginsController(context: AccountContext) -> ViewController {
             PluginStore.shared.setEnabled(enabled, pluginId: pluginId)
             PluginManager.shared.reloadPlugins()
         },
+        setSafeMode: { enabled in
+            PluginManager.shared.setSafeModeEnabled(enabled)
+        },
         changesDisposable: changesDisposable
     )
 
@@ -255,7 +363,7 @@ public func pluginsController(context: AccountContext) -> ViewController {
         )
         let listState = ItemListNodeState(
             presentationData: ItemListPresentationData(presentationData),
-            entries: pluginsControllerEntries(installed: manager.installedPlugins()),
+            entries: pluginsControllerEntries(installed: manager.installedPlugins(), safeMode: manager.isSafeModeEnabled),
             style: .blocks,
             animateChanges: true
         )
@@ -875,6 +983,87 @@ public func pluginLogController(context: AccountContext) -> ViewController {
         let controllerState = ItemListControllerState(
             presentationData: ItemListPresentationData(presentationData),
             title: .text("Plugin Log"),
+            leftNavigationButton: nil,
+            rightNavigationButton: nil,
+            backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back)
+        )
+        let listState = ItemListNodeState(
+            presentationData: ItemListPresentationData(presentationData),
+            entries: entries,
+            style: .plain,
+            animateChanges: false
+        )
+        return (controllerState, (listState, ()))
+    }
+
+    let controller = ItemListController(context: context, state: signal)
+    return controller
+}
+
+// MARK: - Crash log viewer
+
+private enum PluginCrashLogEntry: ItemListNodeEntry {
+    case empty
+    case line(index: Int, text: String)
+    case clear
+
+    var section: ItemListSectionId {
+        switch self {
+        case .clear:
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    var stableId: Int32 {
+        switch self {
+        case .empty:
+            return 0
+        case let .line(index, _):
+            return Int32(index) + 1
+        case .clear:
+            return 1000000
+        }
+    }
+
+    static func < (lhs: PluginCrashLogEntry, rhs: PluginCrashLogEntry) -> Bool {
+        return lhs.stableId < rhs.stableId
+    }
+
+    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
+        switch self {
+        case .empty:
+            return ItemListTextItem(presentationData: presentationData, text: .plain("No crashes have been recorded."), sectionId: self.section)
+        case let .line(_, text):
+            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
+        case .clear:
+            return ItemListActionItem(presentationData: presentationData, title: "Clear Crash Log", kind: .destructive, alignment: .natural, sectionId: self.section, style: .blocks, action: {
+                PluginCrashGuard.shared.clearLog()
+            })
+        }
+    }
+}
+
+public func pluginCrashLogController(context: AccountContext) -> ViewController {
+    let signal = context.sharedContext.presentationData
+    |> deliverOnMainQueue
+    |> map { presentationData -> (ItemListControllerState, (ItemListNodeState, Any)) in
+        let lines = PluginCrashGuard.shared.logText()
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        var entries: [PluginCrashLogEntry] = []
+        if lines.count <= 1 && lines.first?.isEmpty == true {
+            entries.append(.empty)
+        } else {
+            for (index, line) in lines.enumerated() {
+                entries.append(.line(index: index, text: line))
+            }
+        }
+        entries.append(.clear)
+        let controllerState = ItemListControllerState(
+            presentationData: ItemListPresentationData(presentationData),
+            title: .text("Crash Log"),
             leftNavigationButton: nil,
             rightNavigationButton: nil,
             backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back)

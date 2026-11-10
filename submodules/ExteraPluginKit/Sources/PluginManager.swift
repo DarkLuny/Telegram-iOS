@@ -144,6 +144,27 @@ public final class PluginManager: PluginHost {
         self.pluginSource = bootstrapSource
     }
 
+    // MARK: - Safe Mode
+
+    /// One switch for every plugin. Safe Mode is checked before any script is
+    /// evaluated, so a crash in one plugin does not leave the client unable to
+    /// start again; turning it off goes through the normal reload path.
+    public var isSafeModeEnabled: Bool {
+        return PluginCrashGuard.shared.isSafeModeEnabled
+    }
+
+    public func setSafeModeEnabled(_ enabled: Bool) {
+        guard enabled != PluginCrashGuard.shared.isSafeModeEnabled else {
+            return
+        }
+        PluginCrashGuard.shared.isSafeModeEnabled = enabled
+        self.pluginLog(
+            pluginId: "safe-mode",
+            text: enabled ? "enabled: every plugin is disabled" : "disabled: loading plugins again"
+        )
+        self.reloadPlugins()
+    }
+
     // MARK: - Loading
 
     /// Loads every plugin and then delivers the start event, all on the script
@@ -186,6 +207,13 @@ public final class PluginManager: PluginHost {
 
     private func loadAllOnQueue() {
         guard let bootstrapSource = self.pluginSource else {
+            return
+        }
+        // Safe Mode is checked before the plugin directory is even read. A
+        // plugin that crashed the previous launch must not get as far as its
+        // top-level code this time.
+        if PluginCrashGuard.shared.isSafeModeEnabled {
+            self.pluginLog(pluginId: "safe-mode", text: "Safe Mode is on; no plugins were loaded")
             return
         }
         // A build from before the plugins became files wrote its own copies into
@@ -247,6 +275,7 @@ public final class PluginManager: PluginHost {
                 if !manifest.requirements.isEmpty {
                     self.pluginLog(pluginId: manifest.id, text: "ignoring __requirements__ (Python packages): \(manifest.requirements.joined(separator: ", "))")
                 }
+                PluginCrashGuard.shared.recordActivity("loading \(manifest.id)")
                 let plugin = try loader.load(source: source, manifest: manifest, directory: self.store.directory(for: manifest.id))
                 self.attachCallbacks(plugin)
                 prepared.append(plugin)
@@ -359,6 +388,7 @@ public final class PluginManager: PluginHost {
     /// therefore the correct `this`. Exceptions are logged and swallowed: a
     /// plugin bug must degrade the feature, not crash the app.
     private func callLifecycle(_ plugin: LoadedPlugin, _ name: String, context: [String: Any] = [:]) {
+        PluginCrashGuard.shared.recordActivity("\(plugin.manifest.id): \(name)")
         _ = self.callJS(
             plugin: plugin,
             function: "__extera.callLifecycleJSON",
@@ -2086,6 +2116,11 @@ public final class PluginManager: PluginHost {
             }
             self.unloadAllOnQueue()
         }
+        // A deliberate termination is not a crash. `applicationWillTerminate`
+        // does not always run, which is why the background transition is the
+        // primary place the sentinel is removed; this clears it as well when
+        // iOS does call the delegate.
+        PluginCrashGuard.shared.endForegroundSession()
     }
 }
 

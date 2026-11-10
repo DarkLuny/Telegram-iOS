@@ -1,11 +1,10 @@
 name: Publish API docs
 
-# Builds the documentation site from submodules/ExteraPluginKit/docs/API.md and
-# deploys it to GitHub Pages.
+# Publishes the ExteraPluginKit API page to GitHub Pages.
 #
-# The Markdown file is the only source. docs/site/build.js renders it; there is
-# no hand-kept copy of the reference in HTML, so a page can never describe an API
-# that the code no longer has.
+# The page is a single self-contained HTML file (inline CSS and JavaScript), so
+# the build is a copy rather than a render step. The Markdown reference remains
+# in submodules/ExteraPluginKit/docs/API.md as the source the page describes.
 
 on:
   push:
@@ -32,12 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Render the site
-        run: node docs/site/build.js docs/site/public
+      - name: Assemble the site
+        run: |
+          mkdir -p docs/site/public
+          cp docs/site/exterapluginkit-api.html docs/site/public/index.html
 
       - uses: actions/configure-pages@v5
 

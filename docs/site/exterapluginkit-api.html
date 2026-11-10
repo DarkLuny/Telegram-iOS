@@ -1,0 +1,3355 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>ExteraPluginKit — документация плагинов exteraiOS</title>
+<meta name="description" content="Документация плагинного API exteraiOS (tg-ipa): формат плагина, хуки, настройки, отправка, прокси, портирование с Android.">
+<style>
+/* ============================================================
+   ПАЛИТРА
+   ============================================================ */
+:root[data-theme="dark"] {
+  --bg: #0f1318;
+  --bg-soft: #161c23;
+  --panel: #161d26;
+  --panel-2: #121822;
+  --border: #25303c;
+  --border-soft: #1e2833;
+  --text: #e9eef5;
+  --text-2: #9fadbd;
+  --text-3: #728396;
+  --accent: #ff9e64;            /* тёплый апельсин */
+  --accent-2: #ffd479;          /* янтарь для градиентов */
+  --accent-ink: #241104;
+  --accent-soft: rgba(255, 158, 100, .12);
+  --accent-line: rgba(255, 158, 100, .34);
+  --grad-a: #ffb37c;
+  --grad-b: #f8874f;
+  --warn: #c9a6ff;              /* лаванда — «границы платформы» */
+  --warn-soft: rgba(201, 166, 255, .08);
+  --warn-line: rgba(201, 166, 255, .28);
+  --danger: #ff757f;
+  --shadow: 0 18px 44px rgba(0, 0, 0, .5);
+  --topbar-bg: rgba(15, 19, 24, .86);
+  --dot: rgba(233, 238, 245, .07);
+  --aura1: rgba(255, 158, 100, .16);
+  --aura2: rgba(201, 166, 255, .10);
+  --code-glow: rgba(255, 158, 100, .30);
+}
+:root[data-theme="light"] {
+  --bg: #faf8f3;                /* тёплая бумага */
+  --bg-soft: #f0ece3;
+  --panel: #ffffff;
+  --panel-2: #fbfaf7;
+  --border: #e8e2d7;
+  --border-soft: #efeae1;
+  --text: #29241e;
+  --text-2: #5d574e;
+  --text-3: #8b857b;
+  --accent: #b05212;
+  --accent-2: #b05212;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(176, 82, 18, .11);
+  --accent-line: rgba(176, 82, 18, .36);
+  --grad-a: #d1743a;
+  --grad-b: #b05212;
+  --warn: #6d4fc4;
+  --warn-soft: rgba(109, 79, 196, .07);
+  --warn-line: rgba(109, 79, 196, .30);
+  --danger: #c9414b;
+  --shadow: 0 16px 40px rgba(48, 38, 26, .13);
+  --topbar-bg: rgba(250, 248, 243, .9);
+  --dot: rgba(41, 36, 30, .12);
+  --aura1: rgba(176, 82, 18, .13);
+  --aura2: rgba(109, 79, 196, .09);
+  --code-glow: rgba(176, 82, 18, .35);
+}
+/* код-блоки тёмные в обеих темах — тёплая глубина */
+:root {
+  --code-bg: #151210;
+  --code-border: #27211c;
+  --code-text: #ede7dd;
+  --c-kw: #ff9e64;
+  --c-str: #ffd479;
+  --c-com: #7a8390;
+  --c-num: #f78c6c;
+  --c-fn: #82aaff;
+  --e-out: cubic-bezier(.22, .7, .3, 1);
+  --e-io: cubic-bezier(.3, .7, .3, 1);
+}
+
+/* ============================================================
+   БАЗА
+   ============================================================ */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.68 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+::selection { background: rgba(255, 158, 100, .28); color: inherit; }
+:root[data-theme="light"] ::selection { background: rgba(176, 82, 18, .22); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3, h4 { line-height: 1.3; font-weight: 700; letter-spacing: -.012em; }
+p { margin: 10px 0; }
+:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* плавная перекраска при смене темы */
+body, .topbar, .sidebar, .searchbox input, .search-results, .icon-btn, .card,
+.callout, .fact, .foot, .tbl th, .pn a, kbd, .whatsnew, .tbl-wrap, .hero-grid {
+  transition: background-color .38s ease, color .38s ease, border-color .38s ease;
+}
+
+/* ============================================================
+   ВЕРХНЯЯ ПАНЕЛЬ
+   ============================================================ */
+.topbar {
+  position: sticky; top: 0; z-index: 60;
+  display: flex; align-items: center; gap: 14px;
+  height: 56px; padding: 0 18px;
+  background: var(--topbar-bg);
+  backdrop-filter: saturate(150%) blur(10px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark {
+  width: 26px; height: 26px; border-radius: 8px; flex: none;
+  background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+  color: var(--accent-ink); font-weight: 800; font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  box-shadow: 0 4px 16px var(--accent-soft), 0 0 0 1px var(--accent-line);
+  transition: transform .35s var(--e-io), box-shadow .3s;
+}
+.brand-mark:hover { transform: rotate(-6deg) scale(1.1); }
+.brand-name { font-weight: 700; font-size: 15px; white-space: nowrap; letter-spacing: -.01em; }
+.brand-tag {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent-line);
+  background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; white-space: nowrap;
+}
+.topbar-spacer { flex: 1; }
+
+.searchbox { position: relative; flex: none; width: min(340px, 34vw); }
+.searchbox input {
+  width: 100%; height: 36px; padding: 0 64px 0 34px;
+  border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text);
+  font: 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  outline: none;
+  transition: border-color .2s, box-shadow .25s, background-color .38s;
+}
+.searchbox input:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.searchbox .search-ico {
+  position: absolute; left: 11px; top: 9px; width: 17px; height: 17px;
+  color: var(--text-3); pointer-events: none;
+}
+.searchbox kbd {
+  position: absolute; right: 9px; top: 8px;
+  font: 11px/1 ui-monospace, Menlo, Consolas, monospace;
+  color: var(--text-3); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 6px; padding: 3px 6px; background: var(--panel-2); pointer-events: none;
+}
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; flex: none; cursor: pointer;
+  border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text-2);
+  transition: color .2s, border-color .2s, background-color .38s, transform .2s;
+}
+.icon-btn:hover { color: var(--accent); border-color: var(--accent-line); }
+.icon-btn:active { transform: scale(.93); }
+#burger { display: none; }
+#theme-btn svg { transition: transform .55s var(--e-io); }
+#theme-btn.alt svg { transform: rotate(180deg) scale(.9); }
+#theme-btn:hover svg { color: var(--accent); }
+
+/* выпадение поиска */
+.search-results {
+  position: absolute; top: 44px; left: 0; right: 0; display: none;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow);
+  max-height: min(60vh, 460px); overflow: auto; padding: 6px; z-index: 70;
+  transform-origin: top right;
+}
+.search-results.open { display: block; animation: srop .2s var(--e-out); }
+.sr-item {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 0; background: none; color: inherit;
+  padding: 9px 10px; border-radius: 8px; font: inherit;
+  transition: background-color .16s;
+}
+.sr-item:hover, .sr-item.sel { background: var(--accent-soft); }
+.sr-title { font-size: 13.5px; font-weight: 650; }
+.sr-title .sr-group { color: var(--text-3); font-weight: 500; }
+.sr-snip {
+  font-size: 12.5px; color: var(--text-2); margin-top: 3px;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.sr-snip mark, .sr-title mark {
+  background: none; color: var(--accent); font-weight: 700; padding: 0;
+}
+.sr-empty { padding: 14px 12px; color: var(--text-3); font-size: 13px; }
+.sr-hint { font-size: 11.5px; color: var(--text-3); padding: 6px 12px 4px; border-top: 1px solid var(--border-soft); margin-top: 4px; }
+
+/* ============================================================
+   КАРКАС
+   ============================================================ */
+.layout { display: flex; align-items: flex-start; max-width: 1400px; margin: 0 auto; }
+.sidebar {
+  position: sticky; top: 56px; flex: none; width: 264px;
+  height: calc(100vh - 56px); overflow-y: auto; overscroll-behavior: contain;
+  padding: 22px 12px 40px; border-right: 1px solid var(--border-soft);
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.sidebar::-webkit-scrollbar { width: 8px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+.sidebar::-webkit-scrollbar-thumb:hover { background: var(--accent-line); }
+.sb-group { margin: 0 0 20px; }
+.sb-group-title {
+  font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--text-3); padding: 0 12px 7px;
+  animation: sbin .5s var(--e-out) backwards;
+}
+.sb-link {
+  display: block; position: relative;
+  padding: 6px 12px 6px 20px; margin: 1px 0;
+  font-size: 13.5px; color: var(--text-2); border-radius: 8px;
+  text-decoration: none !important;
+  animation: sbin .5s var(--e-out) backwards;
+  animation-delay: calc(var(--i, 0) * 28ms);
+  transition: color .2s, background-color .2s, transform .18s var(--e-out);
+}
+.sb-link:hover { color: var(--text); background: var(--bg-soft); transform: translateX(4px); }
+.sb-link.active { color: var(--accent); background: var(--accent-soft); font-weight: 650; }
+.sb-link::before {
+  content: ""; position: absolute; left: 8px; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 4px; background: var(--accent);
+  transform: scaleY(0); transform-origin: center;
+  transition: transform .32s var(--e-io);
+}
+.sb-link.active::before { transform: scaleY(1); }
+.sb-link.active:hover { transform: none; }
+
+.content-wrap { flex: 1; min-width: 0; display: flex; gap: 34px; padding: 0 26px; }
+.content { flex: 1; min-width: 0; max-width: 860px; margin: 0 auto; padding: 30px 0 70px; }
+
+/* оглавление страницы */
+.toc {
+  display: none; position: sticky; top: 86px; flex: none; width: 208px;
+  max-height: calc(100vh - 110px); overflow-y: auto;
+  padding: 16px 0 40px; font-size: 12.5px;
+  scrollbar-width: none;
+}
+.toc::-webkit-scrollbar { display: none; }
+@media (min-width: 1240px) { .toc { display: block; } }
+.toc-title { font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin-bottom: 8px; }
+.toc a {
+  display: block; padding: 4px 0 4px 12px; border-left: 2px solid var(--border-soft);
+  color: var(--text-3); line-height: 1.45; transition: color .25s, border-color .25s;
+}
+.toc a:hover { color: var(--text); border-color: var(--text-3); text-decoration: none; }
+.toc a.active { color: var(--accent); }
+.toc-ind {
+  position: absolute; left: 0; top: 0; width: 2px; height: 20px;
+  border-radius: 2px; background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-line);
+  opacity: 0; pointer-events: none;
+  transition: top .38s var(--e-io), height .38s var(--e-io), opacity .25s;
+}
+
+/* ============================================================
+   СТРАНИЦА
+   ============================================================ */
+.page { padding: 26px 0 34px; border-bottom: 1px solid var(--border-soft); scroll-margin-top: 70px; }
+.page:last-of-type { border-bottom: 0; }
+.page.flash { animation: pg-flash 1.2s ease-out; }
+@keyframes pg-flash { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
+.page > h2 {
+  font-size: 27px; margin: 4px 0 6px; padding-top: 14px; letter-spacing: -.018em;
+}
+.page > h2 .en { color: var(--text-3); font-weight: 500; font-size: 17px; margin-left: 10px; letter-spacing: 0; }
+.page > .lead { color: var(--text-2); font-size: 15.5px; margin: 0 0 14px; }
+h3 { font-size: 19px; margin: 30px 0 8px; scroll-margin-top: 70px; letter-spacing: -.014em; }
+h4 { font-size: 15.5px; margin: 20px 0 6px; color: var(--text); }
+.page p, .page li { font-size: 15px; color: var(--text); }
+.page p code, .page li code, .lead code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 6px; padding: 1px 5px;
+  white-space: normal; overflow-wrap: anywhere;
+}
+.page td code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 6px; padding: 1px 5px; white-space: nowrap;
+}
+
+/* бейдж «новое» */
+.tag-new {
+  display: inline-block; vertical-align: 2px; margin-left: 9px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--accent);
+  border-radius: 999px; padding: 2.5px 8px 2px; user-select: none;
+}
+
+/* списки */
+.page ul, .page ol { padding-left: 24px; margin: 10px 0; }
+.page li { margin: 4px 0; }
+.page li::marker { color: var(--accent); }
+
+/* таблицы */
+.tbl-wrap {
+  overflow-x: auto; margin: 14px 0; border-radius: 12px; border: 1px solid var(--border);
+  box-shadow: 0 1px 0 var(--border-soft) inset;
+}
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; line-height: 1.55; }
+.tbl th {
+  text-align: left; font-weight: 700; font-size: 12px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-3); background: var(--panel-2);
+  padding: 9px 13px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.tbl td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl tr:nth-child(even) td { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+.tbl tbody tr td { transition: background-color .18s; }
+.tbl tbody tr:hover td { background: var(--accent-soft); }
+.tbl td:first-child { white-space: nowrap; }
+
+/* код */
+pre.code {
+  position: relative; margin: 14px 0; padding: 14px 16px;
+  background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 12px;
+  overflow-x: auto;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  transition: border-color .28s, box-shadow .3s, background-color .38s;
+}
+pre.code:hover {
+  border-color: var(--code-glow);
+  box-shadow: 0 0 28px var(--accent-soft), 0 14px 34px rgba(0, 0, 0, .32);
+}
+pre.code code {
+  display: block; font: 13px/1.62 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color: var(--code-text); white-space: pre;
+}
+.copy-btn {
+  position: absolute; top: 9px; right: 9px; z-index: 5;
+  height: 28px; padding: 0 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid #332a22; background: #1d1815; color: #8d857c;
+  font: 11.5px/1 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .04em;
+  opacity: 0; transition: opacity .14s, color .2s, border-color .2s;
+}
+pre.code:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--accent); border-color: var(--code-glow); }
+.copy-btn.done { color: var(--accent); border-color: var(--code-glow); opacity: 1; animation: cpop .32s var(--e-io); }
+
+/* callout */
+.callout {
+  margin: 16px 0; padding: 13px 16px 13px 15px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--panel-2);
+  border-left: 4px solid var(--accent);
+  font-size: 14px; line-height: 1.62; color: var(--text-2);
+}
+.callout b, .callout strong { color: var(--text); }
+.callout p { margin: 4px 0; font-size: 14px; color: var(--text-2); }
+.callout .callout-title {
+  display: block; font-weight: 750; font-size: 12.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 5px;
+}
+.callout .callout-title::before {
+  content: ""; display: inline-block; width: 14px; height: 3px;
+  background: currentColor; border-radius: 2px; margin-right: 8px; vertical-align: 3px;
+}
+.callout.warn { border-left-color: var(--warn); background: var(--warn-soft); border-color: var(--warn-line); }
+.callout.warn .callout-title { color: var(--warn); }
+:root[data-theme="light"] .callout { background: #fbfaf7; }
+:root[data-theme="light"] .callout.warn { background: #f8f5fd; }
+
+/* ============================================================
+   HERO
+   ============================================================ */
+.hero { position: relative; overflow: hidden; padding: 40px 0 10px; }
+.hero > * { position: relative; z-index: 1; }
+.hero-deco { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.hero-grid {
+  position: absolute; inset: 0;
+  background-image: radial-gradient(var(--dot) 1px, transparent 1.5px);
+  background-size: 28px 28px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 18%, #000 68%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 18%, #000 68%, transparent);
+}
+.aura { position: absolute; border-radius: 50%; }
+.aura-1 {
+  width: 560px; height: 560px; top: -190px; right: -130px;
+  background: radial-gradient(circle at 35% 35%, var(--aura1), transparent 70%);
+  animation: drift1 26s ease-in-out infinite alternate;
+}
+.aura-2 {
+  width: 500px; height: 500px; bottom: -230px; left: -160px;
+  background: radial-gradient(circle at 60% 40%, var(--aura2), transparent 65%);
+  animation: drift2 34s ease-in-out infinite alternate;
+}
+.hero h1 {
+  font-size: clamp(30px, 4.4vw, 42px); margin: 0 0 10px; letter-spacing: -.022em; font-weight: 800;
+}
+.hero h1 .accent {
+  background: linear-gradient(92deg, var(--grad-a), var(--accent-2));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; padding-right: .06em;
+}
+.hero-sub { font-size: 17px; color: var(--text-2); max-width: 60ch; margin: 0 0 18px; }
+.factline { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 26px; }
+.fact {
+  font: 12.5px/1 ui-monospace, Menlo, Consolas, monospace;
+  color: var(--text-2); border: 1px solid var(--border);
+  background: var(--panel-2); border-radius: 999px; padding: 7px 12px;
+  transition: transform .22s var(--e-out), border-color .22s, background-color .38s;
+}
+.fact:hover { transform: translateY(-2px); border-color: var(--accent-line); }
+.fact b { color: var(--accent); font-weight: 700; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 22px 0 8px; }
+.card {
+  display: block; text-decoration: none !important;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--panel);
+  padding: 15px 16px 14px;
+  transition: transform .3s var(--e-out), border-color .3s, box-shadow .3s, background-color .38s;
+}
+.card:hover {
+  border-color: var(--accent-line); transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .3), 0 0 0 1px var(--accent-soft);
+}
+:root[data-theme="light"] .card:hover { box-shadow: 0 12px 28px rgba(48, 38, 26, .14), 0 0 0 1px var(--accent-soft); }
+.card-ico { font-size: 19px; margin-bottom: 8px; transition: transform .3s var(--e-io); }
+.card:hover .card-ico { transform: scale(1.18) rotate(-5deg); }
+.card-title { font-weight: 700; font-size: 15px; color: var(--text); margin-bottom: 4px; }
+.card-sub { font-size: 13px; color: var(--text-2); line-height: 1.5; }
+
+.whatsnew {
+  border: 1px solid var(--accent-line); background: var(--accent-soft);
+  border-radius: 14px; padding: 16px 18px; margin: 24px 0 6px;
+}
+.whatsnew h3 { margin: 0 0 8px; font-size: 16px; color: var(--accent); }
+.whatsnew ul { margin: 6px 0 2px; padding-left: 20px; }
+.whatsnew li { font-size: 14px; color: var(--text-2); margin: 5px 0; }
+.whatsnew li b { color: var(--text); }
+
+/* prev / next */
+.pn { display: flex; gap: 12px; margin-top: 26px; }
+.pn a {
+  flex: 1; min-width: 0; text-decoration: none !important;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2);
+  padding: 11px 15px; font-size: 13.5px; color: var(--text-2);
+  transition: transform .25s var(--e-out), border-color .25s, background-color .38s;
+}
+.pn a:hover { border-color: var(--accent-line); transform: translateY(-2px); }
+.pn a b { display: block; font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); margin-bottom: 3px; }
+.pn a span { color: var(--text); font-weight: 600; }
+.pn a.next { text-align: right; }
+
+/* футер */
+.foot {
+  border-top: 1px solid var(--border-soft); margin: 10px auto 0; padding: 22px 26px 34px;
+  display: flex; flex-wrap: wrap; gap: 8px 26px; justify-content: space-between;
+  font-size: 12.5px; color: var(--text-3); max-width: 1400px;
+}
+.foot a { color: var(--text-2); }
+.foot a:hover { color: var(--accent); }
+
+/* прогресс чтения */
+#progress {
+  position: fixed; top: 0; left: 0; width: 100%; height: 2.5px; z-index: 80;
+  transform: scaleX(0); transform-origin: 0 50%;
+  background: linear-gradient(90deg, var(--grad-b), var(--accent), var(--accent-2));
+  box-shadow: 0 0 10px var(--accent-line);
+  pointer-events: none;
+}
+
+/* ============================================================
+   СИСТЕМА ПОЯВЛЕНИЯ ПРИ СКРОЛЛЕ
+   ============================================================ */
+@media (prefers-reduced-motion: no-preference) {
+  .rv:not(.in) {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(6px);
+  }
+  .rv.in {
+    animation: rvin .58s var(--e-out) backwards;
+    animation-delay: var(--d, 0ms);
+  }
+  .rv.in .tag-new { animation: newpulse .75s var(--e-io) .42s backwards; }
+}
+@keyframes rvin {
+  from { opacity: 0; transform: translateY(18px); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+@keyframes newpulse {
+  0% { transform: scale(.55); opacity: 0; }
+  62% { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes sbin {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes srop {
+  from { opacity: 0; transform: translateY(-6px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes cpop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.16); }
+  100% { transform: scale(1); }
+}
+@keyframes drift1 {
+  from { transform: translate3d(0, 0, 0) rotate(0deg); }
+  to { transform: translate3d(-52px, 34px, 0) rotate(9deg); }
+}
+@keyframes drift2 {
+  from { transform: translate3d(0, 0, 0) rotate(0deg); }
+  to { transform: translate3d(44px, -30px, 0) rotate(-8deg); }
+}
+
+/* уважение к reduced motion */
+/* ============================================================
+   АДАПТИВ
+   ============================================================ */
+.sb-backdrop { display: none; position: fixed; inset: 0; z-index: 55; background: rgba(5, 8, 11, .62); }
+@media (max-width: 900px) {
+  #burger { display: inline-flex; }
+  .brand-tag { display: none; }
+  .searchbox { width: 100%; max-width: none; flex: 1; margin-right: 8px; }
+  .brand-name { display: none; }
+  .layout { display: block; }
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 56; width: 288px;
+    height: 100vh; padding-top: 18px; background: var(--bg);
+    transform: translateX(-102%); transition: transform .26s var(--e-io); border-right: 1px solid var(--border);
+  }
+  body.nav-open .sidebar { transform: none; box-shadow: var(--shadow); }
+  body.nav-open .sb-backdrop { display: block; }
+  .content-wrap { padding: 0 16px; gap: 0; }
+  .content { padding: 18px 0 60px; }
+  .page > h2 { font-size: 23px; }
+  .toc { display: none !important; }
+  .aura-1 { width: 420px; height: 420px; }
+  .aura-2 { width: 380px; height: 380px; }
+}
+@media (max-width: 560px) {
+  .topbar { padding: 0 10px; gap: 8px; }
+  .searchbox kbd { display: none; }
+  .searchbox input { padding-right: 12px; }
+}
+
+
+/* ============================================================
+   EXTERA VISUAL SYSTEM — immersive glass / aurora
+   ============================================================ */
+:root[data-theme="dark"] {
+  --bg: #070a10;
+  --bg-soft: #0d131d;
+  --panel: rgba(16, 23, 34, .82);
+  --panel-2: #0c121c;
+  --border: rgba(160, 190, 210, .15);
+  --border-soft: rgba(160, 190, 210, .09);
+  --text: #edf5f6;
+  --text-2: #a3b5c5;
+  --text-3: #718397;
+  --accent: #c8ff72;
+  --accent-2: #7be8dc;
+  --accent-ink: #101608;
+  --accent-soft: rgba(190, 255, 102, .09);
+  --accent-line: rgba(190, 255, 102, .34);
+  --grad-a: #e0ff9a;
+  --grad-b: #67e4d6;
+  --warn: #b9a4ff;
+  --warn-soft: rgba(185, 164, 255, .09);
+  --warn-line: rgba(185, 164, 255, .3);
+  --danger: #ff8193;
+  --shadow: 0 28px 80px rgba(0, 0, 0, .52);
+  --topbar-bg: rgba(7, 10, 16, .77);
+  --dot: rgba(194, 221, 228, .15);
+  --aura1: rgba(185, 255, 105, .14);
+  --aura2: rgba(87, 188, 255, .12);
+  --code-glow: rgba(133, 239, 206, .34);
+}
+:root[data-theme="light"] {
+  --bg: #f4f7f3;
+  --bg-soft: #eaf0e9;
+  --panel: rgba(255, 255, 255, .88);
+  --panel-2: #f7faf6;
+  --border: rgba(40, 68, 54, .15);
+  --border-soft: rgba(40, 68, 54, .09);
+  --text: #17251f;
+  --text-2: #52675e;
+  --text-3: #82958a;
+  --accent: #3e8a4b;
+  --accent-2: #168f8b;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(63, 139, 75, .09);
+  --accent-line: rgba(63, 139, 75, .28);
+  --grad-a: #559e5d;
+  --grad-b: #168f8b;
+  --warn: #775ac1;
+  --warn-soft: rgba(119, 90, 193, .07);
+  --warn-line: rgba(119, 90, 193, .24);
+  --danger: #c94159;
+  --shadow: 0 24px 70px rgba(38, 68, 51, .13);
+  --topbar-bg: rgba(244, 247, 243, .82);
+  --dot: rgba(41, 85, 62, .14);
+  --aura1: rgba(107, 190, 106, .13);
+  --aura2: rgba(88, 178, 203, .12);
+  --code-glow: rgba(22, 143, 139, .3);
+}
+:root {
+  --code-bg: #080e14;
+  --code-border: rgba(149, 182, 197, .14);
+  --code-text: #dce9e8;
+  --c-kw: #d2ff87;
+  --c-str: #a6edcb;
+  --c-com: #778b96;
+  --c-num: #ffbd80;
+  --c-fn: #9ecbff;
+  --e-out: cubic-bezier(.16, 1, .3, 1);
+  --e-io: cubic-bezier(.2, .8, .2, 1);
+}
+html { scroll-padding-top: 84px; }
+body {
+  background:
+    radial-gradient(ellipse 70% 45% at 50% -14%, rgba(94, 155, 133, .11), transparent 72%),
+    radial-gradient(ellipse 36% 40% at 100% 50%, rgba(74, 137, 156, .055), transparent 75%),
+    var(--bg);
+  font-size: 15.5px;
+  letter-spacing: -.012em;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image: linear-gradient(rgba(160, 205, 190, .018) 1px, transparent 1px), linear-gradient(90deg, rgba(160, 205, 190, .018) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,.65), transparent 76%);
+}
+::selection { background: rgba(194, 255, 117, .28); color: inherit; }
+a { text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.topbar {
+  height: 66px; padding: 0 clamp(14px, 2.8vw, 42px);
+  background: var(--topbar-bg); border-bottom: 1px solid var(--border-soft);
+  backdrop-filter: blur(22px) saturate(155%); -webkit-backdrop-filter: blur(22px) saturate(155%);
+  box-shadow: 0 8px 36px rgba(0,0,0,.08);
+}
+.topbar::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-line), rgba(123,232,220,.28), transparent);
+  opacity: .8;
+}
+.brand { gap: 12px; }
+.brand-mark {
+  position: relative; width: 32px; height: 32px; border-radius: 11px;
+  background: linear-gradient(145deg, #e4ff9e 0%, #9ee98e 42%, #69dccc 100%);
+  color: #102018; font-size: 11px; letter-spacing: -.08em;
+  box-shadow: 0 5px 24px rgba(150, 255, 132, .2), inset 0 1px 0 rgba(255,255,255,.7);
+}
+.brand-mark::after { content:""; position:absolute; inset:-4px; border:1px solid rgba(188,255,118,.2); border-radius:14px; animation: mark-pulse 3.5s ease-in-out infinite; }
+.brand-name { font-size: 14px; letter-spacing: -.025em; }
+.brand-tag { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); font-size: 9px; letter-spacing: .13em; padding: 4px 9px; }
+.searchbox { width: min(370px, 34vw); }
+.searchbox input {
+  height: 39px; padding-left: 39px; border-radius: 12px;
+  background: rgba(255,255,255,.035); border-color: var(--border-soft);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+.searchbox input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 4px var(--accent-soft), 0 0 24px rgba(168,255,112,.07); }
+.searchbox .search-ico { left: 13px; top: 11px; }
+.searchbox kbd { top: 10px; border-radius: 7px; background: rgba(255,255,255,.035); }
+.icon-btn { width: 39px; height: 39px; border-radius: 12px; background: rgba(255,255,255,.035); border-color: var(--border-soft); }
+.icon-btn:hover { box-shadow: 0 0 0 4px var(--accent-soft), 0 0 24px var(--accent-soft); transform: translateY(-1px); }
+.search-results { border-radius: 16px; background: rgba(12,18,28,.96); backdrop-filter: blur(24px); border-color: var(--border); box-shadow: 0 24px 70px rgba(0,0,0,.45); }
+.sr-item { border-radius: 10px; }
+.layout { max-width: 1600px; }
+.sidebar {
+  top: 66px; height: calc(100vh - 66px); width: 258px;
+  padding: 26px 14px 42px 18px; border-right: 1px solid var(--border-soft);
+  scrollbar-color: rgba(150,180,170,.22) transparent;
+}
+.sb-group { margin-bottom: 24px; }
+.sb-group-title { font-size: 9px; letter-spacing: .18em; color: #718b82; padding: 0 13px 9px; }
+.sb-link { padding: 7px 12px 7px 21px; font-size: 12.8px; border-radius: 9px; color: var(--text-2); }
+.sb-link:hover { background: rgba(180,255,130,.055); }
+.sb-link.active { color: var(--accent); background: linear-gradient(90deg, var(--accent-soft), transparent); }
+.sb-link::before { left: 8px; top: 9px; bottom: 9px; width: 2px; box-shadow: 0 0 12px var(--accent-line); }
+.content-wrap { gap: clamp(22px, 3vw, 48px); padding: 0 clamp(18px, 3vw, 48px); }
+.content { max-width: 1040px; padding: 22px 0 86px; }
+.toc { width: 190px; top: 94px; padding-top: 24px; font-size: 11.5px; }
+.toc-title { letter-spacing: .16em; font-size: 9px; margin-bottom: 12px; }
+.toc a { padding: 6px 0 6px 13px; border-left-color: var(--border-soft); }
+.toc a.active { color: var(--accent); }
+.toc-ind { background: linear-gradient(var(--accent), var(--accent-2)); box-shadow: 0 0 15px var(--accent-line); }
+.page { padding: 38px 0 48px; border-bottom-color: var(--border-soft); scroll-margin-top: 88px; }
+.page > h2 { font-size: clamp(25px, 2.5vw, 32px); letter-spacing: -.045em; margin: 3px 0 8px; }
+.page > h2::before { content: ""; display: inline-block; vertical-align: 5px; width: 19px; height: 3px; margin-right: 12px; border-radius: 9px; background: linear-gradient(90deg,var(--accent),var(--accent-2)); box-shadow: 0 0 14px var(--accent-line); }
+.page > h2 .en { font-size: 14px; color: var(--text-3); letter-spacing: .02em; }
+.page > .lead { color: var(--text-2); font-size: 15px; max-width: 72ch; margin-bottom: 20px; }
+.page h3 { font-size: 19px; letter-spacing: -.035em; margin-top: 38px; }
+.page h3::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 10px 3px 0; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent-line); }
+.page p, .page li { line-height: 1.78; }
+.page p code, .page li code, .lead code { border-radius: 6px; padding: 2px 6px; }
+.tbl-wrap { border-radius: 15px; background: rgba(255,255,255,.018); border-color: var(--border); box-shadow: 0 12px 44px rgba(0,0,0,.08), inset 0 1px 0 rgba(255,255,255,.035); }
+table.tbl { font-size: 13px; }
+.tbl th { background: rgba(255,255,255,.035); letter-spacing: .09em; font-size: 10px; }
+.tbl td { padding: 11px 14px; }
+.tbl tbody tr:hover td { background: rgba(188,255,114,.055); }
+pre.code {
+  margin: 18px 0; padding: 42px 19px 18px; border-radius: 16px;
+  border-color: rgba(144,190,181,.15); background: radial-gradient(ellipse at 12% 0%, rgba(92,154,137,.08), transparent 55%), #080d13;
+  box-shadow: 0 18px 44px rgba(0,0,0,.2), inset 0 1px 0 rgba(255,255,255,.035);
+}
+pre.code::before { content: ""; position: absolute; left: 18px; top: 17px; width: 7px; height: 7px; border-radius: 50%; background: #ff6d75; box-shadow: 13px 0 #ffc66d, 26px 0 #77d99c; }
+pre.code::after { content: "JAVASCRIPT / SOURCE"; position: absolute; top: 13px; right: 19px; color: #59716f; font: 9px/1.4 ui-monospace,monospace; letter-spacing: .13em; }
+pre.code code { font-size: 12.7px; line-height: 1.75; }
+pre.code:hover { border-color: rgba(190,255,122,.3); box-shadow: 0 20px 54px rgba(0,0,0,.32), 0 0 28px rgba(159,255,128,.06), inset 0 1px 0 rgba(255,255,255,.04); }
+.copy-btn { top: 9px; right: 14px; opacity: .68; border-radius: 7px; background: #111d1b; border-color: rgba(158,211,180,.2); }
+.copy-btn:hover { color: #d7ff9a; border-color: rgba(190,255,122,.4); }
+.callout { border-radius: 14px; background: linear-gradient(120deg,rgba(177,255,113,.055),rgba(100,220,211,.025)); border-color: rgba(173,236,155,.14); border-left: 2px solid var(--accent); padding: 16px 19px; }
+.callout.warn { background: linear-gradient(120deg,rgba(184,158,255,.08),rgba(125,114,204,.025)); border-color: var(--warn-line); border-left: 2px solid var(--warn); }
+.callout .callout-title { font-size: 10px; letter-spacing: .15em; }
+.tag-new { background: linear-gradient(100deg,#d7ff82,#8fe9c0); color: #132012; box-shadow: 0 2px 14px rgba(178,255,117,.18); }
+.cards { grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin: 32px 0 12px; perspective: 1000px; }
+.card {
+  position: relative; isolation: isolate; overflow: hidden; min-height: 150px;
+  padding: 18px 17px 16px; border-radius: 17px;
+  border-color: rgba(159,190,184,.14);
+  background: linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018) 55%),rgba(13,20,29,.72);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 12px 32px rgba(0,0,0,.12);
+  transform-style: preserve-3d; will-change: transform;
+}
+.card::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; opacity: 0;
+  background: radial-gradient(260px circle at var(--mx,50%) var(--my,50%),rgba(184,255,117,.13),transparent 65%);
+  transition: opacity .35s ease;
+}
+.card::after { content: ""; position:absolute; left:17px; right:17px; bottom:0; height:1px; background:linear-gradient(90deg,transparent,var(--accent-line),transparent); opacity:0; transition:opacity .3s; }
+.card:hover { border-color: rgba(192,255,125,.34); box-shadow: 0 22px 48px rgba(0,0,0,.28), 0 0 32px rgba(170,255,113,.06), inset 0 1px 0 rgba(255,255,255,.08); transform: translateY(-6px) scale(1.012); }
+.card:hover::before,.card:hover::after { opacity:1; }
+.card-ico { font-size: 21px; filter: drop-shadow(0 0 12px rgba(181,255,122,.22)); }
+.card-title { font-size: 14px; letter-spacing: -.025em; }
+.card-sub { font-size: 12px; line-height: 1.6; color: #9cafbd; }
+.whatsnew {
+  position: relative; overflow: hidden; margin: 24px 0 4px; padding: 19px 22px;
+  border-radius: 17px; border-color: rgba(190,255,122,.2);
+  background: linear-gradient(115deg,rgba(172,255,110,.075),rgba(113,222,207,.035) 55%,rgba(135,129,255,.045));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 14px 42px rgba(0,0,0,.1);
+}
+.whatsnew::after { content:"✳"; position:absolute; right:20px; top:8px; font-size:50px; line-height:1; color:rgba(196,255,134,.12); transform:rotate(-13deg); pointer-events:none; }
+.whatsnew h3 { font-size: 14px; letter-spacing: -.015em; }
+.whatsnew h3::before { display:none; }
+.whatsnew li { font-size: 13px; }
+.pn a { border-radius: 14px; background: rgba(255,255,255,.025); border-color: var(--border); padding: 15px 17px; }
+.pn a:hover { background: var(--accent-soft); border-color: var(--accent-line); transform: translateY(-3px); }
+.foot { max-width: 1600px; padding: 26px clamp(18px,3vw,48px) 38px; border-top-color: var(--border-soft); }
+#progress { height: 3px; background: linear-gradient(90deg,#c8ff72,#74e8d3,#8aafff); box-shadow: 0 0 16px rgba(152,255,156,.55); }
+.rv.in { animation-duration: .72s; }
+
+/* Hero stage */
+.hero { isolation: isolate; overflow: visible; padding: 36px 0 12px; }
+.hero-deco { overflow: hidden; border-radius: 28px; opacity: .95; }
+.hero-grid { background-size: 34px 34px; opacity: .62; mask-image: radial-gradient(ellipse at 50% 38%,#000 0%,transparent 78%); }
+.hero-deco::after { content:""; position:absolute; inset:0; background:linear-gradient(90deg,var(--bg) 0%,transparent 28%,transparent 78%,var(--bg) 100%); opacity:.42; }
+.aura-1 { width: 680px; height: 680px; top:-250px; right:-170px; background:radial-gradient(circle at 40% 42%,rgba(174,255,105,.19),rgba(99,212,187,.07) 28%,transparent 69%); filter:blur(6px); }
+.aura-2 { width: 600px; height: 600px; bottom:-260px; left:-250px; background:radial-gradient(circle at 58% 42%,rgba(111,157,255,.13),rgba(139,117,255,.07) 30%,transparent 68%); filter:blur(6px); }
+.hero-stage { position:relative; z-index:2; display:grid; grid-template-columns:minmax(0,1.08fr) minmax(300px,.92fr); gap:16px; align-items:center; min-height:365px; }
+.hero-copy { position:relative; z-index:3; padding:8px 0 18px; }
+.hero-kicker { display:flex; align-items:center; gap:9px; margin:0 0 22px; color:#9bb4aa; font:700 9px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.17em; }
+.hero-kicker i { width:3px; height:3px; border-radius:50%; background:#526a61; margin:0 3px; }
+.hero-kicker b { color:var(--accent); font-weight:700; letter-spacing:.1em; }
+.live-dot { position:relative; width:7px; height:7px; border-radius:50%; background:#c8ff72; box-shadow:0 0 10px rgba(200,255,114,.85); }
+.live-dot::after { content:""; position:absolute; inset:-4px; border:1px solid rgba(200,255,114,.5); border-radius:50%; animation:live-ping 2s ease-out infinite; }
+.hero h1 { max-width:560px; font-size:clamp(42px,5.3vw,68px); line-height:1.04; letter-spacing:-.065em; font-weight:820; margin:0 0 18px; text-wrap:balance; }
+.hero h1 .accent { background:linear-gradient(105deg,#e1ff9a 0%,#aaf08e 35%,#72e4d8 78%,#9fd8ff 100%); background-size:190% auto; -webkit-background-clip:text; background-clip:text; animation:gradient-flow 8s ease-in-out infinite alternate; filter:drop-shadow(0 0 24px rgba(170,255,122,.14)); }
+.hero-sub { max-width:520px; font-size:14.5px; line-height:1.8; color:#a0b2bd; margin:0 0 18px; }
+.factline { gap:7px; margin:0 0 22px; }
+.fact { padding:7px 10px; font-size:10px; letter-spacing:.005em; border-color:rgba(168,198,187,.14); background:rgba(255,255,255,.025); backdrop-filter:blur(10px); }
+.fact b { color:#d0ff8b; }
+.hero-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.hero-btn { display:inline-flex; min-height:43px; align-items:center; justify-content:center; gap:10px; padding:0 17px; border-radius:12px; font-size:12px; font-weight:750; letter-spacing:-.01em; text-decoration:none!important; transition:transform .25s var(--e-out),box-shadow .25s,border-color .25s,background .25s; }
+.hero-btn:hover { transform:translateY(-3px); }
+.hero-btn-primary { color:#14200e; background:linear-gradient(110deg,#d7ff8b,#9de99b 52%,#78e3d4); box-shadow:0 8px 28px rgba(172,255,120,.17),inset 0 1px 0 rgba(255,255,255,.72); }
+.hero-btn-primary:hover { box-shadow:0 12px 36px rgba(172,255,120,.27),0 0 0 4px rgba(190,255,120,.08); }
+.hero-btn-primary span { font-size:16px; line-height:0; }
+.hero-btn-secondary { color:#c3d3d4; border:1px solid rgba(168,198,187,.19); background:rgba(255,255,255,.035); }
+.hero-btn-secondary:hover { border-color:var(--accent-line); color:var(--accent); background:var(--accent-soft); }
+.play-mark { display:inline-flex; flex:0 0 22px; align-items:center; justify-content:center; width:22px; height:22px; padding:0; border-radius:7px; background:rgba(183,255,123,.11); color:var(--accent); line-height:0; }
+.play-mark svg { display:block; width:13px; height:13px; overflow:visible; }
+.hero-btn-secondary > span:last-child { display:block; line-height:1; white-space:nowrap; }
+.hero-scene { position:relative; z-index:2; height:378px; min-width:0; display:grid; place-items:center; perspective:1000px; transform-style:preserve-3d; --px:0px; --py:0px; }
+.scene-aura { position:absolute; width:76%; aspect-ratio:1; border-radius:50%; background:radial-gradient(circle,rgba(155,255,125,.14),rgba(87,212,204,.08) 30%,rgba(96,133,245,.045) 49%,transparent 70%); filter:blur(13px); animation:aura-breathe 6s ease-in-out infinite alternate; }
+.scene-orbit { position:absolute; width:72%; aspect-ratio:1; border:1px solid rgba(153,222,195,.16); border-radius:50%; box-shadow:0 0 30px rgba(101,222,190,.035),inset 0 0 30px rgba(102,190,198,.025); transform:translate3d(var(--px),var(--py),0) rotateX(67deg) rotateZ(-20deg); }
+.scene-orbit-a { width:81%; border-color:rgba(194,255,135,.26); animation:orbit-spin-a 20s linear infinite; }
+.scene-orbit-b { width:66%; border-style:dashed; border-color:rgba(118,218,222,.25); transform:translate3d(var(--px),var(--py),0) rotateX(69deg) rotateZ(54deg); animation:orbit-spin-b 28s linear infinite; }
+.scene-orbit-c { width:90%; height:51%; border-color:rgba(161,174,255,.18); transform:translate3d(var(--px),var(--py),0) rotateX(64deg) rotateZ(2deg); animation:orbit-float 8s ease-in-out infinite alternate; }
+.orbit-node { position:absolute; display:block; width:9px; height:9px; border-radius:50%; background:#d8ff9a; box-shadow:0 0 9px #cbff83,0 0 22px rgba(199,255,120,.8); }
+.node-a { top:15%; left:17%; }.node-b { bottom:17%; right:12%; width:6px;height:6px;background:#83e8da;box-shadow:0 0 15px #83e8da; }
+.node-c { top:20%; right:13%; width:7px;height:7px;background:#a7b8ff;box-shadow:0 0 17px #a7b8ff; }
+.scene-core { position:relative; z-index:2; width:150px; height:150px; display:grid; place-items:center; border-radius:50%; transform:translate3d(var(--px),var(--py),30px); background:radial-gradient(circle at 33% 25%,rgba(255,255,255,.16),rgba(255,255,255,.02) 30%,transparent 58%),linear-gradient(140deg,rgba(167,255,143,.16),rgba(80,201,200,.08) 48%,rgba(133,135,255,.12)); border:1px solid rgba(204,255,178,.4); box-shadow:0 0 0 10px rgba(170,255,153,.025),0 0 0 22px rgba(119,217,210,.025),0 0 58px rgba(134,243,157,.2),inset 0 1px 0 rgba(255,255,255,.3),inset 0 -20px 40px rgba(60,160,156,.12); backdrop-filter:blur(12px); animation:core-hover 6s ease-in-out infinite; }
+.scene-core::before,.scene-core::after { content:""; position:absolute; border-radius:50%; pointer-events:none; }
+.scene-core::before { inset:8px; border:1px solid rgba(219,255,192,.24); box-shadow:inset 0 0 25px rgba(184,255,137,.07); }
+.scene-core::after { width:10px;height:10px;top:16px;right:24px;background:#dfff9c;box-shadow:0 0 18px #dfff9c; }
+.core-inner { display:flex; flex-direction:column; align-items:center; gap:3px; }
+.core-overline,.core-caption { color:rgba(216,255,219,.7); font:700 7px/1.2 ui-monospace,monospace; letter-spacing:.2em; }
+.core-inner strong { font:900 43px/.98 ui-monospace,monospace; letter-spacing:-.13em; padding-right:5px; color:#f2ffe1; text-shadow:0 0 22px rgba(199,255,156,.55); }
+.core-inner strong span { color:#8be5d7; }
+.core-caption { font-size:6px; letter-spacing:.25em; color:rgba(157,229,207,.74); }
+.core-equalizer { display:flex; gap:3px; align-items:center; height:10px; margin-top:7px; }
+.core-equalizer i { display:block; width:2px; border-radius:3px; background:#c8ff83; box-shadow:0 0 7px rgba(202,255,125,.7); animation:eq 1s ease-in-out infinite alternate; }
+.core-equalizer i:nth-child(1),.core-equalizer i:nth-child(6){height:4px;animation-delay:.2s}.core-equalizer i:nth-child(2),.core-equalizer i:nth-child(5){height:7px;animation-delay:.55s}.core-equalizer i:nth-child(3){height:10px;animation-delay:.1s}.core-equalizer i:nth-child(4){height:6px;animation-delay:.8s}.core-equalizer i:nth-child(7){height:4px;animation-delay:.4s}
+.scene-chip { position:absolute; z-index:4; display:flex; align-items:center; gap:8px; min-height:29px; padding:0 11px; border-radius:9px; border:1px solid rgba(177,218,193,.18); color:#bbcec7; background:rgba(9,17,24,.7); box-shadow:0 10px 28px rgba(0,0,0,.22),inset 0 1px rgba(255,255,255,.055); backdrop-filter:blur(16px); font:700 8px/1 ui-monospace,monospace; letter-spacing:.12em; }
+.scene-chip-top { top:11%; right:0; animation:float-chip 6s ease-in-out infinite; }
+.scene-chip-top b { color:#caff85; font-size:8px; text-shadow:0 0 8px #caff85; }
+.chip-led { width:5px;height:5px;border-radius:50%;background:#c8ff72;box-shadow:0 0 9px #c8ff72; }
+.scene-chip-bottom { bottom:13%; left:-1%; animation:float-chip 7s ease-in-out -2s infinite; }
+.scene-chip-bottom b { color:#83e4d8; }
+.chip-glyph { color:#caff85; font-size:18px; line-height:0; }
+.scene-code { position:absolute; z-index:5; right:-3%; bottom:0; width:235px; padding:0 13px 11px; border:1px solid rgba(160,211,194,.2); border-radius:12px; color:#d7e8e3; background:linear-gradient(145deg,rgba(20,31,39,.92),rgba(9,16,24,.88)); box-shadow:0 22px 52px rgba(0,0,0,.34),0 0 35px rgba(120,226,181,.07),inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter:blur(18px); transform:translate3d(calc(var(--px)*-.65),calc(var(--py)*-.65),60px) rotateY(-8deg) rotateX(3deg); animation:code-hover 7s ease-in-out infinite; }
+.scene-code-head { display:flex; align-items:center; gap:8px; height:31px; border-bottom:1px solid rgba(169,208,192,.11); color:#8da69d; font:9px/1 ui-monospace,monospace; }
+.window-dots { display:flex; gap:4px; }.window-dots i { width:5px;height:5px;border-radius:50%;background:#e97878; }.window-dots i:nth-child(2){background:#e7bd70}.window-dots i:nth-child(3){background:#80d5a0}
+.scene-code-head b { margin-left:auto; color:#c7ff85; font-size:8px; }
+.scene-code pre { margin:10px 0 8px; padding:0; border:0; background:none; box-shadow:none; font:8.3px/1.72 ui-monospace,monospace; white-space:pre; color:#c8d9d4; }
+.scene-code pre::before,.scene-code pre::after { display:none; }
+.code-purple { color:#c6a6ff; }.code-blue { color:#8fc9ff; }.code-green { color:#a7e9b6; }.code-orange { color:#ffc58a; }.code-number { color:#f1cf7b; }
+.scene-code-foot { display:flex; justify-content:space-between; padding-top:6px; border-top:1px solid rgba(169,208,192,.09); color:#728d83; font:7px/1 ui-monospace,monospace; letter-spacing:.12em; }
+.scene-code-foot i { display:inline-block; width:5px;height:5px;margin-right:5px;border-radius:50%;background:#c8ff72;box-shadow:0 0 8px #c8ff72; }
+.scene-orbit-label { position:absolute; z-index:1; display:flex; gap:7px; align-items:center; color:rgba(179,210,193,.38); font:8px/1 ui-monospace,monospace; letter-spacing:.1em; }
+.scene-orbit-label span { color:rgba(174,221,190,.65); }
+.label-left { left:5%; top:36%; }.label-right { right:4%; top:54%; }
+#hero-particles { position:absolute; inset:0; width:100%; height:100%; opacity:.8; pointer-events:none; }
+.hero > .cards,.hero > .whatsnew { position:relative; z-index:3; }
+
+/* micro-interactions */
+#cursor-aura { position:fixed; left:0; top:0; z-index:8; width:480px; height:480px; border-radius:50%; pointer-events:none; opacity:0; transform:translate3d(-50%,-50%,0); background:radial-gradient(circle,rgba(155,255,133,.075) 0%,rgba(90,213,206,.035) 27%,transparent 66%); mix-blend-mode:screen; transition:opacity .35s; will-change:transform; }
+body.has-pointer #cursor-aura { opacity:1; }
+.card,.fact,.hero-btn,.icon-btn,.pn a { -webkit-tap-highlight-color:transparent; }
+.card,.hero-btn { transform-style:preserve-3d; }
+.sidebar-cap { margin:0 5px 24px; padding:13px 12px 14px; border:1px solid var(--border-soft); border-radius:13px; background:linear-gradient(140deg,rgba(184,255,120,.055),rgba(102,221,207,.025)); }
+.sidebar-cap-top { display:flex; align-items:center; gap:8px; color:var(--text); font-size:11px; font-weight:800; letter-spacing:.01em; }
+.sidebar-cap-mark { display:grid; place-items:center; width:23px;height:23px;border-radius:8px;color:#14200e;background:linear-gradient(135deg,#ddff9d,#75dece);font:900 8px ui-monospace,monospace; }
+.sidebar-cap small { display:block; padding-left:31px; margin-top:5px; color:var(--text-3); font:8px ui-monospace,monospace; letter-spacing:.1em; }
+
+@keyframes live-ping { 0% { transform:scale(.7); opacity:.8; } 100% { transform:scale(2.1); opacity:0; } }
+@keyframes mark-pulse { 0%,100% { opacity:.35; transform:scale(1); } 50% { opacity:.8; transform:scale(1.08); } }
+@keyframes gradient-flow { from { background-position:0% 50%; } to { background-position:100% 50%; } }
+@keyframes aura-breathe { from { transform:scale(.88); opacity:.65; } to { transform:scale(1.12); opacity:1; } }
+@keyframes orbit-spin-a { from { transform:translate3d(var(--px),var(--py),0) rotateX(67deg) rotateZ(-20deg); } to { transform:translate3d(var(--px),var(--py),0) rotateX(67deg) rotateZ(340deg); } }
+@keyframes orbit-spin-b { from { transform:translate3d(var(--px),var(--py),0) rotateX(69deg) rotateZ(54deg); } to { transform:translate3d(var(--px),var(--py),0) rotateX(69deg) rotateZ(-306deg); } }
+@keyframes orbit-float { from { transform:translate3d(var(--px),var(--py),0) rotateX(64deg) rotateZ(-8deg); } to { transform:translate3d(var(--px),var(--py),0) rotateX(64deg) rotateZ(8deg); } }
+@keyframes core-hover { 0%,100% { translate:0 0; } 50% { translate:0 -8px; } }
+@keyframes code-hover { 0%,100% { margin-bottom:0; } 50% { margin-bottom:9px; } }
+@keyframes float-chip { 0%,100% { translate:0 0; } 50% { translate:0 -8px; } }
+@keyframes eq { from { transform:scaleY(.55); opacity:.65; } to { transform:scaleY(1); opacity:1; } }
+
+@media (max-width: 1240px) {
+  .content-wrap { gap:22px; }
+  .toc { width:164px; }
+  .hero-stage { grid-template-columns:minmax(0,1fr) minmax(270px,.82fr); }
+  .hero-scene { transform:scale(.94); transform-origin:center right; }
+  .scene-code { right:-1%; }
+}
+@media (max-width: 1050px) {
+  .toc { display:none!important; }
+  .content-wrap { padding:0 28px; }
+  .content { max-width:100%; }
+  .hero-stage { grid-template-columns:minmax(0,1.05fr) minmax(260px,.95fr); }
+  .hero h1 { font-size:clamp(43px,6.2vw,64px); }
+  .scene-code { right:-2%; width:218px; }
+  .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 900px) {
+  .topbar { height:60px; }
+  .sidebar { top:0; height:100vh; padding:20px 15px 42px; background:rgba(7,10,16,.97); backdrop-filter:blur(24px); }
+  .content-wrap { padding:0 22px; }
+  .hero { padding-top:18px; }
+  .hero-stage { min-height:340px; }
+}
+@media (max-width: 680px) {
+  .brand-name { display:none; }
+  .topbar { padding:0 11px; gap:8px; }
+  .searchbox { width:auto; min-width:0; flex:1; margin-right:0; }
+  .searchbox input { font-size:12px; }
+  .content-wrap { padding:0 17px; }
+  .content { padding-top:10px; }
+  .hero-stage { grid-template-columns:1fr; gap:0; }
+  .hero-copy { padding-top:25px; padding-bottom:0; }
+  .hero-kicker { margin-bottom:17px; font-size:8px; }
+  .hero h1 { max-width:100%; font-size:clamp(41px,11vw,58px); }
+  .hero-sub { max-width:100%; font-size:13.5px; }
+  .factline { max-width:100%; }
+  .fact { font-size:9px; }
+  .hero-actions { gap:8px; }
+  .hero-btn { min-height:41px; padding:0 13px; font-size:11px; }
+  .hero-scene { height:285px; width:100%; transform:scale(.9); transform-origin:center top; margin-top:8px; margin-bottom:-16px; }
+  .scene-core { width:128px;height:128px; }
+  .scene-code { width:205px; right:0; bottom:-2px; }
+  .scene-chip-top { right:1%; top:7%; }
+  .scene-chip-bottom { left:0; bottom:9%; }
+  .cards { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:20px; }
+  .card { min-height:142px; padding:15px 13px; }
+  .card-title { font-size:12.5px; }
+  .card-sub { font-size:11px; }
+  .whatsnew { padding:16px; }
+  .page { padding:30px 0 38px; }
+  .page > h2 { font-size:24px; }
+  .page > h2 .en { display:block; margin:4px 0 0 31px; }
+  .foot { padding:22px 18px 30px; }
+  #cursor-aura { display:none; }
+}
+@media (max-width: 390px) {
+  .brand-tag { display:none; }
+  .hero h1 { font-size:39px; }
+  .hero-scene { transform:scale(.82); width:122%; margin-left:-11%; margin-bottom:-42px; }
+  .cards { grid-template-columns:1fr; }
+  .card { min-height:0; }
+}
+
+
+</style>
+
+<style id="epk-interaction-overrides">
+/* Stable editorial grid: TOC visibility must never push the document sideways. */
+@media (min-width:1240px) {
+  .content-wrap { display:grid; grid-template-columns:minmax(0,1fr) 190px; gap:34px; align-items:start; }
+  .content { width:100%; max-width:none; min-width:0; }
+  .toc { display:block!important; width:190px; min-width:190px; visibility:hidden; opacity:0; transition:opacity .32s ease; }
+  .toc.is-visible { visibility:visible; opacity:1; }
+}
+.content-wrap,.content,.page { min-width:0; }
+.page { width:100%; scroll-margin-top:88px; }
+.page:not(#intro) {
+  position:relative; margin:26px 0 34px; padding:30px clamp(18px,2.6vw,34px) 34px;
+  border:1px solid rgba(166,205,190,.13); border-radius:22px;
+  background:linear-gradient(142deg,rgba(255,255,255,.035),rgba(255,255,255,.012) 52%),rgba(12,19,27,.32);
+  box-shadow:0 18px 46px rgba(0,0,0,.10),inset 0 1px 0 rgba(255,255,255,.035);
+  overflow:hidden;
+}
+.page:not(#intro)::before { content:""; position:absolute; inset:0 auto 0 0; width:1px; background:linear-gradient(180deg,transparent,rgba(190,255,125,.48),transparent); opacity:.6; pointer-events:none; }
+.page:not(#intro) > h2 { margin-top:0; }
+.page:not(#intro) > h2::before { content:""; display:inline-block; width:7px; height:7px; margin:0 12px 4px 0; border-radius:50%; background:#c6ff87; box-shadow:0 0 13px rgba(194,255,130,.65); }
+.page:last-of-type { border-bottom:0; }
+@media (max-width:680px) { .page:not(#intro) { padding:24px 16px 26px; margin:19px 0 24px; border-radius:17px; } }
+
+/* Accordion navigation: one section group at a time, with a real height transition. */
+.sb-group { margin:0 0 10px; padding:5px; border:1px solid transparent; border-radius:14px; transition:background .32s ease,border-color .32s ease,box-shadow .32s ease; }
+.sb-group.is-open { background:linear-gradient(135deg,rgba(178,255,126,.055),rgba(93,216,203,.025)); border-color:rgba(171,235,180,.12); box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }
+.sb-group-toggle { position:relative; width:100%; display:flex; align-items:center; gap:10px; border:0; background:transparent; padding:10px 10px; border-radius:10px; color:var(--text-3); cursor:pointer; text-align:left; transition:color .28s ease,background .28s ease,transform .3s cubic-bezier(.2,.8,.2,1); }
+.sb-group-toggle:hover { color:var(--text); background:rgba(185,255,126,.055); transform:translateX(3px); }
+.sb-group-toggle:active { transform:translateX(2px) scale(.985); }
+.sb-group-title { flex:1; padding:0; font:800 9px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.17em; text-transform:uppercase; color:inherit; animation:none; }
+.sb-group-count { color:#6f9586; font:9px/1 ui-monospace,monospace; letter-spacing:.08em; opacity:.65; transition:color .25s,opacity .25s; }
+.sb-chevron { width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; transition:transform .42s cubic-bezier(.2,.8,.2,1),color .25s; }
+.sb-group.is-open .sb-chevron { transform:rotate(180deg); color:#c7ff89; }
+.sb-group.is-open .sb-group-toggle { color:#c2e4c9; }
+.sb-group.is-open .sb-group-count { color:#c7ff89; opacity:1; }
+.sb-group-links { display:grid; grid-template-rows:0fr; opacity:0; transform:translateY(-5px); transition:grid-template-rows .42s cubic-bezier(.2,.8,.2,1),opacity .28s ease,transform .36s ease; }
+.sb-group-links > * { min-height:0; overflow:hidden; }
+.sb-group.is-open .sb-group-links { grid-template-rows:1fr; opacity:1; transform:translateY(0); }
+.sb-group-links { display:block; max-height:0; overflow:hidden; transition:max-height .48s cubic-bezier(.2,.8,.2,1),opacity .28s ease,transform .36s ease; }
+.sb-group.is-open .sb-group-links { max-height:520px; }
+.sb-link { display:flex; align-items:center; gap:10px; margin:2px 0; min-height:34px; padding:7px 10px 7px 12px; font-size:12px; border-radius:9px; color:#8fa49c; opacity:.78; transform:translateX(-7px); transition:color .25s ease,background .25s ease,transform .35s cubic-bezier(.2,.8,.2,1),opacity .28s ease,box-shadow .25s ease; }
+.sb-group.is-open .sb-link { opacity:1; transform:translateX(0); transition-delay:calc(var(--i,0) * 18ms); }
+.sb-link-dot { width:4px; height:4px; border-radius:50%; flex:none; background:#567367; box-shadow:0 0 0 0 rgba(194,255,130,0); transition:background .25s,box-shadow .3s,transform .3s; }
+.sb-link:hover { color:#e7f4e9; background:rgba(174,255,122,.065); transform:translateX(4px); box-shadow:inset 0 0 0 1px rgba(176,255,132,.055); }
+.sb-link:hover .sb-link-dot { background:#baff84; box-shadow:0 0 10px rgba(195,255,131,.65); transform:scale(1.45); }
+.sb-link.active { color:#d5ffa0; background:linear-gradient(90deg,rgba(183,255,119,.12),rgba(100,216,202,.035)); box-shadow:inset 0 0 0 1px rgba(185,255,126,.1),0 4px 16px rgba(0,0,0,.09); font-weight:700; }
+.sb-link.active .sb-link-dot { background:#caff8d; box-shadow:0 0 12px rgba(198,255,132,.85); }
+.sb-link::before { display:none; }
+@media(max-width:900px) { .sb-group { margin-bottom:8px; } .sb-group-toggle { padding:11px 10px; } .sb-link { min-height:37px; font-size:13px; } }
+
+/* Stronger reveal on scroll. This also works when the OS has reduced-motion enabled. */
+@keyframes epk-reveal-up { 0% { opacity:0; transform:translate3d(0,28px,0) scale(.99); filter:blur(8px); } 100% { opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0); } }
+#content .rv:not(.in) { opacity:0; transform:translate3d(0,28px,0) scale(.99); filter:blur(8px); }
+#content .rv.in { animation:epk-reveal-up .82s cubic-bezier(.18,.72,.22,1) backwards; animation-delay:var(--d,0ms); }
+#content .page > h2.rv.in { animation-duration:.68s; }
+.page.flash { animation:epk-page-flash 1.05s ease-out; }
+@keyframes epk-page-flash { 0% { background-color:rgba(184,255,120,.075); box-shadow:0 0 0 1px rgba(190,255,125,.22),0 0 55px rgba(165,255,119,.08); } 100% { background-color:transparent; } }
+
+/* Custom feature illustrations instead of emoji. The linework animates as one object. */
+.card-ico { display:none!important; }
+.card-visual { position:relative; display:flex; align-items:center; justify-content:flex-start; height:66px; margin:0 0 10px; color:#c5ff8d; transform:translateZ(22px); }
+.card-visual::before { content:""; position:absolute; left:4px; top:5px; width:55px; height:55px; border-radius:50%; background:radial-gradient(circle,rgba(181,255,127,.14),rgba(92,215,197,.045) 55%,transparent 72%); filter:blur(5px); opacity:.65; transition:transform .55s cubic-bezier(.2,.8,.2,1),opacity .4s; }
+.card-visual svg { position:relative; width:105px; height:66px; overflow:visible; filter:drop-shadow(0 4px 12px rgba(151,255,137,.08)); transition:transform .55s cubic-bezier(.2,.8,.2,1),filter .45s; }
+.card-visual .visual-wire { stroke:rgba(146,210,184,.3); stroke-width:1.15; stroke-dasharray:4 5; transition:stroke .4s,stroke-dashoffset .7s; }
+.card-visual .visual-main { stroke:#baff87; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; fill:rgba(181,255,127,.035); transition:stroke .35s,fill .35s; }
+.card-visual .visual-line { stroke:#8ce2ce; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; transition:stroke .35s,transform .45s; transform-origin:center; }
+.card-visual .visual-node { fill:#d7ff9c; stroke:rgba(207,255,151,.3); stroke-width:4; paint-order:stroke; transition:transform .45s cubic-bezier(.2,.8,.2,1),fill .35s; transform-origin:center; }
+.card-visual .visual-spark { stroke:#a5c8ff; stroke-width:1.4; stroke-linecap:round; transition:opacity .3s,transform .45s; }
+.card:hover .card-visual svg { transform:translate3d(5px,-4px,0) scale(1.06) rotate(-2deg); filter:drop-shadow(0 7px 20px rgba(177,255,128,.23)); }
+.card:hover .card-visual::before { transform:scale(1.35) translate(5px,-2px); opacity:1; }
+.card:hover .visual-wire { stroke:rgba(166,246,190,.62); stroke-dashoffset:-18; }
+.card:hover .visual-main { stroke:#e0ffac; fill:rgba(181,255,127,.10); }
+.card:hover .visual-line { stroke:#c6fff0; transform:translateY(-1px); }
+.card:hover .visual-node { transform:scale(1.35); fill:#f0ffbe; }
+.card:hover .visual-spark { opacity:1; transform:translate(2px,-3px); }
+.card { transition:transform .48s cubic-bezier(.18,.72,.22,1),border-color .35s,box-shadow .45s,background .4s; }
+.card:hover { transform:translateY(-7px); }
+.card-title,.card-sub { position:relative; z-index:1; }
+.card-title { transition:color .3s,transform .4s cubic-bezier(.2,.8,.2,1); }
+.card-sub { transition:color .3s,transform .4s cubic-bezier(.2,.8,.2,1); }
+.card:hover .card-title { color:#efffdc; transform:translateX(2px); }
+.card:hover .card-sub { color:#bbcec3; transform:translateX(2px); }
+
+/* Cursor light + magnetic micro-interaction. */
+#cursor-aura { width:390px; height:390px; background:radial-gradient(circle,rgba(190,255,130,.12) 0%,rgba(96,227,207,.075) 24%,rgba(91,147,255,.025) 46%,transparent 70%); mix-blend-mode:screen; z-index:100; }
+body.has-pointer #cursor-aura { opacity:1; }
+.cursor-core { position:fixed; z-index:101; left:0; top:0; width:7px; height:7px; border-radius:50%; background:#d9ff9c; box-shadow:0 0 12px rgba(199,255,134,.85),0 0 30px rgba(130,238,198,.32); pointer-events:none; opacity:0; transform:translate3d(-50%,-50%,0); transition:opacity .25s,transform .16s ease,width .25s,height .25s; }
+body.has-pointer .cursor-core { opacity:1; }
+body.cursor-over .cursor-core { width:12px; height:12px; }
+.card,.hero-btn,.icon-btn,.copy-btn,.sb-group-toggle,.sb-link,.pn a,.fact { -webkit-tap-highlight-color:transparent; }
+.icon-btn,.hero-btn,.copy-btn,.sb-group-toggle,.pn a { transition:transform .36s cubic-bezier(.18,.72,.22,1),background .3s,border-color .3s,color .3s,box-shadow .35s; }
+.icon-btn:hover,.hero-btn:hover,.pn a:hover { transform:translateY(-3px) scale(1.025); box-shadow:0 9px 25px rgba(164,255,130,.10); }
+.icon-btn:active,.hero-btn:active,.copy-btn:active,.sb-group-toggle:active,.pn a:active { transform:translateY(0) scale(.96); }
+.hero-btn span { display:inline-block; transition:transform .38s cubic-bezier(.2,.8,.2,1); }
+.hero-btn:hover span { transform:translate(3px,-3px); }
+.fact:hover { transform:translateY(-3px) scale(1.025); box-shadow:0 8px 20px rgba(160,255,130,.07); }
+
+/* Code editor chrome and compact icon-only copy control. */
+pre.code { position:relative; padding:48px 18px 18px; overflow:auto; }
+pre.code::after { content:"JAVASCRIPT  /  SOURCE"; left:65px; right:auto; top:15px; color:#6d8d82; font-size:8px; letter-spacing:.16em; }
+.copy-btn { position:absolute; top:7px; right:10px; z-index:7; display:grid; place-items:center; width:30px; height:28px; padding:0; opacity:.8; border:1px solid rgba(155,218,179,.17); border-radius:8px; background:rgba(19,32,29,.92); color:#9fbeb0; cursor:pointer; }
+.copy-btn svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; transition:transform .3s cubic-bezier(.2,.8,.2,1),opacity .25s; }
+.copy-btn .copied-icon { display:none; }
+.copy-btn:hover { opacity:1; color:#d9ff9c; border-color:rgba(198,255,137,.48); transform:translateY(-2px) scale(1.06); box-shadow:0 5px 18px rgba(167,255,132,.13); }
+.copy-btn.done { color:#cfff91; opacity:1; border-color:rgba(198,255,137,.45); animation:copy-confirm .42s cubic-bezier(.2,.8,.2,1); }
+.copy-btn.done .copy-icon { display:none; }
+.copy-btn.done .copied-icon { display:block; animation:copy-check .38s cubic-bezier(.2,.8,.2,1); }
+@keyframes copy-confirm { 0% { transform:scale(.88); } 55% { transform:scale(1.12); } 100% { transform:scale(1); } }
+@keyframes copy-check { from { transform:scale(.5) rotate(-25deg); opacity:0; } to { transform:scale(1) rotate(0); opacity:1; } }
+pre.code code { color:#d5e4dc; }
+.tok-comment { color:#6f8d82; font-style:italic; }
+.tok-string { color:#b7e49b; }
+.tok-number { color:#e8bd83; }
+.tok-literal { color:#c4a7ff; }
+.tok-keyword { color:#d49bff; }
+.tok-function { color:#82d7e8; }
+.tok-type { color:#e6cf8e; }
+.tok-property { color:#91c9d5; }
+.tok-ident { color:#d5e4dc; }
+
+/* Scroll progress is a luminous hairline, not a hard jump. */
+#progress { height:3px; background:linear-gradient(90deg,#9be77b,#6ee4cc,#9d9aff); box-shadow:0 0 12px rgba(153,255,143,.42); }
+@media(max-width:1050px) { .card { min-height:155px; } }
+@media(max-width:680px) { .card-visual { height:58px; } .card-visual svg { height:58px; } pre.code::after { left:61px; font-size:7px; } .copy-btn { right:8px; } }
+html { scroll-behavior:auto !important; }
+
+
+/* v3 refinements: compact Android surfaces table, reversible scroll choreography,
+   and a cursor follower driven only by the JS spring (no transform transition fight). */
+#android-only .tbl-wrap { overflow-x:hidden; }
+#android-only .android-surface-table {
+  width:100%;
+  table-layout:fixed;
+}
+#android-only .android-surface-table th:first-child { width:36%; white-space:normal; }
+#android-only .android-surface-table td:first-child {
+  width:36%; min-width:0; white-space:normal; overflow-wrap:anywhere; word-break:normal;
+}
+#android-only .android-surface-table td:first-child code,
+#android-only .android-surface-table td:nth-child(2) code {
+  white-space:normal; overflow-wrap:anywhere; word-break:break-word;
+}
+#android-only .android-surface-table td { min-width:0; overflow-wrap:anywhere; }
+#android-only .android-surface-table .tbl th,
+#android-only .android-surface-table th { white-space:normal; }
+@media (max-width:680px) {
+  #android-only .android-surface-table { font-size:11px; line-height:1.5; }
+  #android-only .android-surface-table th,
+  #android-only .android-surface-table td { padding:8px 8px; }
+  #android-only .android-surface-table td:first-child { width:38%; }
+}
+
+@media (prefers-reduced-motion:no-preference) {
+  #content .rv {
+    animation:none!important;
+    animation-delay:0ms!important;
+    opacity:0;
+    transform:translate3d(0,28px,0) scale(.99);
+    filter:blur(8px);
+    transition:opacity .72s cubic-bezier(.18,.72,.22,1),
+               transform .82s cubic-bezier(.18,.72,.22,1),
+               filter .72s cubic-bezier(.18,.72,.22,1);
+    transition-delay:0ms;
+    will-change:opacity,transform,filter;
+  }
+  #content .rv.in {
+    opacity:1;
+    transform:translate3d(0,0,0) scale(1);
+    filter:blur(0);
+    transition-delay:var(--d,0ms);
+  }
+  #content .rv.out { opacity:0; filter:blur(8px); transition-delay:0ms; }
+  body.scroll-down #content .rv.out { transform:translate3d(0,-28px,0) scale(.99); }
+  body.scroll-up #content .rv:not(.in):not(.out) { transform:translate3d(0,-28px,0) scale(.99); }
+  body.scroll-up #content .rv.out { transform:translate3d(0,28px,0) scale(.99); }
+  #content .rv.in .tag-new { animation:newpulse .75s var(--e-io) .18s backwards; }
+}
+@media (prefers-reduced-motion:reduce) {
+  #content .rv, #content .rv.in, #content .rv.out {
+    opacity:1!important; transform:none!important; filter:none!important;
+    transition:none!important; animation:none!important;
+  }
+}
+.cursor-core {
+  transition:opacity .25s,width .25s,height .25s!important;
+  will-change:transform;
+}
+
+
+
+
+/* v5: touch-first layout, reliable mobile controls, mobile search panel, and repeatable two-way reveals. */
+@media (max-width: 680px) {
+  .topbar {
+    position: sticky; top: 0; z-index: 130;
+    height: calc(62px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 10px 0;
+    gap: 8px;
+    background: rgba(7,12,18,.9);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+  }
+  .brand { flex: 0 0 32px; width:32px; min-width:32px; gap:0; }
+  .brand-name,.brand-tag { display:none!important; }
+  .brand-mark { width:32px; height:32px; border-radius:11px; }
+  #burger,.topbar > .icon-btn { display:inline-flex; flex:0 0 42px; width:42px; height:42px; min-width:42px; border-radius:13px; }
+  #burger svg,.topbar > .icon-btn svg { width:19px; height:19px; }
+  .searchbox { position:relative; flex:1 1 auto; width:auto; min-width:0; margin:0; }
+  .searchbox input { width:100%; height:42px; min-width:0; padding:0 10px 0 35px; border-radius:13px; font-size:12px; }
+  .searchbox .search-ico { left:11px; top:13px; }
+  .searchbox kbd { display:none; }
+  .search-results {
+    position:fixed; top:calc(70px + env(safe-area-inset-top)); left:9px; right:9px;
+    width:auto; max-height:min(66dvh,580px); overflow-x:hidden; overflow-y:auto;
+    z-index:150; padding:8px; border-radius:18px;
+    background:rgba(9,16,24,.97); border:1px solid rgba(172,220,193,.2);
+    box-shadow:0 22px 70px rgba(0,0,0,.55),0 0 28px rgba(173,255,124,.07);
+    -webkit-overflow-scrolling:touch; overscroll-behavior:contain; touch-action:pan-y;
+  }
+  .search-results.open { display:block; }
+  .sr-item { display:block; width:100%; padding:12px 11px; border-radius:12px; white-space:normal; }
+  .sr-title { font-size:13px; line-height:1.45; }
+  .sr-snip { font-size:11.5px; line-height:1.5; overflow-wrap:anywhere; }
+  .sr-empty { padding:18px 13px; font-size:12px; }
+  .sr-hint { position:sticky; bottom:-8px; margin:5px -8px -8px; padding:10px 13px; background:rgba(9,16,24,.98); }
+
+  .sb-backdrop { inset:calc(62px + env(safe-area-inset-top)) 0 0; z-index:110; background:rgba(1,5,9,.62); backdrop-filter:blur(5px); }
+  .sidebar {
+    position:fixed; left:0; top:calc(62px + env(safe-area-inset-top)); bottom:0;
+    width:min(88vw,340px); height:calc(100dvh - 62px - env(safe-area-inset-top));
+    z-index:120; padding:17px 14px max(32px,env(safe-area-inset-bottom));
+    border:1px solid rgba(172,220,193,.14); border-left:0; border-radius:0 20px 0 0;
+    background:rgba(7,12,18,.985); backdrop-filter:blur(28px); -webkit-backdrop-filter:blur(28px);
+    transform:translate3d(-105%,0,0); transition:transform .48s cubic-bezier(.18,.78,.2,1),box-shadow .35s;
+    overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+  }
+  body.nav-open .sidebar { transform:translate3d(0,0,0); box-shadow:18px 0 60px rgba(0,0,0,.38),0 0 35px rgba(177,255,123,.05); }
+  .sidebar-cap { margin-bottom:17px; padding:14px; border-radius:15px; }
+  .sb-group { margin-bottom:7px; }
+  .sb-group-toggle { min-height:45px; padding:12px 11px; }
+  .sb-link { min-height:42px; padding:10px 12px; font-size:13px; }
+  .content-wrap { display:block; padding:0 15px; }
+  .content { width:100%; padding:9px 0 62px; }
+  .hero { padding:14px 0 10px; }
+  .hero-stage { min-height:0; grid-template-columns:minmax(0,1fr); gap:0; }
+  .hero-copy { padding:26px 3px 0; }
+  .hero-kicker { font-size:8px; letter-spacing:.12em; }
+  .hero h1 { font-size:clamp(39px,10vw,54px); line-height:1.02; letter-spacing:-.07em; }
+  .hero-sub { font-size:14px; line-height:1.72; }
+  .factline { display:flex; gap:7px; }
+  .fact { min-height:30px; display:inline-flex; align-items:center; font-size:9px; padding:7px 9px; }
+  .hero-actions { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+  .hero-btn { min-width:0; min-height:46px; padding:0 10px; gap:7px; font-size:11px; border-radius:13px; }
+  .hero-btn-secondary { justify-content:center; }
+  .hero-scene { height:276px; width:100%; margin:12px 0 -4px; transform:scale(.88); transform-origin:center center; }
+  .scene-code { width:194px; right:0; bottom:-2px; }
+  .scene-chip { font-size:7px; }
+  .cards { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:19px; }
+  .card { min-height:153px; padding:14px 12px 13px; border-radius:16px; }
+  .card-visual { height:58px; margin-bottom:8px; }
+  .card-visual svg { height:58px; }
+  .card-title { font-size:12.5px; line-height:1.35; }
+  .card-sub { font-size:10.8px; line-height:1.5; }
+  .whatsnew { padding:17px 15px; border-radius:16px; }
+  .page:not(#intro) { margin:16px 0 21px; padding:23px 14px 24px; border-radius:17px; }
+  .page > h2 { font-size:23px; line-height:1.25; overflow-wrap:anywhere; }
+  .page h3 { font-size:17px; line-height:1.35; }
+  .page p,.page li { font-size:13.5px; line-height:1.72; }
+  .tbl-wrap { max-width:100%; }
+  table.tbl { font-size:11px; }
+  .tbl th,.tbl td { padding:8px 9px; }
+  pre.code { max-width:100%; font-size:11px; padding:44px 12px 14px; border-radius:14px; }
+  pre.code code { font-size:11px; line-height:1.65; }
+  .copy-btn { width:34px; height:32px; top:7px; right:8px; }
+  .foot { padding:22px 15px max(26px,env(safe-area-inset-bottom)); }
+  #cursor-aura,.cursor-core { display:none!important; }
+}
+
+@media (max-width: 390px) {
+  .topbar { gap:6px; padding-left:8px; padding-right:8px; }
+  #burger,.topbar > .icon-btn { flex-basis:39px; width:39px; min-width:39px; height:39px; }
+  .brand { flex-basis:29px; width:29px; min-width:29px; }
+  .brand-mark { width:29px; height:29px; }
+  .searchbox input { font-size:11px; }
+  .hero-scene { transform:scale(.82); width:110%; margin-left:-5%; }
+  .cards { gap:8px; }
+  .card { padding:12px 10px; }
+}
+
+/* A visible, tactile response on touch devices where hover and cursor-follow cannot exist. */
+@media (hover:none) and (pointer:coarse) and (prefers-reduced-motion:no-preference) {
+  .card { animation:mobile-card-glow 7s ease-in-out infinite; }
+  .card:nth-child(2) { animation-delay:-1.7s; }
+  .card:nth-child(3) { animation-delay:-3.4s; }
+  .card:nth-child(4) { animation-delay:-5.1s; }
+  .card:active { transform:scale(.975); border-color:rgba(194,255,130,.48); box-shadow:0 0 0 3px rgba(190,255,120,.09),0 12px 28px rgba(0,0,0,.24); }
+  .hero-btn:active,.icon-btn:active,.sb-group-toggle:active { filter:brightness(1.16); }
+  .card:active .card-visual svg { transform:scale(1.08) translateY(-3px); }
+}
+@keyframes mobile-card-glow {
+  0%,100% { box-shadow:inset 0 1px 0 rgba(255,255,255,.045),0 10px 26px rgba(0,0,0,.13); }
+  50% { box-shadow:inset 0 1px 0 rgba(255,255,255,.065),0 12px 32px rgba(0,0,0,.16),0 0 22px rgba(164,255,125,.055); }
+}
+.touch-ripple { position:fixed; z-index:140; width:20px; height:20px; margin:-10px 0 0 -10px; border-radius:50%; pointer-events:none; border:1px solid rgba(211,255,166,.62); background:radial-gradient(circle,rgba(196,255,151,.26),rgba(123,231,211,.08) 48%,transparent 72%); box-shadow:0 0 22px rgba(182,255,135,.22); animation:touch-burst .72s cubic-bezier(.15,.7,.25,1) forwards; }
+@keyframes touch-burst { 0% { opacity:.85; transform:scale(.35); } 55% { opacity:.55; } 100% { opacity:0; transform:scale(5.5); } }
+
+/* Fully legible light theme on phones and tablets, including components with glass surfaces. */
+:root[data-theme="light"] body { background:#f4f7f1; color:#24352e; }
+:root[data-theme="light"] body::before { opacity:.38; }
+:root[data-theme="light"] .topbar { background:rgba(247,250,244,.92); border-color:#dce7dd; box-shadow:0 8px 32px rgba(34,62,45,.07); }
+:root[data-theme="light"] .icon-btn { background:rgba(255,255,255,.75); border-color:#d8e4d9; color:#536d5e; }
+:root[data-theme="light"] .searchbox input { background:rgba(255,255,255,.8); color:#263b30; border-color:#d9e5d9; }
+:root[data-theme="light"] .searchbox input::placeholder { color:#82948a; }
+:root[data-theme="light"] .sidebar { background:rgba(246,250,244,.99); border-color:#dbe6dc; }
+:root[data-theme="light"] .sidebar-cap { background:linear-gradient(140deg,rgba(126,183,103,.11),rgba(91,177,164,.07)); border-color:#d8e6d8; }
+:root[data-theme="light"] .sidebar-cap-top { color:#273b30; }
+:root[data-theme="light"] .sb-group.is-open { background:linear-gradient(135deg,rgba(115,178,91,.09),rgba(93,180,167,.06)); border-color:#dbe7d9; }
+:root[data-theme="light"] .sb-group-toggle { color:#708477; }
+:root[data-theme="light"] .sb-group.is-open .sb-group-toggle { color:#405c48; }
+:root[data-theme="light"] .sb-link { color:#61766a; }
+:root[data-theme="light"] .sb-link.active { color:#426d34; background:linear-gradient(90deg,rgba(130,190,93,.16),rgba(100,190,172,.06)); }
+:root[data-theme="light"] .search-results { background:rgba(250,253,248,.98); border-color:#d6e2d7; box-shadow:0 22px 60px rgba(39,64,46,.18); }
+:root[data-theme="light"] .sr-item { color:#263b30; }
+:root[data-theme="light"] .sr-item:hover,:root[data-theme="light"] .sr-item.sel { background:rgba(130,190,93,.13); }
+:root[data-theme="light"] .sr-snip { color:#5f7467; }
+:root[data-theme="light"] .sr-hint { color:#829388; background:rgba(250,253,248,.98); border-color:#e0e9e0; }
+:root[data-theme="light"] .page:not(#intro) { background:linear-gradient(142deg,rgba(255,255,255,.92),rgba(255,255,255,.66)),#f9fcf7; border-color:#dfe9df; box-shadow:0 16px 42px rgba(43,67,48,.07),inset 0 1px 0 rgba(255,255,255,.95); }
+:root[data-theme="light"] .page p,:root[data-theme="light"] .page li { color:#263b30; }
+:root[data-theme="light"] .hero-sub { color:#5b7065; }
+:root[data-theme="light"] .fact { color:#536a5d; background:rgba(255,255,255,.72); border-color:#dce7dc; }
+:root[data-theme="light"] .fact b { color:#527c37; }
+:root[data-theme="light"] .card { background:linear-gradient(145deg,rgba(255,255,255,.96),rgba(246,251,245,.92)); border-color:#dce8dc; box-shadow:inset 0 1px 0 #fff,0 10px 28px rgba(40,66,47,.07); }
+:root[data-theme="light"] .card-title { color:#263b30; }
+:root[data-theme="light"] .card-sub { color:#667b6f; }
+:root[data-theme="light"] .whatsnew { background:linear-gradient(115deg,rgba(170,221,125,.16),rgba(126,212,198,.10) 55%,rgba(155,153,240,.07)); border-color:#d7e7d2; }
+:root[data-theme="light"] .whatsnew li { color:#5c7064; }
+:root[data-theme="light"] .pn a { background:rgba(255,255,255,.8); border-color:#dce7dc; color:#536a5d; }
+:root[data-theme="light"] .pn a span { color:#263b30; }
+:root[data-theme="light"] .foot { color:#73877a; border-color:#e0e9df; }
+:root[data-theme="light"] .sb-backdrop { background:rgba(27,45,32,.25); }
+:root[data-theme="light"] .sr-empty { color:#657a6d; }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Every element enters and exits the reveal zone. The state is recalculated on every scroll frame. */
+  html body #content .rv {
+    opacity:0!important;
+    transform:translate3d(0,28px,0) scale(.99)!important;
+    filter:blur(9px)!important;
+    animation:none!important;
+    transition:opacity .62s cubic-bezier(.18,.72,.22,1),transform .72s cubic-bezier(.18,.72,.22,1),filter .62s cubic-bezier(.18,.72,.22,1)!important;
+    transition-delay:0ms!important;
+    will-change:opacity,transform,filter;
+  }
+  html body #content .rv[data-reveal-side="above"]:not(.in) { transform:translate3d(0,-28px,0) scale(.99)!important; }
+  html body #content .rv[data-reveal-side="below"]:not(.in) { transform:translate3d(0,28px,0) scale(.99)!important; }
+  html body #content .rv.in {
+    opacity:1!important; transform:translate3d(0,0,0) scale(1)!important; filter:blur(0)!important;
+    transition-delay:var(--d,0ms)!important;
+  }
+  html body #content .rv.out { opacity:0!important; filter:blur(9px)!important; transition-delay:0ms!important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html body #content .rv,html body #content .rv.in,html body #content .rv.out { opacity:1!important; transform:none!important; filter:none!important; transition:none!important; animation:none!important; }
+}
+
+</style>
+
+
+<style id="epk-v5-mobile-fix">
+@media (max-width:680px) {
+  /* A fixed mobile header prevents the browser from yanking the document when the search field receives focus. */
+  .topbar { position:fixed!important; top:0; left:0; right:0; }
+  .layout { padding-top:calc(62px + env(safe-area-inset-top)); }
+  #progress { z-index:145; }
+}
+@media (max-width:390px) {
+  .cards { grid-template-columns:repeat(2,minmax(0,1fr))!important; }
+}
+</style>
+
+
+<style id="epk-v5-search-polish">
+.search-results { isolation:isolate; }
+.sr-meta { position:sticky; top:-8px; z-index:2; display:flex; justify-content:space-between; align-items:center; padding:8px 10px 10px; margin:-2px 0 4px; color:#708a7c; background:rgba(9,16,24,.985); border-bottom:1px solid rgba(156,204,174,.13); font:800 9px/1 ui-monospace,monospace; letter-spacing:.14em; }
+.sr-meta span { color:#c7ff88; letter-spacing:.04em; }
+:root[data-theme="light"] .sr-meta { color:#718778; background:#fbfdf9; border-color:#e1eae1; }
+:root[data-theme="light"] .sr-meta span { color:#57823c; }
+@media(max-width:680px) {
+  .search-results { background:rgba(9,16,24,.995); }
+  :root[data-theme="light"] .search-results { background:#fbfdf9; }
+  .sr-hint { background:rgba(9,16,24,.995); }
+  :root[data-theme="light"] .sr-hint { background:#fbfdf9; }
+}
+</style>
+
+
+<style id="epk-v5-tablet-shell">
+@media (max-width:900px) {
+  .topbar {
+    position:fixed!important; top:0; left:0; right:0; z-index:130;
+    height:calc(62px + env(safe-area-inset-top));
+    padding:env(safe-area-inset-top) 10px 0;
+  }
+  .layout { padding-top:calc(62px + env(safe-area-inset-top)); }
+  #burger,.topbar > .icon-btn { flex:0 0 42px; width:42px; min-width:42px; height:42px; }
+  .sidebar {
+    position:fixed; left:0; top:calc(62px + env(safe-area-inset-top)); bottom:0;
+    width:min(84vw,340px); height:calc(100dvh - 62px - env(safe-area-inset-top));
+    z-index:120; transform:translate3d(-105%,0,0);
+    border-radius:0 20px 0 0; overflow-y:auto; overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+  body.nav-open .sidebar { transform:translate3d(0,0,0); }
+  .sb-backdrop { inset:calc(62px + env(safe-area-inset-top)) 0 0; z-index:110; }
+  .search-results {
+    position:fixed; top:calc(70px + env(safe-area-inset-top)); left:9px; right:9px;
+    width:auto; max-height:min(62dvh,560px); z-index:150;
+    overflow-x:hidden; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    overscroll-behavior:contain; touch-action:pan-y;
+  }
+  .search-results.open { display:block; }
+  #progress { z-index:145; }
+}
+</style>
+
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+</svg>
+
+<header class="topbar">
+  <button class="icon-btn" id="burger" aria-label="Меню"><svg width="19" height="19"><use href="#i-menu"/></svg></button>
+  <div class="brand">
+    <span class="brand-mark">EPK</span>
+    <span class="brand-name">ExteraPluginKit</span>
+    <span class="brand-tag">iOS · JS</span>
+  </div>
+  <div class="topbar-spacer"></div>
+  <div class="searchbox">
+    <svg class="search-ico" width="15" height="15"><use href="#i-search"/></svg>
+    <input id="q" type="text" placeholder="Поиск по документации…" autocomplete="off" autocapitalize="off" enterkeyhint="search" spellcheck="false">
+    <kbd>Ctrl K</kbd>
+    <div class="search-results" id="q-results" role="listbox"></div>
+  </div>
+  <button class="icon-btn" id="theme-btn" aria-label="Переключить тему"><svg width="18" height="18"><use href="#i-sun" id="theme-ico-use"/></svg></button>
+</header>
+
+<div class="sb-backdrop" id="sb-backdrop"></div>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar" aria-label="Разделы"></nav>
+
+  <div class="content-wrap">
+    <main class="content" id="content">
+
+<section class="page" id="intro" data-group="Начало работы" data-title="Введение">
+  <div class="hero">
+    <div class="hero-deco" aria-hidden="true">
+      <div class="hero-grid"></div><div class="aura aura-1"></div><div class="aura aura-2"></div>
+      <canvas id="hero-particles"></canvas>
+    </div>
+    <div class="hero-stage">
+      <div class="hero-copy">
+        <div class="hero-kicker"><span class="live-dot"></span><span>DEVELOPER DOCUMENTATION</span><i></i><b>API 1.4.5.0</b></div>
+        <h1>Плагины для <span class="accent">exteraiOS</span></h1>
+        <p class="hero-sub">Документация плагинного API клиента tg-ipa. Плагины пишутся на JavaScript
+        и исполняются на JavaScriptCore; имена и форма вызовов повторяют SDK exteraGram для Android,
+        поэтому готовые плагины портируются с минимальными правками.</p>
+        <div class="factline">
+          <span class="fact">API <b>1.4.5.0</b></span>
+          <span class="fact">приложение <b>≥ 13.1.1</b></span>
+          <span class="fact">рантайм <b>JavaScriptCore</b></span>
+          <span class="fact">SDK exteraGram <b>1.4.4.3</b></span>
+        </div>
+        <div class="hero-actions">
+          <a class="hero-btn hero-btn-primary" href="#plugin-file">Начать разработку <span>↗</span></a>
+          <a class="hero-btn hero-btn-secondary" href="#hooks"><span class="play-mark" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="m7 5-5 5 5 5M13 5l5 5-5 5M11 3 9 17" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Изучить API</span></a>
+        </div>
+      </div>
+      <div class="hero-scene" aria-hidden="true">
+        <div class="scene-aura"></div>
+        <div class="scene-orbit scene-orbit-a"><span class="orbit-node node-a"></span><span class="orbit-node node-b"></span></div>
+        <div class="scene-orbit scene-orbit-b"><span class="orbit-node node-c"></span></div>
+        <div class="scene-orbit scene-orbit-c"></div>
+        <div class="scene-core"><div class="core-inner"><span class="core-overline">PLUGIN RUNTIME</span><strong>EPK<span>.</span></strong><span class="core-caption">JAVASCRIPT CORE</span><div class="core-equalizer"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div>
+        <div class="scene-chip scene-chip-top"><span class="chip-led"></span><span>RUNTIME ONLINE</span><b>●</b></div>
+        <div class="scene-chip scene-chip-bottom"><span class="chip-glyph">⌁</span><span>HOOKS <b>·</b> BRIDGE <b>·</b> UI</span></div>
+        <div class="scene-code">
+          <div class="scene-code-head"><div class="window-dots"><i></i><i></i><i></i></div><span>plugin.js</span><b>JS</b></div>
+          <pre><span class="code-purple">class</span> <span class="code-blue">Plugin</span> <span class="code-purple">extends</span> BasePlugin {
+  <span class="code-blue">on_plugin_load</span>() {
+    <span class="code-purple">this</span>.add_hook(
+      <span class="code-green">"messages.setTyping"</span>,
+      <span class="code-orange">false</span>, <span class="code-number">10</span>
+    );
+  }
+}</pre>
+          <div class="scene-code-foot"><span><i></i> READY TO BUILD</span><span>UTF-8</span></div>
+        </div>
+        <div class="scene-orbit-label label-left">01 <span>INTERCEPT</span></div>
+        <div class="scene-orbit-label label-right">02 <span>EXTEND</span></div>
+      </div>
+    </div>
+    <div class="cards">
+      <a class="card" href="#plugin-file">
+        <div class="card-visual visual-plugin" aria-hidden="true"><svg viewBox="0 0 120 78" fill="none"><path class="visual-wire" d="M60 8 91 25v29L60 71 29 54V25L60 8Z"/><path class="visual-main" d="m60 18 21 12v19L60 61 39 49V30l21-12Z"/><path class="visual-line" d="m39 30 21 12 21-12M60 42v19"/><circle class="visual-node" cx="60" cy="8" r="3"/><circle class="visual-node" cx="91" cy="25" r="3"/><circle class="visual-node" cx="29" cy="25" r="3"/><path class="visual-spark" d="M99 11v9m-4.5-4.5h9M19 52v7m-3.5-3.5h7"/></svg></div>
+        <div class="card-title">Первый плагин</div><div class="card-sub">Один файл, метаданные, класс BasePlugin — за пять минут.</div>
+      </a>
+      <a class="card" href="#hooks">
+        <div class="card-visual visual-hooks" aria-hidden="true"><svg viewBox="0 0 120 78" fill="none"><path class="visual-wire" d="M20 39h25m30 0h25M45 39c0-17 30-17 30 0s-30 17-30 0Z"/><path class="visual-main" d="M48 39c0-13 24-13 24 0s-24 13-24 0Z"/><circle class="visual-node" cx="20" cy="39" r="5"/><circle class="visual-node" cx="100" cy="39" r="5"/><circle class="visual-node" cx="60" cy="12" r="4"/><circle class="visual-node" cx="60" cy="66" r="4"/><path class="visual-line" d="M60 16v10m0 26v10M45 39H25m50 0h20"/><path class="visual-spark" d="m89 15 3 3 6-7M20 15l2 2 4-5"/></svg></div>
+        <div class="card-title">Хуки</div><div class="card-sub">Перехват запросов, апдейтов и исходящих сообщений.</div>
+      </a>
+      <a class="card" href="#sending">
+        <div class="card-visual visual-send" aria-hidden="true"><svg viewBox="0 0 120 78" fill="none"><path class="visual-wire" d="M17 58 103 17 78 66 59 45 17 58Z"/><path class="visual-main" d="m17 58 86-41-44 28-42 13Z"/><path class="visual-line" d="m59 45 19 21 8-36"/><path class="visual-spark" d="M24 19h22M24 26h14M88 9h13m-6-6v13"/><circle class="visual-node" cx="103" cy="17" r="3"/></svg></div>
+        <div class="card-title">Отправка сообщений</div><div class="card-sub">Текст, медиа, отложенные, редактирование с заменой медиа.</div>
+      </a>
+      <a class="card" href="#porting">
+        <div class="card-visual visual-port" aria-hidden="true"><svg viewBox="0 0 120 78" fill="none"><rect class="visual-wire" x="25" y="14" width="48" height="48" rx="9"/><rect class="visual-main" x="47" y="21" width="48" height="43" rx="8"/><path class="visual-line" d="M59 35h24M59 43h17M59 51h11"/><path class="visual-spark" d="M18 27h10m-5-5v10m73-18h13m-6.5-6.5v13"/><path class="visual-wire" d="m36 38 8 8-8 8"/></svg></div>
+        <div class="card-title">Портирование с Android</div><div class="card-sub">Чеклист переноса плагина с exteraGram для Android.</div>
+      </a>
+    </div>
+    <div class="whatsnew">
+      <h3>Что нового в этой версии API</h3>
+      <ul>
+        <li><b><a href="#hooks">Приоритеты хуков</a></b> — третий аргумент <code>add_hook</code> и <code>add_on_send_message_hook</code> доходит до хоста и задаёт порядок в цепочке.</li>
+        <li><b><a href="#swizzling">Свизлинг в полной форме Xposed</a></b> — наборы <code>HookFilter</code> для before/after, <code>MethodReplacement</code>, снятие хука через <code>unhook_method</code>.</li>
+        <li><b><a href="#sending">Опции отправки</a></b> — <code>scheduleDate</code> (отложенные), спойлер на медиа, замена медиа при <code>edit_message</code>; честные отказы для <code>ttl</code>.</li>
+        <li><b><a href="#appearance">themeColors</a></b> — чтение цветов темы: читаемые имена слотов и Android-ключи <code>key_chat_*</code>.</li>
+        <li><b><a href="#logging">Структурированный логгер</a></b> — <code>this.logger</code> с уровнями, <code>dump</code>, <code>timed</code>, <code>child</code>, обработчиками записей.</li>
+        <li><b><a href="#android-only">Подмножество MVEL в условиях</a></b> — <code>contains</code>, <code>isdef</code>/<code>undef</code> в строках-условиях пунктов меню и <code>HookFilter.Condition</code>.</li>
+        <li><b>Мост</b> — приоритеты в сигнатурах <code>addHook</code>/<code>addOnSendMessageHook</code>, новый <code>removeSwizzle</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Как это устроено</h3>
+  <p>Рантайм — JavaScriptCore, а не Python 3.11 с Chaquopy, как в SDK для Android. Форма вызовов
+  сохранена: то же имя метода, те же поля, тот же ответ. Отличается механика underneath, и там,
+  где у iOS нет эквивалента, вызов не делает вид, что сработал, — он записывает в лог отказ
+  с причиной. Например, <code>get_private_field</code> по имени Swift-свойства без <code>@objc</code>
+  вернёт <code>null</code> и объяснит почему. Это сквозной принцип всего API: <b>реальное — работает,
+  невозможное — отказывается вслух</b>.</p>
+  <p>Значение <code>__sdk_version__</code> плагина сравнивается с версией поверхности API этого
+  рантайма — сейчас это <b>1.4.5.0</b>. Базовая версия приложения — <b>13.1.1</b>; свой минимум
+  плагин объявляет через <code>__app_version__</code>.</p>
+
+  <h3>Как читать документацию</h3>
+  <ul>
+    <li>Разделы слева сгруппированы по смыслу: от «Начала работы» к «Портированию с Android».</li>
+    <li>Пометка <span class="tag-new">новое</span> стоит у возможностей, добавленных последним
+    обновлением рантайма.</li>
+    <li>Плашки «Граница платформы» (лавандовая метка) — что отказывается и почему,
+    а не «может сломаться».</li>
+    <li>У каждого блока кода есть кнопка копирования; поиск по всей документации открывается
+    по <b>Ctrl K</b> (или <b>/</b>).</li>
+    <li>Готовые примеры лежат в репозитории в <code>submodules/ExteraPluginKit/js/</code> —
+    это рабочие плагины, против которых прогоняются тесты.</li>
+  </ul>
+</section>
+
+<section class="page" id="plugin-file" data-group="Начало работы" data-title="Формат плагина">
+  <h2>Формат плагина <span class="en">Plugin file</span></h2>
+  <p class="lead">Один UTF-8 текстовый файл до 4 МБ, открываемый из чата и устанавливаемый там же.</p>
+
+  <p>Файл обязан содержать две вещи:</p>
+  <ol>
+    <li><b>Метаданные — обычные константы верхнего уровня.</b> Загрузчик читает их из текста
+    <em>до</em> вычисления, поэтому это должны быть литеральные присваивания, а не вычисленные
+    значения.</li>
+    <li><b>Один класс, расширяющий <code>BasePlugin</code></b>, под именем <code>Plugin</code>
+    (либо переданный в <code>__extera.register</code>).</li>
+  </ol>
+
+<pre class="code"><code>var __id__ = "hello_world";
+var __name__ = "Hello World";
+var __description__ = "Мой первый плагин";
+var __author__ = "@yourUsername";
+var __version__ = "1.0.0";
+
+class HelloWorldPlugin extends BasePlugin {
+    on_plugin_load() {
+        this.log("loaded");
+    }
+}
+
+var Plugin = HelloWorldPlugin;</code></pre>
+
+  <p>Рантайм создаёт экземпляр <code>Plugin</code> сам, после вычисления файла, и затем вызывает
+  <code>on_plugin_load</code>. Если плагин строит свой экземпляр иначе, он обязан передать его
+  через <code>__extera.register(instance)</code>.</p>
+  <div class="callout warn"><span class="callout-title">Граница платформы</span>
+    <p>Файл, тело которого написано на Python (<code>import</code>, <code>def</code>, класс
+    в питон-синтаксисе), отклоняется с сообщением об этом, а не загружается наполовину.</p>
+  </div>
+
+  <h3>Метаданные</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>Константа</th><th>Обяз.</th><th>Описание</th></tr>
+    <tr><td><code>__id__</code></td><td>да</td><td>2–32 символа: буквы, цифры, <code>_</code>, <code>-</code>. Идентифицирует плагин везде: хранилище, лог, вызовы моста.</td></tr>
+    <tr><td><code>__name__</code></td><td>да</td><td>Отображается в списке плагинов.</td></tr>
+    <tr><td><code>__description__</code></td><td>нет</td><td>Показывается на странице плагина.</td></tr>
+    <tr><td><code>__author__</code></td><td>нет</td><td>Свободный текст.</td></tr>
+    <tr><td><code>__version__</code></td><td>нет</td><td>По умолчанию <code>"1.0"</code>.</td></tr>
+    <tr><td><code>__icon__</code></td><td>нет</td><td><code>StickerPackShortName/index</code>; клиент разрешает имя, когда может, иначе строка показывает инициалы.</td></tr>
+    <tr><td><code>__app_version__</code></td><td>нет</td><td><code>&gt;=13.1.1</code>, <code>&lt;=1.2</code>, <code>==1.0</code>, <code>&gt;1</code>, <code>&lt;2</code>. Голое значение означает <code>&gt;=</code>.</td></tr>
+    <tr><td><code>__min_version__</code></td><td>нет</td><td>Устаревший псевдоним <code>__app_version__</code>.</td></tr>
+    <tr><td><code>__sdk_version__</code></td><td>нет</td><td>Порог на уровень API этого рантайма. Текущее значение — <code>1.4.5.0</code>.</td></tr>
+    <tr><td><code>__requirements__</code></td><td>нет</td><td>Отклоняется: этот рантайм не умеет ставить пакеты. Плагин, объявивший любые требования, не загружается с сообщением, где они перечислены.</td></tr>
+  </table></div>
+  <p>Сравнение версий дополняет нулями, поэтому <code>12.5</code> и <code>12.5.0</code> равны.</p>
+
+  <h3>Контейнеры Elyx</h3>
+  <p>Принимается и архив <code>.elyx</code> — формат, который собирает билдер SDK для
+  многофайловых проектов. Это ZIP с YAML-блоком <code>metainfo</code>, деревом <code>assets</code>
+  и одним или несколькими модулями на JavaScript. Точка входа — модуль <code>main</code> из
+  <code>metainfo</code> (или <code>main.elyx.js</code>); модули, которые он запрашивает через
+  <code>require</code>, разрешаются внутри архива с CommonJS-кэшем и защитой от циклов.</p>
+
+<pre class="code"><code># metainfo
+id: my_plugin
+name: My Plugin
+version: 1.0.0
+main: src/index.js</code></pre>
+
+  <p>Внутри Elyx-плагина глобаль <code>elyx</code> открывает части самого архива:
+  <code>elyx.assets</code> (коллекция ассетов с <code>content</code> / <code>content_bytes</code> /
+  <code>content_string</code> / <code>content_json</code>), <code>elyx.strings</code> (каталоги
+  локализаций с <code>pluralize</code>), <code>elyx.metainfo</code>, <code>elyx.refmap</code>,
+  <code>elyx.settings</code>, <code>elyx.get_environment()</code>,
+  <code>elyx.import_module(name)</code> и <code>elyx.Asset.from_path</code>.
+  <code>elyx.temp_asset_from_url</code> здесь <b>асинхронный</b> (в SDK для Android он
+  синхронный): принимает колбэк и вызывает его с готовым ассетом.</p>
+  <div class="callout warn"><span class="callout-title">Граница платформы</span>
+    <p>Питон-части стека Elyx — <code>import_module</code> в семантике Python, wheel-колёса с
+    Python ABI, <code>mvel_execute</code>, Java-прокси <code>gen</code>/<code>gen2</code> —
+    не имеют iOS-эквивалента: это стабы, которые бросают исключение с причиной, а не исчезают
+    молча.</p>
+  </div>
+</section>
+
+<section class="page" id="lifecycle" data-group="Начало работы" data-title="Жизненный цикл">
+  <h2>Жизненный цикл <span class="en">Lifecycle</span></h2>
+  <p class="lead">Три метода; включение и выключение плагина вызывают их предсказуемо.</p>
+
+<pre class="code"><code>class P extends BasePlugin {
+    on_plugin_load() {      // включение; и на старте приложения с включённым плагином
+    }
+    on_plugin_unload() {    // выключение; и при остановке приложения
+    }
+    on_app_event(event) {   // значение AppEvent
+    }
+}</code></pre>
+
+  <p>Значения <code>AppEvent</code>: <code>START</code>, <code>STOP</code>, <code>PAUSE</code>,
+  <code>RESUME</code> (строки <code>'start'</code>, <code>'stop'</code>, <code>'pause'</code>,
+  <code>'resume'</code>). <code>START</code> доставляется после загрузки, так что к этому моменту
+  <code>on_plugin_load</code> уже отработал.</p>
+  <div class="callout"><span class="callout-title">Правило</span>
+    <p>Всё, что плагин запустил вне клиента — таймер, наблюдатель, долгий запрос — должно быть
+    остановлено в <code>on_plugin_unload</code>.</p>
+  </div>
+</section>
+
+<section class="page" id="hooks" data-group="Основы" data-title="Хуки">
+  <h2>Хуки <span class="en">Hooks</span></h2>
+  <p class="lead">Хуки регистрируются внутри <code>on_plugin_load</code>. Метод, который существует,
+  но не был зарегистрирован, никогда не вызывается — та же ловушка, что и в SDK.</p>
+
+<pre class="code"><code>on_plugin_load() {
+    this.add_hook("messages.setTyping");      // TL-имя через точку
+    this.add_hook("TL_account_updateStatus"); // написание TL_ тоже матчится
+    this.add_hook("messages.", true);         // match_substring: целое пространство имён
+    this.add_hook("account.updateStatus", false, 10); // приоритет 10
+    this.add_on_send_message_hook(7);         // исходящие сообщения, приоритет 7
+}</code></pre>
+
+  <h3>Приоритеты хуков <span class="tag-new">новое</span></h3>
+  <p><code>priority</code> — третий аргумент exteraGram: чем больше число, тем раньше метод
+  выполняется в цепочке. Равные приоритеты не описаны в SDK, поэтому этот рантайм сохраняет
+  порядок загрузки — тот же порядок, который используют все остальные цепочки здесь.</p>
+
+  <h3>Методы-хуки</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>Метод</th><th>Сигнатура</th><th>Может менять</th></tr>
+    <tr><td><code>pre_request_hook</code></td><td><code>(name, account, request)</code></td><td><code>request</code></td></tr>
+    <tr><td><code>post_request_hook</code></td><td><code>(name, account, response, error)</code></td><td>ничего (наблюдательный)</td></tr>
+    <tr><td><code>on_update_hook</code></td><td><code>(name, account, update)</code></td><td>ничего (наблюдательный)</td></tr>
+    <tr><td><code>on_updates_hook</code></td><td><code>(name, account, updates)</code></td><td>ничего (наблюдательный)</td></tr>
+    <tr><td><code>on_send_message_hook</code></td><td><code>(account, params)</code></td><td><code>params</code></td></tr>
+  </table></div>
+
+  <p><code>name</code> — оба написания в одном: колбэк получает форму <code>TL_</code>
+  (<code>TL_messages_setTyping</code>, <code>TL_updateNewMessage</code>), а регистрация в любом
+  из написаний матчит другое.</p>
+
+  <p><code>params</code> хука отправки — это <code>{message, peer, account}</code>. Возврат
+  <code>HookResult.cancel()</code> отбрасывает отправку; замена <code>params.message</code>
+  и возврат <code>HookResult.modify("params", params)</code> переписывает текст.</p>
+
+  <div class="callout"><span class="callout-title">Отсоединённые хуки</span>
+    <p><code>post_request_hook</code> и хуки апдейтов — <b>detached</b>: они выполняются на
+    очереди скрипта после события, и ничего из возвращённого ими не доходит до клиента. Медленный
+    плагин не может затормозить через них состояние аккаунта — и не может переписать апдейт.</p>
+  </div>
+  <p><code>pre_request_hook</code> вызывается синхронно, на сетевом потоке, через очередь скрипта.
+  Он обязан быть быстрым.</p>
+
+  <h3>Форма данных</h3>
+  <p>Запросы и апдейты пересекают мост как объекты полей; вложенное TL-значение — объект
+  с <code>_</code> (имя конструктора) и собственными полями, до глубины 8. Поэтому
+  <code>update.message.peer_id</code> и <code>update.message.id</code> читаются так же,
+  как на Android.</p>
+  <p>Для хуков по методам самого приложения (случай Xposed) — см. <a href="#swizzling">Свизлинг</a>.</p>
+</section>
+
+<section class="page" id="swizzling" data-group="Основы" data-title="Свизлинг">
+  <h2>Свизлинг <span class="en">Xposed-хуки на методы</span></h2>
+  <p class="lead">Хуки раздела «Хуки» покрывают TL-трафик. Чтобы дотянуться до метода самого
+  приложения — случай Xposed — используйте <code>hook_utils.find_class</code> и <code>.hook</code>,
+  которые подменяют Objective-C-метод в рантайме.</p>
+
+<pre class="code"><code>var cls = hook_utils.find_class("SpeakerNode");  // загруженный ObjC-класс, или null
+var hook = new MethodHook();                    // колбэки задаются ниже
+var token = cls.hook("setMessage:", hook);</code></pre>
+
+  <p>На практике плагин задаёт <code>MethodHook</code> двумя колбэками:</p>
+
+<pre class="code"><code>var hook = new MethodHook();
+hook.beforeHookedMethod = function (param) {
+    var args = param.getArgs();      // ресивер и до двух объектных аргументов
+    // param.setResult(x) заменяет возврат метода и пропускает оригинал
+};
+hook.afterHookedMethod = function (param) {
+    // наблюдение после оригинала; тоже может setResult
+};
+hook.setPriority(50);                // порядок хуков на одном методе
+hook_utils.find_class("SomeClass").hook("someSelector:", hook);</code></pre>
+
+  <p><code>param</code> несёт собственные методы SDK: <code>getArgs</code>, <code>getArg(index)</code>,
+  <code>setResult</code>, <code>getResult</code>, <code>getObjectExtra(key)</code>,
+  <code>setObjectExtra(key, value)</code>.</p>
+
+  <h3>Что можно хукать</h3>
+  <ul>
+    <li><b>Можно:</b> Objective-C-метод, который уже существует на загруженном приложением классе,
+    принимает ноль, один или два объектных аргумента и возвращает объект или ничего.</li>
+    <li><b>Нельзя:</b> Swift-метод без <code>@objc</code> (нет селектора, который можно найти),
+    C-функцию, метод со структурой или примитивом в аргументах, и всё, что должно было бы
+    существовать до запуска плагина. Класс или селектор, которые ни во что не разрешаются,
+    попадают в лог; они никогда не создаются.</li>
+  </ul>
+  <div class="callout warn"><span class="callout-title">Отказ с причиной, а не поломка</span>
+    <p>Сигнатура вне этого набора отклоняется с причиной — <code>hook("foo:")</code> на методе
+    с аргументом <code>CGFloat</code> отвечает <code>null</code> и пишет в лог type encoding.
+    Подсвизлить его блоком, возвращающим объект, не крашнулось бы сразу — но испортило бы
+    возвращаемое значение каждого вызова, и это куда хуже ловить потом. Блок диспетчеризуется
+    с арностью, которая у метода реально есть, так что метод без аргументов не получает два
+    неинициализированных регистра.</p>
+  </div>
+
+  <h3>Порядок выполнения</h3>
+  <p>Колбэки выполняются в порядке Xposed, оригинал вызывается всегда, если хук не заменил
+  результат:</p>
+  <ol>
+    <li><code>beforeHookedMethod(param)</code> — выполняется первым. <code>param.setResult(x)</code>
+    пропускает оригинал и становится возвращаемым значением метода. Ничего не вернул — оригинал
+    выполняется.</li>
+    <li>оригинальная реализация;</li>
+    <li><code>afterHookedMethod(param)</code> — выполняется с <code>param.getResult()</code>,
+    равным тому, что вернул оригинал. Чтение ничего не меняет; <code>setResult</code> здесь
+    заменяет результат.</li>
+  </ol>
+  <p>Значения <code>setResult</code> пересекают мост как JSON: массив приходит массивом,
+  <code>null</code> приходит как <code>nil</code>, а не как строки <code>"[]"</code> и
+  <code>"null"</code>.</p>
+  <p>Хуки ставятся один раз на пару класс+селектор (вторая установка — no-op) и все
+  восстанавливаются при выгрузке плагинов, так что блок удалённого плагина не может продолжать
+  работать.</p>
+
+  <h3>Фильтры before/after <span class="tag-new">новое</span></h3>
+  <p><code>cls.hook(selector, hook, kind, options)</code> принимает списки фильтров из SDK:
+  <code>options.before_filters</code> / <code>after_filters</code> берут массив (или один)
+  предикатов <code>HookFilter</code>. Фильтр, ответивший <code>false</code>, пропускает только
+  этот колбэк — оригинальный метод и хук <code>after</code> всё равно выполняются. Здесь реален
+  <b>полный</b> набор <code>HookFilter</code>:</p>
+  <ul>
+    <li><code>RESULT_IS_NULL</code> / <code>NOT_NULL</code> / <code>IS_TRUE</code> / <code>IS_FALSE</code>;</li>
+    <li><code>ResultEqual</code> / <code>ResultNotEqual</code>;</li>
+    <li><code>ResultIsInstanceOf</code> — пишет в лог один раз и пропускает (нет Java-класса для проверки);</li>
+    <li><code>ArgumentIsNull</code> / <code>NotNull</code> / <code>IsFalse</code> / <code>IsTrue</code>;</li>
+    <li><code>ArgumentEqual</code> / <code>ArgumentNotEqual</code>;</li>
+    <li><code>ArgumentIsInstanceOf</code> — то же обращение;</li>
+    <li><code>Condition(expression, object)</code> — с подмножеством MVEL
+    (<a href="#android-only">см. «Поверхности Android»</a>);</li>
+    <li><code>Or(...)</code>.</li>
+  </ul>
+
+  <h3>MethodReplacement <span class="tag-new">новое</span></h3>
+  <p><code>MethodReplacement</code> работает: возвращаемое значение
+  <code>replace_hooked_method(param)</code> становится результатом метода, оригинал
+  пропускается; <code>undefined</code> означает «ничего не заменено», и оригинал выполняется.</p>
+
+  <h3>Снятие хука: unhook_method <span class="tag-new">новое</span></h3>
+  <p>Токен, который возвращает <code>hook</code>, можно снять посреди сессии:</p>
+
+<pre class="code"><code>var token = cls.hook("someSelector:", hook);
+// …
+this.unhook_method(token);   // true, когда хук был снят</code></pre>
+  <p>Снятие пары делает следующий <code>hook</code> по ней свежей установкой.</p>
+
+  <div class="callout warn"><span class="callout-title">Граница платформы</span>
+    <p><code>hook_utils.get_private_field</code> / <code>set_private_field</code> не имеют
+    эквивалента — Swift-свойство без <code>@objc</code> недостижимо по имени — и пишут в лог
+    вместо того, чтобы угадывать.</p>
+  </div>
+</section>
+
+<section class="page" id="hook-result" data-group="Основы" data-title="HookResult">
+  <h2>HookResult и HookStrategy <span class="en">Результаты хуков</span></h2>
+  <p class="lead">Ответ хука сообщает хосту, что сделать с операцией.</p>
+
+<pre class="code"><code>HookResult()                                             // ничего не просим
+HookResult({strategy: HookStrategy.MODIFY, request: request})
+HookResult.cancel()
+HookResult.modify("params", params)</code></pre>
+
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>Стратегия</th><th>Действие</th></tr>
+    <tr><td><code>HookStrategy.DEFAULT</code></td><td>ничего особенного</td></tr>
+    <tr><td><code>HookStrategy.CANCEL</code></td><td>остановить операцию (pre-request, отправка)</td></tr>
+    <tr><td><code>HookStrategy.MODIFY</code></td><td>использовать возвращённый объект; его увидят следующие плагины</td></tr>
+    <tr><td><code>HookStrategy.MODIFY_FINAL</code></td><td>изменить и остановить цепочку</td></tr>
+  </table></div>
+
+  <p>Поле, несущее замену, зависит от хука: <code>request</code>, <code>response</code>,
+  <code>update</code>, <code>updates</code>, <code>params</code>. Хуки выполняются в порядке
+  загрузки плагинов на путях отправки и pre-request; первый <code>cancel</code> останавливает
+  цепочку.</p>
+</section>
+
+<section class="page" id="menu" data-group="Основы" data-title="Пункты меню">
+  <h2>Пункты меню <span class="en">Menu items</span></h2>
+  <p class="lead">Свои строки в контекстном меню сообщения, меню чата, ящике и профиле.</p>
+
+<pre class="code"><code>on_plugin_load() {
+    this._item = this.add_menu_item(MenuItemData({
+        menu_type: MenuItemType.MESSAGE_CONTEXT_MENU,
+        text: "Инфо о сообщении",
+        icon: "msg_info",
+        subtext: "Отладка",
+        priority: 10,
+        on_click: (ctx) =&gt; this.log("id=" + ctx.message.id),
+    }));
+}
+
+on_plugin_unload() {
+    if (this._item) { this.remove_menu_item(this._item); }
+}</code></pre>
+
+  <p><code>menu_type</code>: <code>MESSAGE_CONTEXT_MENU</code>, <code>DRAWER_MENU</code>,
+  <code>MAIN_MENU</code>, <code>CHAT_ACTION_MENU</code>, <code>PROFILE_ACTION_MENU</code>.</p>
+  <p>Поля <code>MenuItemData</code>: <code>menu_type</code>, <code>text</code>, <code>on_click</code>,
+  <code>item_id</code>, <code>icon</code>, <code>subtext</code>, <code>condition</code>,
+  <code>priority</code>. <code>add_menu_item</code> возвращает id пункта (устойчивый
+  <code>item_id</code>, если задан, иначе сгенерированный).</p>
+
+  <h3>Условие <code>condition</code></h3>
+  <p><code>condition</code> может быть функцией или строкой-выражением. Строка компилируется
+  один раз на форму контекста и видит каждый ключ контекста как переменную, поэтому
+  <code>dialog_id &gt; 0</code> читается так же, как версия на MVEL в exteraGram. Условие,
+  которое бросает или не компилируется, скрывает пункт.</p>
+
+  <h3>Контекст клика</h3>
+  <p><code>on_click</code> получает объект контекста: <code>account</code>, <code>peer_id</code>,
+  <code>dialog_id</code> и всё остальное, описывающее место, из которого открыто меню.
+  Выведите <code>Object.keys(ctx)</code> в лог, чтобы увидеть, что конкретное меню предлагает.</p>
+  <p>Существующие пункты снимаются автоматически при выгрузке; <code>remove_menu_item</code> —
+  чтобы сделать это раньше.</p>
+</section>
+
+<section class="page" id="settings-ui" data-group="Основы" data-title="Экран настроек">
+  <h2>Экран настроек <span class="en">ui.settings</span></h2>
+  <p class="lead">Реализуйте <code>create_settings()</code> и верните список контролов.</p>
+
+<pre class="code"><code>create_settings() {
+    return [
+        Header({text: "Общие"}),
+        Switch({key: "enabled", text: "Включить фичу", default: true,
+                subtext: "Пример переключателя", icon: "msg_settings",
+                on_change: (value) =&gt; this.log("switch: " + value)}),
+        Selector({key: "mode", text: "Режим", default: 1,
+                  items: ["Выкл", "Базовый", "Расширенный"]}),
+        Input({key: "name", text: "Имя", default: "Alice"}),
+        EditText({key: "token", hint: "Токен", multiline: false}),
+        Divider({text: "Секция"}),
+        Text({text: "Подстраница", icon: "msg_arrow_forward",
+              create_sub_fragment: () =&gt; this._sub_page()}),
+        Text({text: "Внимание", red: true}),
+        Custom({text: "Своя строка", on_click: (row) =&gt; this.log(row.key)}),
+    ];
+}
+
+_sub_page() {
+    return [Header({text: "Подстраница"}), Text({text: "Вложенные настройки."})];
+}</code></pre>
+
+  <h3>Контролы</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>Контроль</th><th>type</th><th>Ключевые поля</th></tr>
+    <tr><td><code>Header({text})</code></td><td><code>header</code></td><td>заголовок секции</td></tr>
+    <tr><td><code>Divider({text})</code></td><td><code>divider</code></td><td>необязательная подпись</td></tr>
+    <tr><td><code>Switch({key, text, default, subtext, icon, on_change, on_long_click, link_alias})</code></td><td><code>switch</code></td><td><code>default</code> — булево</td></tr>
+    <tr><td><code>Selector({key, text, default, items, icon, on_change, on_long_click, link_alias})</code></td><td><code>selector</code></td><td><code>default</code> — индекс в <code>items</code></td></tr>
+    <tr><td><code>Input({key, text, default, subtext, icon, on_change, on_long_click, link_alias})</code></td><td><code>input</code></td><td>однострочный текст</td></tr>
+    <tr><td><code>EditText({key, hint, default, multiline, max_length, mask, on_change, link_alias})</code></td><td><code>edit_text</code></td><td><code>hint</code> — плейсхолдер</td></tr>
+    <tr><td><code>Text({text, subtext, icon, accent, red, on_click, on_long_click, create_sub_fragment, link_alias, key})</code></td><td><code>text</code></td><td>нажимаемая строка; <code>red</code>/<code>accent</code> красят её</td></tr>
+    <tr><td><code>Custom({item, view, factory, factory_args, on_click, on_long_click, create_sub_fragment, link_alias, text, subtext})</code></td><td><code>custom</code></td><td>см. ниже</td></tr>
+  </table></div>
+
+  <h3>Примечания</h3>
+  <ul>
+    <li>Контролы — обычные объекты: <code>new Switch({...})</code> и <code>Switch({...})</code>
+    работают одинаково.</li>
+    <li>Контрол с <code>key</code> персистится под ним. Без ключа он выводится из
+    <code>text</code>/<code>hint</code> плюс индекс строки — устойчиво между запусками, потому
+    что текст устойчив. <code>Text</code> принимает и явный <code>key</code> — для
+    переводимого текста.</li>
+    <li>Сохранённый переключатель доходит до <code>get_setting</code> и <code>on_change</code>
+    как настоящее булево, не <code>1</code>: <code>plugin.get_setting("x", false) === true</code> —
+    корректная проверка.</li>
+    <li><code>on_change(value)</code> получает новое значение. <code>on_click(row)</code> и
+    <code>on_long_click(row)</code> получают <code>{key, getKey()}</code> — Android-<code>View</code>
+    здесь нет, и ключ строки стоит вместо него. Плагин, который только логирует или выполняет
+    свою логику, не замечает разницы.</li>
+    <li><code>create_sub_fragment()</code>, возвращающий список, открывает вложенную страницу.</li>
+    <li><code>link_alias</code> на строке <code>Text</code>/<code>Custom</code> без
+    <code>on_click</code> открывает экран, названный алиасом: <code>plugins</code> — единственный
+    разрешающийся алиас (открывает список плагинов). Прочие алиасы пишутся в лог, потому что
+    у iOS нет deeplink'ов по ключам настроек, куда их можно было бы направить. Строка с собственным
+    <code>on_click</code> сохраняет его; <code>link_alias</code> — запасной вариант, как в SDK.</li>
+  </ul>
+
+  <h3>SimpleSettingFactory</h3>
+  <p>Android-only поля <code>Custom</code> (<code>item</code>, <code>view</code>,
+  <code>factory</code>, <code>factory_args</code>) принимаются и игнорируются: рендерер рисует
+  строку из <code>text</code>/<code>subtext</code> и вызывает <code>on_click</code>.
+  <code>SimpleSettingFactory</code> существует, чтобы перенесённый список настроек сохранил
+  форму:</p>
+
+<pre class="code"><code>var PreviewFactory = ui.settings.SimpleSettingFactory(createView, bindView, {
+    is_clickable: true,
+    on_click: function (plugin, item, view) { plugin.log("clicked"); },
+    text: "Sticker pack",
+    subtext: "exteraPlugins/1",
+});
+
+var row = PreviewFactory({"link_alias": "sticker_preview"});
+var row2 = PreviewFactory("CactusPlugins", 0);  // позиционные аргументы попадают в factory_args
+// PreviewFactory.instance.java — написание того же объекта из документации SDK</code></pre>
+</section>
+
+<section class="page" id="schedulers" data-group="Основы" data-title="Очереди и потоки">
+  <h2>Очереди и потоки <span class="en">Schedulers</span></h2>
+  <p class="lead">Одна очередь скриптов на все плагины; всё медленное — через <code>run_on_queue</code>.</p>
+
+<pre class="code"><code>this.run_on_queue(fn);                     // сериализуется на очереди скриптов
+this.run_on_queue(fn, 2500);               // через 2500 мс
+this.run_on_queue(fn, GLOBAL_QUEUE, 2500); // имя очереди принимается и игнорируется
+this.run_on_ui_thread(fn);                 // работа главной очереди (диалоги, бюллетени)
+android_utils.run_on_ui_thread(fn, 500);</code></pre>
+
+  <p>Константы очередей существуют для формы и принимаются, затем игнорируются — очередь скриптов
+  одна: <code>STAGE_QUEUE</code>, <code>GLOBAL_QUEUE</code>, <code>CACHE_CLEAR_QUEUE</code>,
+  <code>SEARCH_QUEUE</code>, <code>PHONE_BOOK_QUEUE</code>, <code>THEME_QUEUE</code>,
+  <code>EXTERNAL_NETWORK_QUEUE</code>, <code>PLUGINS_QUEUE</code>.</p>
+  <div class="callout"><span class="callout-title">Правило</span>
+    <p>Всё медленное — сеть, файловый ввод-вывод, парсинг — идёт через <code>run_on_queue</code>.
+    Очередь скриптов общая для всех плагинов: заблокировав её, вы блокируете все плагины разом.</p>
+  </div>
+</section>
+
+<section class="page" id="settings-storage" data-group="Основы" data-title="Хранилище настроек">
+  <h2>Хранилище настроек <span class="en">Settings storage</span></h2>
+  <p class="lead">Чтение и запись значений, привязанных к плагину.</p>
+
+<pre class="code"><code>this.get_setting(key, fallback)       // fallback используется, когда ключ не сохранялся
+this.set_setting(key, value, reload)  // reload=true пересобирает открытый экран настроек
+this.export_settings()                // {key: value, ...}
+this.import_settings(values, reload)</code></pre>
+
+  <p><code>reload</code> нужен, когда от значения зависит <b>структура</b> экрана; обычная смена
+  значения доходит до строки сама.</p>
+
+  <h3>Компаньоны на инстансе плагина</h3>
+<pre class="code"><code>this.getId();                // id плагина
+this.getName();              // имя плагина
+this.log(text);              // запись в лог плагина
+this.get_plugin_directory(); // своя папка плагина, то же что file_utils.get_plugins_dir()
+this.show_bulletin("info", "text");  // однострочный бюллетень без ui.bulletin
+this.get_hook_account();     // аккаунт сработавшего колбэка, иначе null
+this.run_on_ui_thread(fn);   // то же, что this.run_on_queue(fn, 0)</code></pre>
+</section>
+
+<section class="page" id="sending" data-group="Сообщения и клиент" data-title="Отправка сообщений">
+  <h2>Отправка сообщений <span class="en">client_utils</span></h2>
+  <p class="lead">Каждый хелпер принимает замыкающий объект опций; <code>account</code> в нём
+  выбирает аккаунт, иначе используется аккаунт хука или выбранный.</p>
+
+<pre class="code"><code>this.send_text(peerId, "Привет из плагина");
+this.send_text(peerId, "**Привет** из *плагина*!", {parse_mode: "Markdown"});
+this.send_text(peerId, "Это ответ.", {replyToMsg: 9876});
+
+this.send_photo(peerId, "/path/image.jpg", {caption: "Вот.", high_quality: true});
+this.send_document(peerId, "/path/file.zip", {caption: "Вот архив."});
+this.send_video(peerId, "/path/video.mp4", {caption: "Смотрите!"});
+this.send_audio(peerId, "/path/song.mp3", {caption: "Слушайте!"});
+
+this.send_message({peer: peerId, message: "Отложенное", scheduleDate: 1735689600, notify: false});
+this.send_message({peer: peerId, caption: "&lt;b&gt;Жирно&lt;/b&gt;", photo: "/path/p.jpg", parse_mode: "HTML"});
+this.send_message({peer: peerId, message: "Шапка", entities: [new TLRPC.TL_messageEntityBold()]});
+
+this.edit_message({peer: peerId, id: messageId}, "Новый текст.");
+this.edit_message({peer: peerId, id: messageId}, "Новое фото.", {file_path: "/path/another.jpg"});</code></pre>
+
+  <p><code>parse_mode</code> нечувствителен к регистру и принимает <code>HTML</code> и
+  <code>Markdown</code>. Когда он задан, маркеры форматирования превращаются в entities на JS-стороне
+  тем же парсером, что использует <code>parse_text</code>; без него текст идёт как набран,
+  и клиент сам находит голые ссылки и упоминания. Для медиа <code>parse_mode</code> применяется
+  к <code>caption</code>. <code>high_quality</code> читается из
+  <code>high_quality</code>/<code>sendingHighQuality</code>.</p>
+
+  <h3>Опции отправки и их семантика <span class="tag-new">новое</span></h3>
+  <ul>
+    <li><b>везде уважаются:</b> <code>account</code>, <code>replyToMsg</code>, <code>notify</code>,
+    <code>caption</code>, <code>parse_mode</code>, <code>entities</code>;</li>
+    <li><b><code>scheduleDate</code></b> (unix-секунды) ставит сообщение в список отложенных —
+    в тот же, куда складывает «отправить позже» сам композер; читаются оба написания
+    (<code>scheduleDate</code>/<code>schedule_date</code>);</li>
+    <li><b><code>hasMediaSpoilers</code></b> / <code>with_spoiler</code> /
+    <code>has_media_spoilers</code> закрывают медиа спойлером <b>при отправке</b> — атрибут
+    едет в атрибутах сообщения, которые прикладывает композер;</li>
+    <li><b><code>file_path</code></b> (+ <code>photo</code>/<code>video</code>/<code>audio</code>
+    для вида) на <code>edit_message</code> <b>заменяет медиа</b>: то же декодирование локального
+    файла, что на пути отправки, так что картинка декодируется в пузырь-картинку; без него
+    редактирование только текстовое;</li>
+    <li><b><code>ttl</code></b> отказывается вслух в логе и игнорируется — per-message TTL в этом
+    движке не существует (TTL — свойство секретных чатов, а не одного сообщения);</li>
+    <li><b><code>with_spoiler</code> при редактировании</b> тоже отказывается в логе: у
+    edit-запроса движка нет слота под атрибут, поэтому редактирование не может добавить спойлер.</li>
+  </ul>
+
+  <h3>Модульные формы</h3>
+  <p>Те же функции существуют на уровне модуля:</p>
+<pre class="code"><code>client_utils.send_text(peerId, "привет", {account: account});
+client_utils.get_client(account).send_text(peerId, "привет");
+client_utils.parse_text("&lt;b&gt;x&lt;/b&gt;", "HTML");
+client_utils.get_client_version();   // "13.1.1", или "Unknown"
+client_utils.get_hook_account();     // аккаунт сработавшего колбэка, иначе null
+client_utils.get_selected_account();</code></pre>
+  <p><code>get_client(account)</code> возвращает <code>AccountClient</code>: <code>send_text</code>,
+  <code>send_photo</code>, <code>send_document</code>, <code>send_video</code>, <code>send_audio</code>,
+  <code>send_message</code>, <code>edit_message</code> плюс <code>get_account()</code>.</p>
+
+  <h3>Два имени, которые не глобальны</h3>
+  <p>Два имени, которые SDK кладёт в топ-уровень, здесь достижимы только через объект модуля.
+  Это не «починено» в документации, потому что так устроен сам билд — и плагин, написанный
+  по SDK, на этом наткнётся:</p>
+  <ul>
+    <li><code>parse_text</code> — <b>не</b> глобаль. Используйте
+    <code>client_utils.parse_text(...)</code> или
+    <code>extera_utils.text_formatting.parse_text(...)</code>. Строка
+    <code>var p = parse_text(...)</code> из SDK бросит здесь <code>ReferenceError</code>.</li>
+    <li><code>SimpleSettingFactory</code> — <b>не</b> глобаль. Используйте
+    <code>ui.settings.SimpleSettingFactory(...)</code> (тот же объект, что
+    <code>__extera.api.SimpleSettingFactory</code>).</li>
+  </ul>
+  <p><code>BasePlugin</code> и контролы настроек — настоящие глобали, так что порт работает
+  на них без правок.</p>
+</section>
+
+<section class="page" id="multiaccount" data-group="Сообщения и клиент" data-title="Мультиаккаунт">
+  <h2>Мультиаккаунт <span class="en">Multi-account</span></h2>
+  <p class="lead">Каждый вошедший аккаунт держит своё соединение и продолжает стрелять хуками.
+  Каждый колбэк получает <code>account</code> — и всё, что он делает, должно его использовать.</p>
+
+<pre class="code"><code>on_update_hook(name, account, update) {
+    var client = this.client(account);   // следует за скоупом хука
+    client.send_text(update.message.peer_id, "ответ");
+    return new HookResult();
+}</code></pre>
+
+  <ul>
+    <li><code>this.client(account)</code> / <code>this.client()</code> /
+    <code>get_client(account)</code> — хелперы, привязанные к аккаунту;</li>
+    <li><code>this.get_hook_account()</code> / <code>get_hook_account()</code> — аккаунт
+    сработавшего колбэка, <code>null</code> вне колбэка;</li>
+    <li><code>get_selected_account()</code> — аккаунт, видимый в UI, когда нужно именно это;</li>
+    <li>работа, запланированная <code>run_on_queue</code> из колбэка, сохраняет аккаунтовый
+    скоуп этого колбэка.</li>
+  </ul>
+</section>
+
+<section class="page" id="text-formatting" data-group="Сообщения и клиент" data-title="Форматирование">
+  <h2>Форматирование текста <span class="en">Text formatting</span></h2>
+  <p class="lead">HTML и Markdown в entities — одним парсером на JS-стороне.</p>
+
+<pre class="code"><code>var parsed = client_utils.parse_text("&lt;b&gt;Жирно&lt;/b&gt;, &lt;i&gt;Курсив&lt;/i&gt;, &lt;a href='https://example.com'&gt;Ссылка&lt;/a&gt;", "HTML");
+// {message: "Жирно, Курсив, Ссылка", entities: [{type, offset, length, url?}, ...]}
+
+var cap = client_utils.parse_text("**Жирно**", "Markdown", true);  // is_caption → ключ "caption"
+// extera_utils.text_formatting.parse_text — та же функция</code></pre>
+
+  <p><code>TLEntityType</code>: <code>BOLD</code>, <code>ITALIC</code>, <code>UNDERLINE</code>,
+  <code>STRIKETHROUGH</code>, <code>SPOILER</code>, <code>CODE</code>, <code>PRE</code>,
+  <code>TEXT_LINK</code>, <code>BLOCKQUOTE</code>, <code>CUSTOM_EMOJI</code>.</p>
+
+  <h3>HTML</h3>
+  <p><code>&lt;b&gt;</code>, <code>&lt;strong&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;em&gt;</code>,
+  <code>&lt;u&gt;</code>, <code>&lt;ins&gt;</code>, <code>&lt;s&gt;</code>, <code>&lt;del&gt;</code>,
+  <code>&lt;strike&gt;</code>, <code>&lt;code&gt;</code>, <code>&lt;pre language="..."&gt;</code>,
+  <code>&lt;spoiler&gt;</code>, <code>&lt;tg-spoiler&gt;</code>, <code>&lt;blockquote&gt;</code>,
+  <code>&lt;a href&gt;</code>, <code>&lt;emoji id&gt;</code>, <code>&lt;br&gt;</code>; пятёрка XML-сущностей
+  и числовые ссылки на символы.</p>
+
+  <h3>Markdown</h3>
+  <p><code>**жирно**</code>, <code>*жирно*</code>, <code>_курсив_</code>, <code>__подчёркнуто__</code>,
+  <code>~~зачёркнуто~~</code>, <code>~зачёркнуто~</code>, <code>||спойлер||</code>,
+  `` `код` ``, тройные кавычки с языком, <code>[текст](url)</code>,
+  <code>![alt](tg://emoji?id=123)</code>, <code>&gt; цитата</code>, <code>**&gt; цитата</code>.</p>
+
+  <p>Смещения entities — в UTF-16, и по ним индексируют обе стороны: и JavaScript, и хост.</p>
+
+  <h3>Сборка entities вручную</h3>
+  <p>Экспортирован и <code>RawEntity</code> —
+  <code>extera_utils.text_formatting.RawEntity({offset, length, type, url, language, document_id, collapsed})</code>,
+  промежуточная форма, которую SDK превращает в <code>TLRPC</code>; используйте её, когда плагин
+  строит entities руками.</p>
+  <p>Классы <code>TLRPC.TL_messageEntity*</code> существуют как простые записи (<code>Bold</code>,
+  <code>Italic</code>, <code>Underline</code>, <code>Strike</code>, <code>Strikethrough</code>,
+  <code>Spoiler</code>, <code>Code</code>, <code>Pre</code>, <code>TextUrl</code>,
+  <code>Blockquote</code>, <code>CustomEmoji</code>) — экспорт, собирающий entity руками,
+  сохраняет форму. <code>send_message</code> читает <code>offset</code>/<code>length</code>/<code>type</code>
+  с того, что ему дано, и они имеют приоритет над <code>parse_mode</code>.</p>
+</section>
+
+<section class="page" id="proxy" data-group="Сообщения и клиент" data-title="Прокси">
+  <h2>Прокси <span class="en">Proxy</span></h2>
+  <p class="lead">Чтение и правка списка прокси клиента; локальный MTProxy, который
+  поднимает сам клиент.</p>
+
+<pre class="code"><code>proxy.list(function (r) {
+    // r = {ok, servers: [{link, kind, host, port}, ...]}  kind: mtproto|web|socks
+});
+
+proxy.add(["tg://proxy?server=1.2.3.4&amp;port=443&amp;secret=dd..."], function (r) {
+    // r = {ok, added, skipped}
+});
+
+proxy.remove_all(function (r) { /* r = {ok, removed} */ });
+
+proxy.own_peer_id(function (r) { /* r = {ok, peer_id} */ });
+proxy.own_peer_id(account, function (r) { });
+
+var parsed = proxy.parse_link("tg://proxy?server=1.2.3.4&amp;port=443&amp;secret=ee...");
+// {kind: "mtproto", host, port, secret, subtype: "faketls"|"padding", link}
+var key = proxy.protocol_key(parsed);   // "mtproto_faketls" | "web_websocket" | "socks" | ...</code></pre>
+
+  <p><code>add</code> принимает ссылки, не объекты. <code>list</code> отдаёт весь список, а не
+  активный сервер. <code>parse_link</code> — чистый JS, отвечающий <code>null</code> для всего,
+  что не читается. Всё алиасится и как <code>client_utils.proxy_list</code> /
+  <code>client_utils.get_own_peer_id</code>.</p>
+
+  <h3>Локальный MTProxy</h3>
+  <div class="callout warn"><span class="callout-title">Граница платформы</span>
+    <p>Плагин не может открыть сокет: iOS не даёт JavaScript-контексту ни сокетов, ни способа
+    слушать порт. Слушателем владеет клиент — это единственная способность, которую плагин
+    не может построить для себя.</p>
+  </div>
+  <p><code>proxy.local_start(domain)</code> поднимает MTProxy на <code>127.0.0.1</code> (порт
+  1443, если свободен, иначе эфемерный) со свежим <code>dd</code>-секретом, <b>добавляет запись
+  <code>tg://proxy?server=127.0.0.1&amp;port=…&amp;secret=dd…</code> в список прокси и делает её
+  активной</b> — трафик клиента сразу идёт через неё, а запись видна в
+  Настройки → Конфиденциальность → Прокси точно так же, как добавленная руками.</p>
+  <p><code>domain</code> — зона CloudFlare, где отвечают имена <code>kws&lt;dc&gt;.&lt;domain&gt;</code>
+  (схема tg-ws-proxy). Туннель набирает <code>kws&lt;dc&gt;.&lt;domain&gt;</code> по WSS, при неудаче
+  откатывается на <code>kws&lt;dc&gt;.web.telegram.org</code>, затем на адрес датацентра — зона,
+  переставшая отвечать, не роняет транспорт. Необязательный массив <code>domains</code> называет
+  дополнительные зоны для набора по порядку — тот же фолбэк, который получает
+  приложение-референс из своего списка зон.</p>
+
+<pre class="code"><code>proxy.local_start("pclead.co.uk", function (r) {
+    // r = {ok, status: {running, host, port, domain, active, connections,
+    //                   upstreams, link, error, upstream_error}}
+});
+
+// Выбранная зона первой, остальные — запасные.
+proxy.local_start("pclead.co.uk", ["offshor.co.uk", "cakeisalie.co.uk"], function (r) {});
+
+proxy.local_stop(function (r) { /* r = {ok, status: {...}} */ });
+
+var s = proxy.local_status();   // тот же объект статуса, синхронно</code></pre>
+
+  <ul>
+    <li><code>start</code> на уже работающем прокси только восстанавливает его запись (домен тогда
+    необязателен);</li>
+    <li><code>stop</code> снимает запись и возвращается к прямому соединению, только если этой
+    записью была активная — прокси, добавленный пользователем руками, не трогается никогда;
+    <code>stop</code> выполняется при выключении или выгрузке плагина, но не при уходе приложения
+    в фон;</li>
+    <li><code>local_status</code> синхронный: он читает состояние, которое клиент уже держит, —
+    как раз то, что нужно строке настроек; на сборке без этого моста он отвечает
+    <code>{ok: false, running: false, error}</code>;</li>
+    <li><code>active</code> говорит, что запись — та, которой пользуется Telegram; <code>connections</code>
+    и <code>upstreams</code> — что трафик реально идёт. Они сообщаются, а не угадываются: это
+    и позволяет плагину отличить «подключено» от «запущено и ждёт». <code>upstream_error</code>
+    несёт последнюю ошибку туннеля.</li>
+  </ul>
+  <p>Плагин <code>tg_ws_proxy</code> в <code>js/</code> — референсный пользователь этого API.</p>
+</section>
+
+<section class="page" id="http" data-group="Сеть" data-title="HTTP">
+  <h2>HTTP <span class="en">http</span></h2>
+  <p class="lead">Запросы отвечают через колбэк. Никогда не блокируют.</p>
+
+<pre class="code"><code>http.get("https://example.com/list.txt", {headers: {"Accept": "text/plain"}, timeout: 10}, function (r) {
+    if (!r.ok) { this.log("не вышло: " + r.error); return; }
+    this.log(r.status + " " + r.text);
+});
+
+http.get_json("https://example.com/actual.json", function (r) {
+    if (r.ok &amp;&amp; r.json) { this.log("версия " + r.json.version); }
+});</code></pre>
+
+  <p>Форма ответа: <code>{ok, status, text, error, json?}</code>. Транспортная ошибка или не-2xx —
+  это <code>ok: false</code>; <code>status</code> и <code>text</code> остаются, когда есть тело:
+  тело 404 часто объясняет неудачу. <code>get_json</code> парсит <code>text</code> и кладёт
+  результат в <code>json</code>; нераспарсиваемое тело — <code>ok: false</code> с сохранённым
+  текстом.</p>
+
+  <h3>Глаголы помимо GET</h3>
+  <p>Реализованы <code>post</code>, <code>put</code>, <code>patch</code>, <code>delete</code> и
+  общий <code>request</code>; каждый берёт объект опций с <code>headers</code>, <code>body</code>
+  (строка или значение для JSON-сериализации), <code>timeout</code> и тот же колбэк:</p>
+
+<pre class="code"><code>http.post("https://example.com/items", {body: {name: "x"}, headers: {"Content-Type": "application/json"}}, cb);
+http.put("https://example.com/items/1", {body: JSON.stringify({name: "y"})}, cb);
+http.patch(url, {body: "..."}, cb);
+http.delete(url, {headers: {...}}, cb);
+
+// Общая форма — для метода, которого нет в списке выше.
+http.request("OPTIONS", url, {headers: {...}, body: "..."}, cb);</code></pre>
+
+  <p>Варианты <code>*_json</code> (<code>post_json</code>, <code>put_json</code>,
+  <code>patch_json</code>) парсят тело ответа в <code>r.json</code>, как <code>get_json</code>.
+  Тело запроса, не безопасное для UTF-8, переносится через мост как base64; <code>http</code>
+  кодирует и декодирует его на стороне JavaScript, потому что <code>btoa</code> в JavaScriptCore
+  отсутствует.</p>
+  <p>Всё алиасится и как <code>client_utils.http_get</code>, <code>client_utils.http_post</code>,
+  <code>client_utils.http_put</code>, <code>client_utils.http_patch</code>,
+  <code>client_utils.http_delete</code>, <code>client_utils.http_request</code> и формы
+  <code>*_json</code>.</p>
+</section>
+
+<section class="page" id="bulletins" data-group="Интерфейс" data-title="Бюллетени и диалоги">
+  <h2>Бюллетени и диалоги <span class="en">ui.bulletin, AlertDialogBuilder</span></h2>
+  <p class="lead">Строки-оповещения снизу экрана и модальные диалоги.</p>
+
+  <h3>Бюллетени</h3>
+<pre class="code"><code>ui.bulletin.show_info("Информация.");
+ui.bulletin.show_error("Что-то не удалось.");
+ui.bulletin.show_success("Готово!");
+ui.bulletin.show_two_line("Загрузка завершена", "Сохранено в галерею.");
+ui.bulletin.show_with_button("Настройки обновлены.", null, "Настроить", function () { /* … */ });
+ui.bulletin.show_undo("Перемещено в корзину.", {on_undo: undoFn, on_action: deleteFn});
+ui.bulletin.show_copied_to_clipboard();
+ui.bulletin.show_link_copied();
+ui.bulletin.show_file_saved_to_gallery(false, 1);
+ui.bulletin.show_file_saved_to_downloads("MUSIC", 1);
+// ui.bulletin.BulletinHelper.show_info(...) — та же функция</code></pre>
+  <p>Длительности: <code>ui.bulletin.DURATION_SHORT</code> (1500), <code>DURATION_LONG</code>
+  (2750), <code>DURATION_PROLONG</code> (5000).</p>
+
+  <h3>Диалоги</h3>
+<pre class="code"><code>var b = AlertDialogBuilder(activity);
+b.set_title("Мой плагин");
+b.set_message("Важное сообщение.");
+b.set_positive_button("OK", function (builder, which) { builder.dismiss(); });
+b.set_negative_button("Отмена", function (builder, which) { builder.dismiss(); });
+b.set_cancelable(true);
+b.show();</code></pre>
+  <p>Типы: <code>AlertDialogBuilder.ALERT_TYPE_MESSAGE</code>, <code>ALERT_TYPE_LOADING</code>,
+  <code>ALERT_TYPE_SPINNER</code>. id кнопок в листенер: <code>BUTTON_POSITIVE</code>,
+  <code>BUTTON_NEGATIVE</code>, <code>BUTTON_NEUTRAL</code>.</p>
+  <p>Методы: <code>set_title</code>, <code>set_message</code>, <code>set_items(items, listener)</code>,
+  <code>set_positive_button</code>, <code>set_negative_button</code>, <code>set_neutral_button</code>,
+  <code>set_on_cancel_listener</code>, <code>set_on_dismiss_listener</code>, <code>set_cancelable</code>,
+  <code>set_canceled_on_touch_outside</code>, <code>set_progress(0..100)</code>, <code>create()</code>,
+  <code>show()</code>, <code>dismiss()</code>, <code>get_dialog()</code>, <code>get_button()</code>.</p>
+  <div class="callout"><span class="callout-title">Форма сохранена, механика другая</span>
+    <p><code>activity</code> принимается для формы и игнорируется: iOS презентует с текущего экрана.
+    Сигнатура листенера <code>listener(builder, which)</code> сохранена — билдер и есть способ,
+    которым колбэк закрывает свой диалог. Внешние сеттеры без iOS-аналога
+    (<code>set_top_image</code>, <code>set_blurred_background</code>, <code>make_button_red</code>, …)
+    принимаются и игнорируются, так что перенесённый диалог всё равно показывается — просто
+    скромнее.</p>
+  </div>
+</section>
+
+<section class="page" id="files" data-group="Интерфейс" data-title="Файлы">
+  <h2>Файлы <span class="en">file_utils</span></h2>
+  <p class="lead">Пути в каталогах приложения; байты — как base64-текст.</p>
+
+<pre class="code"><code>file_utils.get_plugins_dir();     // папка самого плагина — корень для записи
+file_utils.get_cache_dir();
+file_utils.get_files_dir();
+file_utils.get_images_dir();
+file_utils.get_videos_dir();
+file_utils.get_audios_dir();
+file_utils.get_documents_dir();
+file_utils.ensure_dir_exists(path);
+file_utils.read_file(path);                  // строка, или null
+file_utils.write_file(path, "текст");
+file_utils.read_file_bytes(path);            // base64-строка, или null
+file_utils.write_file_bytes(path, base64);
+file_utils.list_dir(path, {recursive: true, include_files: true, extensions: [".json"]});
+file_utils.delete_file(path);
+file_utils.file_exists(path);</code></pre>
+
+  <p><code>list_dir</code> принимает и позиционную форму из SDK:
+  <code>list_dir(path, recursive, include_files, include_dirs, extensions)</code>.</p>
+  <div class="callout warn"><span class="callout-title">Байты — это base64</span>
+    <p><code>read_file_bytes</code> / <code>write_file_bytes</code> несут <b>base64-текст</b>,
+    а не байтовый массив: массив байтов не пересекает строковый мост. Учитывайте это в
+    переносимом плагине, вместо того чтобы притворяться, будто <code>bytes(...)</code> работает.</p>
+  </div>
+  <p>Каждый путь заперт в собственных каталогах приложения через хост, поэтому плагин не может
+  выйти за их пределы.</p>
+  <p><code>FilesController</code> сохраняет форму (<code>SUPPORT_ICONS</code>, <code>Place</code>,
+  <code>FileInfo</code>, <code>OnClickArgs</code>, три типа исключений,
+  <code>register</code>/<code>unregister</code>) — ради import-строк и ссылок на enum.
+  <code>SUPPORT_ICONS</code> — <code>false</code>, а <code>register</code> пишет в лог, что
+  перехвата открытия файлов на iOS нет: срабатывает собственная ветка «не поддерживается»
+  плагина, а не хендлер, который молча никогда не стреляет.</p>
+</section>
+
+<section class="page" id="appearance" data-group="Интерфейс" data-title="Внешний вид">
+  <h2>Внешний вид <span class="en">Appearance hooks</span></h2>
+  <p class="lead">Плагин отвечает на запросы, которые экран задаёт при своей сборке; клиент
+  применяет ответ своей палитрой и анимацией. Регистрировать нечего — реализуйте метод,
+  и хост его вызовет.</p>
+  <div class="callout"><span class="callout-title">Откуда эти хуки</span>
+    <p>Это добавления, а не поверхность SDK. На Android те же эффекты получали, хукая
+    обфусцированные классы через Xposed; такой поверхности на iOS нет, поэтому экран сам
+    спрашивает плагин.</p>
+  </div>
+
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>Колбэк</th><th>Сигнатура</th><th>Ответ</th></tr>
+    <tr><td><code>on_attach_menu_hook</code></td><td><code>(account, {keys}, extra)</code></td><td>массив ключей, которые оставить в меню вложений</td></tr>
+    <tr><td><code>on_settings_rows_hook</code></td><td><code>(account, {keys}, extra)</code></td><td>массив ключей, которые оставить на вкладке настроек</td></tr>
+    <tr><td><code>on_message_inserted</code></td><td><code>(account, message, extra)</code></td><td>объект анимации (ниже)</td></tr>
+    <tr><td><code>on_name_colors</code></td><td><code>(account, null, extra)</code></td><td><code>{main, secondary?, names?, avatars?, stories?, dialogs?, profiles?}</code></td></tr>
+    <tr><td><code>on_theme_colors</code></td><td><code>(account, null, extra)</code></td><td>та же форма плюс <code>outgoing?</code></td></tr>
+    <tr><td><code>on_message_details</code></td><td><code>(account, message, extra)</code></td><td><code>[{title, value}, ...]</code></td></tr>
+    <tr><td><code>on_hide_message</code></td><td><code>(account, message, extra)</code></td><td><code>true</code> — убрать строку</td></tr>
+    <tr><td><code>on_allow_screenshots</code></td><td><code>(account, null, extra)</code></td><td><code>true</code> — разрешить скриншоты везде</td></tr>
+  </table></div>
+
+  <p><code>extra</code> несёт <code>account</code> и, где известен чат, <code>peer</code>.
+  <code>message</code> — тот же объект-полей, что получают хуки апдейтов. Ответы меню вложений
+  и строк настроек могут называть только ключи, которые были предложены, — ключ, которого плагин
+  не видел, игнорируется: плагин не может скрыть то, чего перед ним не было. Цвета — числа
+  <code>0xRRGGBB</code>; отсутствующий флаг значит «включено»; отсутствующий <code>secondary</code> —
+  «без градиента».</p>
+
+  <h3>Анимация вставки сообщения</h3>
+  <p>Все поля необязательны, кроме <code>duration</code>:</p>
+<pre class="code"><code>{
+    duration: 400,        // мс
+    delay: 0,
+    alpha: 0,             // стартовая прозрачность, по умолчанию 1
+    scaleX: 0.8, scaleY: 0.8,
+    scaleToX: 1, scaleToY: 1,
+    translationX: 0, translationY: 0,
+    rotationZ: 0, rotationX: 0, rotationY: 0,
+    curve: "decelerate",  // linear|decelerate|accelerate|accelerateDecelerate|overshoot|spring
+    overshoot: 0,
+    rotationKeyframes: [0, 10, -10, 0]
+}</code></pre>
+  <p><code>extra</code> для <code>on_message_inserted</code> добавочно несёт <code>isDate</code>,
+  <code>width</code>, <code>height</code>. Для вставки, name-цветов, theme-цветов и скрытия
+  сообщений побеждает ответ первого плагина: два плагина не могут одновременно анимировать
+  одну строку или владеть одной палитрой.</p>
+  <p>Если плагин меняет цвет после отрисовки экрана, он вызывает
+  <code>__extera.notifyAppearanceChanged()</code> (это же делает
+  <code>this.set_setting(..., true)</code>) — палитра пересобирается.</p>
+
+  <h3>Чтение текущих цветов: themeColors <span class="tag-new">новое</span></h3>
+  <p>Плагин может прочитать цвета, которыми живёт тема прямо сейчас:</p>
+<pre class="code"><code>var colors = __extera.themeColors(["outgoing", "inBubble", /* … */]);
+// {outgoing: 0x…, inBubble: 0x…}; имени без эквивалента в этой сборке просто нет в ответе</code></pre>
+  <p>Читаемые имена: исходные слоты <code>accent</code>, <code>accentTextColor</code>,
+  <code>button</code>, <code>header</code>, <code>link</code>, <code>floatingButton</code>,
+  <code>outgoing</code>, <code>navigationBar</code>, <code>actionSheet</code>; добавленные
+  <code>inText</code>, <code>outgoingText</code>, <code>inBubble</code>, <code>chatList</code>,
+  <code>plainBackground</code>, <code>separator</code>, <code>inputPanel</code>; и Android-ключи,
+  за которыми порт тянется в первую очередь — <code>key_chat_outBubble</code>,
+  <code>key_chat_inBubble</code>, <code>key_chat_inText</code>, <code>key_chat_outText</code>,
+  <code>key_chat_listBackground</code>, <code>key_windowBackgroundWhite</code>,
+  <code>key_graySection</code>, <code>key_chat_inputPanelBackground</code> — каждый отобразится
+  на слот с тем же смыслом.</p>
+</section>
+
+<section class="page" id="deleted" data-group="Интерфейс" data-title="Сохранённые удалённые">
+  <h2>Сохранённые удалённые сообщения <span class="en">Saved deleted messages</span></h2>
+  <p class="lead">Плагин хранит копию сообщения, которое пользователь удаляет, — и строка
+  остаётся в чате после того, как сообщение исчезло из Telegram.</p>
+
+  <p><code>on_messages_will_be_deleted(account, {messages}, extra)</code> срабатывает
+  <b>перед самым</b> удалением клиентом сообщений, которые пользователь удалил с этого
+  устройства. Сервер о них не объявляет никогда (<code>messages.deleteMessages</code> отвечает
+  только <code>affectedMessages</code>), поэтому это единственная точка, где текст ещё существует.
+  Сообщения, удалённые кем-то другим, приходят как обычные апдейты
+  <code>updateDeleteMessages</code> / <code>updateDeleteChannelMessages</code> /
+  <code>updateDeleteScheduledMessages</code> — плагину, которому нужны оба случая, надо
+  зарегистрировать и то, и другое: ровно это делает <code>UPDATE_HOOKS</code> в
+  <code>re_extera_dex</code>.</p>
+
+  <p>Храните копии где удобно (JSON-файл под <code>file_utils.get_plugins_dir()</code> переживает
+  пересборку). Затем отвечайте на два запроса:</p>
+
+<pre class="code"><code>// Строки, которые клиент должен нарисовать в этом чате.
+on_deleted_messages(account, {peer_id}, extra) {
+    return [{
+        id: 830646,          // id исходного сообщения, Int32, не ноль
+        date: 1735689600,    // unix-секунды, не ноль
+        text: "текст",
+        media_kind: "photo", // необязательно; показывается, когда нет текста; "none"/"" — ничего
+        sender_id: 123456,   // необязательно
+        is_out: false,
+    }];
+}
+
+// Пользователь удалил сохранённую строку в клиенте; выкиньте копию.
+on_forget_deleted_messages(account, {peer_id, message_ids}, extra) {
+    // удалить каждый id из хранилища и пересобрать кэш
+}</code></pre>
+
+  <ul>
+    <li>Клиент спрашивает <code>on_deleted_messages</code> один раз на чат и только когда хоть
+    один плагин его реализует. Ответы всех слушающих плагинов склеиваются и
+    дедуплицируются по <code>(peer_id, id)</code>.</li>
+    <li>Строка без пригодного <code>id</code> или <code>date</code> отбрасывается — ноль поставил
+    бы её в конец чата.</li>
+    <li><code>peer_id</code> — это <code>PeerId.toInt64()</code>; канал —
+    <code>channel_id + 2 * 2^32</code>, и сравнение с <code>update.message.peer_id</code> из хука
+    апдейтов работает напрямую.</li>
+  </ul>
+  <p>Нарисованная строка выглядит как настоящее сообщение, но помечена удалённой: чуть
+  прозрачнее, с красной иконкой корзины перед временем. Она выбирается, как любое сообщение,
+  поэтому «выделить → Удалить» убирает её — клиент вызывает <code>on_forget_deleted_messages</code>
+  с её id и пересобирает список. Это единственный способ убрать сохранённую строку: она существует
+  только в хранилище самого плагина.</p>
+</section>
+
+<section class="page" id="logging" data-group="Инструменты" data-title="Логирование">
+  <h2>Логирование <span class="en">Logging</span></h2>
+  <p class="lead">Простой <code>this.log</code> — и структурированный логгер в придачу.</p>
+
+<pre class="code"><code>this.log("loaded");                     // наследие, пишется всегда
+android_utils.log({some: "object"});   // не-примитивы инспектируются</code></pre>
+
+  <h3>Структурированный логгер <span class="tag-new">новое</span></h3>
+  <p>Описанный в SDK логгер здесь настоящий:</p>
+
+<pre class="code"><code>this.logger.debug("чат %s: %s", chatId, state);  // %-подстановка; форматируется,
+                                               // только когда уровень включён
+this.logger.info("готов");
+this.logger.warning("странно, но выжило");
+this.logger.error("запрос не удался", excInfo); // excInfo.stack едет строкой
+this.logger.exception(err);                    // внутри catch: сообщение + стек
+this.logger.dump(obj, "user", 3, 20);          // DEBUG-инспекция объекта
+var t = this.logger.timed("sync"); ... t.end(); // "заняло N мс"; end(true) добавит "(failed)"
+var net = this.logger.child("net");            // тег plugin.&lt;id&gt;.net, наследует порог
+this.logger.add_handler(record =&gt; { /* … */ });// record: {level, tag, message, traceback, created, text}
+this.logger.level = LogLevel.DEBUG;            // или "debug", или 20; null вернёт умолчание</code></pre>
+
+  <ul>
+    <li>Уровень гейтит запись <b>до</b> форматирования сообщения: горячий хук, пишущий на DEBUG,
+    ничего не стоит, пока DEBUG выключен.</li>
+    <li><code>dump</code> помечает циклы <code>&lt;cycle&gt;</code>, режет глубину через <code>{...}</code>,
+    ограничивает массивы и объекты по <code>max_items</code> с хвостом <code>+ N more</code>
+    и никогда не вызывает геттеры.</li>
+    <li><code>log_utils</code> — настоящий модуль: <code>get_logger("name")</code>, <code>LogLevel</code>
+    и чистая <code>dump(value, label, depth, max_items)</code>; порог по умолчанию — INFO,
+    переключателя dev-mode нет: для подробного прогона ставьте
+    <code>logger.level = LogLevel.DEBUG</code>.</li>
+  </ul>
+  <p>Лог — один файл на все плагины (<code>Library/extera-plugins.log</code>), читаемый с экрана
+  плагинов в клиенте. Не-примитив рендерится как JSON, так что <code>this.log(update)</code> —
+  рабочий способ инспекции полезной нагрузки.</p>
+  <div class="callout"><span class="callout-title">Хук молчит? Смотрите лог</span>
+    <p>Выброс внутри колбэка плагина перехватывается рантаймом и пишется в лог против id плагина;
+    наружу в клиент он не попадает никогда. Из-за этого плагин с брошенным кодом выглядит
+    подписанным и ничего не делает — первым делом проверяйте лог, когда хук кажется мёртвым.</p>
+  </div>
+</section>
+
+<section class="page" id="android-only" data-group="Портирование" data-title="Поверхности Android">
+  <h2>Поверхности Android <span class="en">Android-only surfaces</span></h2>
+  <p class="lead">Эти имена существуют, чтобы import-строки и ссылки на enum разрешались. Где
+  возможен эквивалент — он настоящий; где нет — вызов пишет в лог, а не притворяется.</p>
+
+  <div class="tbl-wrap"><table class="tbl android-surface-table">
+    <tr><th style="width:34%">Поверхность</th><th>Поведение</th></tr>
+    <tr><td><code>hook_utils.find_class</code></td><td><b>реально</b>: разрешает загруженный Objective-C-класс и возвращает хэндл с <code>.hook(selector, hook)</code>. Неизвестные имена — <code>null</code>.</td></tr>
+    <tr><td><code>hook_utils.get_private_field</code> / <code>set_private_field</code> + статические варианты</td><td>пишут в лог и отвечают <code>null</code> / <code>false</code>: Swift-свойство без <code>@objc</code> недостижимо по имени.</td></tr>
+    <tr><td>Xposed-форма <code>MethodHook</code> / <code>HookFilter</code>, <code>find_class(...).hook(...)</code></td><td><b>реально</b> на Objective-C-методах: хост свизлит селектор, выполняет <code>before</code>, вызывает оригинал (если before не заменил результат), затем <code>after</code> с установленным <code>getResult()</code>. Непереносимая сигнатура (структура/примитив) отклоняется с type encoding, а не ставится с неверным ABI.</td></tr>
+    <tr><td><code>intents.IntentsManager</code></td><td><b>реально</b>: <code>new_global_before_handler</code> / <code>new_global_after_handler</code> матчат открываемые URL по scheme/host/path/query и выполняются по возрастанию приоритета; before-хендлер, вернувший <code>true</code>, не даёт URL открыться. <code>send</code>/<code>startActivity</code> пишут в лог и отвечают <code>false</code>.</td></tr>
+    <tr><td><code>extera_utils.classes.jclassbuilder</code> / <code>makeInstance</code></td><td><b>реально</b>: строит подкласс Objective-C в рантайме (<code>objc_allocateClassPair</code> + <code>class_addMethod</code>, для метода суперкласса — <code>class_replaceMethod</code>) и инстанцирует его. Арность берётся из JS-функции плагина; представимо только «ресивер, ≤2 объектных аргумента, объектный возврат».</td></tr>
+    <tr><td>декораторы <code>extera_utils.classes</code> (<code>java_subclass</code>, <code>joverride</code>, <code>jmethod</code>, …)</td><td>тождественные функции, записывающие декларацию для <code>jclassbuilder</code>.</td></tr>
+    <tr><td><code>get_messages_controller</code>, <code>get_contacts_controller</code>, <code>get_user_config</code>, <code>get_media_data_controller</code>, <code>get_notifications_settings</code>, <code>get_queue_by_name</code></td><td><b>реальные</b> прокси над мостами хоста (см. «Прокси контроллеров»).</td></tr>
+    <tr><td><code>get_last_fragment</code>, <code>get_account_instance</code>, <code>get_connections_manager</code>, <code>send_request</code> и прочие геттеры</td><td>отвечают <code>null</code> и пишут в лог один раз — собственная защита плагина занимает безопасную ветку.</td></tr>
+    <tr><td><code>NotificationCenterDelegate</code></td><td>инстанцируется; наблюдать нечего — центра уведомлений нет.</td></tr>
+    <tr><td><code>FilesController.register</code></td><td>возвращает токен и пишет в лог, что срабатывать нечему.</td></tr>
+    <tr><td>MVEL как язык (<code>mvel_execute</code>, <code>gen</code>, <code>gen2</code>, <code>jMVEL*</code>)</td><td>бросают с ясной причиной. <b>Подмножество выражений</b> для условий — реально и переводится: <code>contains</code> → <code>indexOf(...) &gt;= 0</code>, <code>isdef</code>/<code>undef</code> → проверки undefined, <code>instanceof</code> → <code>false</code> (одна запись в лог). Условия пунктов меню и <code>HookFilter.Condition</code> идут через него оба.</td></tr>
+  </table></div>
+  <p><code>TLRPC</code> несёт классы message-entity — и ничего сверх того.</p>
+</section>
+
+<section class="page" id="controllers" data-group="Портирование" data-title="Прокси контроллеров">
+  <h2>Прокси контроллеров <span class="en">Controller proxies</span></h2>
+  <p class="lead">Геттеры <code>client_utils.get_*</code>, которым достаточно данных, которые
+  можно отдать плагину, работают поверх настоящих вызовов хоста и отвечают асинхронно —
+  в той же форме колбэка, что и HTTP-мосты.</p>
+  <div class="callout"><span class="callout-title">Имена — наши</span>
+    <p>Имена методов наши, не Android'овские: перенесённый плагин получает те же данные через
+    <code>get_messages(peer_id)</code>, а не через вызов Java. Так порт доходит до данных без
+    изменений логики.</p>
+  </div>
+
+<pre class="code"><code>var messages = client_utils.get_messages_controller();
+messages.get_messages(peer_id, 50, function (r) {
+    // r = {ok, messages: [{id, peer_id, date, text, out, has_media, action, ...}, ...]}
+});
+
+var contacts = client_utils.get_contacts_controller();
+contacts.get_peer(peer_id, function (r) { /* r = {ok, peer: {...} | null} */ });
+
+var cfg = client_utils.get_user_config();
+cfg.getClientUserId(function (r) { /* r = {ok, peer_id} */ });
+cfg.getCurrentAccount();   // разрешённый числовой id аккаунта
+
+var media = client_utils.get_media_data_controller();
+media.get_media(peer_id, 50, function (r) { /* r = {ok, media: [...]} */ });
+
+var queue = client_utils.get_queue_by_name("name");
+queue.run(fn); queue.run_after(fn, 250);</code></pre>
+
+  <p><code>get_messages_controller().send_message(peer, text, options)</code> пробрасывает в
+  собственный <code>send_text</code> плагина и выполняется без ожидания — как send в SDK.
+  <code>delete_messages</code> пишет в лог, что сообщение удаляется из UI чата, а не через
+  контроллер, и отвечает <code>{ok: false}</code>. <code>get_notifications_settings().get</code>
+  отвечает данными peer-профиля — именно за ними к нему и обращаются.</p>
+
+  <h3>Peer id на мосту</h3>
+  <p>Peer id — это <code>PeerId.toInt64()</code>: упакованная форма самого клиента, то же число,
+  которое сообщает <code>pluginMessageDetailsJSON</code> и которого ждёт <code>send_message</code>.
+  Это <b>не</b> Telegram-пометка каналов вида <code>-100…</code>: та — конвенция Bot API, клиент
+  внутри себя её не использует; peer id из хука должен годиться для отправки, поэтому обе
+  стороны идут через один кодек и возвращаются в исходном виде. Передавайте peer id, полученный
+  из хука, в любой вызов моста как есть.</p>
+</section>
+
+<section class="page" id="intents" data-group="Портирование" data-title="Интенты">
+  <h2>Интенты <span class="en">Intents</span></h2>
+  <p class="lead"><code>intents.IntentsManager</code> регистрирует глобальные before/after-хендлеры
+  для URL, которые открывает приложение: <code>tg://</code>, <code>https://t.me</code>, deeplinks —
+  всё, что ОС вручает клиенту. URL парсится, хендлеры матчятся по scheme/host/path/query,
+  сортируются по возрастанию приоритета и вызываются со значениями, названными их собственной
+  сигнатурой.</p>
+
+<pre class="code"><code>var IM = intents.IntentsManager;
+
+var handle = IM.new_global_before_handler(function (host, id) {
+    this.log("чат " + id);
+    return true;                 // не дать URL открыться
+}, {scheme: "tg", host: "chat", required_path_args_names: ["id"]});
+
+var after = IM.new_global_after_handler(function (host) {
+    this.log("открыт " + host);
+}, {scheme: "https", host: "t.me"});
+
+handle.unhandle();               // снять один
+IM.unhandle(after.handler_id);   // снять по id</code></pre>
+
+  <h3>Фильтры</h3>
+  <p><code>scheme</code>, <code>host</code>, <code>path</code> (лидирующий <code>/</code>
+  добавляется при отсутствии, шаблоны <code>{var}</code> захватывают значения),
+  <code>required_path_args_names</code> (на практике — обязательные имена <b>query</b>-аргументов),
+  <code>priority</code> (меньший выполняется раньше). <code>action</code>, <code>type</code>,
+  <code>categories</code>, <code>whitelist_flags</code>, <code>blacklist_flags</code> принимаются
+  и матчатся по значениям «Intent», выведенным из URL; открытая ссылка — это
+  <code>ACTION_VIEW</code> без типа и категорий, если URL их не намепил.</p>
+
+  <p><b>Before</b>-хендлер, вернувший <code>true</code>, останавливает оставшиеся before-хендлеры
+  <b>и</b> собственную обработку URL клиентом — iOS-форма <code>param.setResult(true)</code>.
+  <b>After</b>-хендлер остановить ничего не может; он выполняется, когда URL уже обработан.</p>
+
+  <p>Колбэк вызывается только с параметрами, которые он называет: <code>intent</code>,
+  <code>scheme</code>, <code>host</code>, <code>path</code>, <code>query_args</code>,
+  <code>action</code>, <code>flags</code>, <code>type</code>, <code>categories</code> — плюс любой
+  query-аргумент или переменная path-шаблона по имени. Функция без читаемой сигнатуры получает
+  весь объект контекста (случай <code>**kwargs</code>); функция, назвавшая <code>...args</code>,
+  получает стандартный позиционный набор.</p>
+
+  <ul>
+    <li><code>IM.parse(url)</code> возвращает <code>{scheme, host, path, query}</code> — та же
+    форма, которую видит хендлер.</li>
+    <li><code>IM.unhandle(id)</code> бросает <code>HandlerNotRegistered</code> для неизвестного id.</li>
+    <li><code>IM.send</code> / <code>IM.startActivity</code> на iOS смысла не имеют (этому
+    приложению нечего отправлять другим приложениям) и пишут в лог.</li>
+  </ul>
+  <p>Хост вызывает <code>__extera.dispatchUrlIntent(url)</code> перед открытием и
+  <code>__extera.dispatchUrlIntentAfter(url)</code> после; клиент подключает первый в
+  <code>AppDelegate.handleOpenURL</code>, так что before-хендлер с <code>true</code> действительно
+  предотвращает открытие.</p>
+</section>
+
+<section class="page" id="porting" data-group="Портирование" data-title="Портирование с Android">
+  <h2>Портирование с Android <span class="en">Porting checklist</span></h2>
+  <p class="lead">Порядок правок, превращающих плагин из SDK для Android в плагин этого рантайма.</p>
+
+  <ol>
+    <li>Уберите строки <code>from … import …</code> — имена глобальны, <b>кроме</b>
+    <code>parse_text</code> и <code>SimpleSettingFactory</code>, которые живут только под
+    <code>client_utils</code> / <code>ui.settings</code> (см. «Отправка сообщений»). Эти два
+    квалифицируйте вручную.</li>
+    <li><code>def</code> → <code>class P extends BasePlugin { … }</code>; <code>self</code> →
+    <code>this</code>.</li>
+    <li>Именованные аргументы → один замыкающий объект опций:
+    <code>send_text(peer, "x", parse_mode="HTML")</code> →
+    <code>send_text(peer, "x", {parse_mode: "HTML"})</code>.</li>
+    <li>Метаданные остаются литеральными присваиваниями верхнего уровня.</li>
+    <li><code>isinstance</code>, генераторы списков, <code>str.format</code> → JavaScript-эквиваленты.</li>
+    <li>Зарегистрируйте в <code>on_plugin_load</code> каждый реализуемый хук.</li>
+    <li>Ставьте защиту на геттеры контроллеров — здесь они отвечают <code>null</code>.</li>
+    <li><code>parse_mode</code> в одном месте: JS-парсер — тот же, что у
+    <code>client_utils.parse_text</code>.</li>
+    <li>Проверяйте через <code>node js/test</code> — <code>bootstrap.test.js</code> гоняет
+    настоящий <code>bootstrap.js</code> против фальшивого хоста с той exact-формой моста,
+    которую реализует Swift-сторона.</li>
+  </ol>
+
+  <h3>Что обычно ломается при портировании</h3>
+  <ul>
+    <li><b>Сокеты и потоки.</b> Их нет у JS-контекста на iOS. Сетевой транспорт выносится
+    в хост: см. как устроен локальный MTProxy в разделе «Прокси» — плагин только рулит,
+    слушателем владеет клиент.</li>
+    <li><b>Java-классы и DEX.</b> <code>InMemoryDexClassLoader</code>, рефлексия по Java-классам,
+    генерация классов из Python — эквивалента нет. Поведение DEX-модулей воспроизводится
+    декомпиляцией и портом логики на JS-хуки: прецедент — <code>re_extera_dex</code>.</li>
+    <li><b>Activity result / системные файл-пикеры.</b> На iOS нет onActivityResult; бэкапы
+    и выбор файлов делаются через file_utils и свои экраны настроек.</li>
+    <li><b>Android-View и интенты наружу.</b> Кастомных View нет — строки и экраны настроек;
+    URL-схемы наружу урезаны: <code>IntentsManager.send</code> пишет в лог.</li>
+  </ul>
+  <p>Ориентир по объёму: плагины «чистой логики» поверх Telegram-API (фильтры, автоответчики,
+  форматирование, сторедж) портятся почти механически по чеклисту выше; плагины с локальной
+  сетью переносят транспорт в хост; плагины с DEX-пейлоадами — только поведение, после
+  декомпиляции.</p>
+</section>
+
+</main></div></div>
+
+<footer class="foot">
+  <span>ExteraPluginKit · документация API 1.4.5.0 · соответствует SDK exteraGram 1.4.4.3 по именам</span>
+  <span><a href="https://github.com/DarkLuny/tg-ipa" target="_blank" rel="noopener">Репозиторий tg-ipa</a> · исходник этой документации: <code>submodules/ExteraPluginKit/docs/API.md</code></span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var GROUP_ORDER = ["Начало работы", "Основы", "Сообщения и клиент", "Сеть", "Интерфейс", "Инструменты", "Портирование"];
+  var pages = [].slice.call(document.querySelectorAll(".page"));
+  var sidebar = document.getElementById("sidebar");
+  var toc = document.getElementById("toc");
+  var qInput = document.getElementById("q");
+  var qResults = document.getElementById("q-results");
+
+  /* ---------- сайдбар ---------- */
+  var byGroup = {};
+  pages.forEach(function (p) {
+    var g = p.dataset.group;
+    (byGroup[g] = byGroup[g] || []).push(p);
+  });
+  var html = "";
+  GROUP_ORDER.forEach(function (g, gi) {
+    if (!byGroup[g]) return;
+    var count = byGroup[g].length;
+    html += '<section class="sb-group" data-group="' + g + '">' +
+      '<button class="sb-group-toggle" type="button" aria-expanded="' + (gi === 0 ? 'true' : 'false') + '">' +
+        '<span class="sb-group-title">' + g + '</span>' +
+        '<span class="sb-group-count">' + String(count).padStart(2, '0') + '</span>' +
+        '<svg class="sb-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>' +
+      '</button><div class="sb-group-links">';
+    byGroup[g].forEach(function (p) {
+      html += '<a class="sb-link" data-target="' + p.id + '" href="#' + p.id + '"><span class="sb-link-dot"></span><span>' + p.dataset.title + '</span></a>';
+    });
+    html += '</div></section>';
+  });
+  sidebar.innerHTML = html;
+  var sbLinks = [].slice.call(sidebar.querySelectorAll(".sb-link"));
+  var navGroups = [].slice.call(sidebar.querySelectorAll(".sb-group"));
+  sbLinks.forEach(function (l, i) { l.style.setProperty("--i", i); });
+
+  function setOpenGroup(groupName) {
+    navGroups.forEach(function (group) {
+      var open = group.dataset.group === groupName;
+      group.classList.toggle("is-open", open);
+      var toggle = group.querySelector(".sb-group-toggle");
+      if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  }
+  navGroups.forEach(function (group) {
+    var toggle = group.querySelector(".sb-group-toggle");
+    toggle.addEventListener("click", function () {
+      var shouldOpen = !group.classList.contains("is-open");
+      navGroups.forEach(function (other) {
+        var open = shouldOpen && other === group;
+        other.classList.toggle("is-open", open);
+        var button = other.querySelector(".sb-group-toggle");
+        if (button) button.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+    });
+  });
+
+  /* ---------- TOC ---------- */
+  var tocEl = document.createElement("aside");
+  tocEl.className = "toc";
+  tocEl.id = "toc";
+  tocEl.innerHTML = '<div class="toc-title">На этой странице</div><div class="toc-body"></div>';
+  document.querySelector(".content-wrap").appendChild(tocEl);
+  var tocBody = tocEl.querySelector(".toc-body");
+
+  function rebuildToc(page) {
+    var hs = [].slice.call(page.querySelectorAll("h3"));
+    var out = "";
+    hs.forEach(function (h, i) {
+      if (!h.id) h.id = page.id + "--h" + (i + 1);
+      out += '<a href="#' + h.id + '">' + h.textContent + "</a>";
+    });
+    tocBody.innerHTML = out || "";
+    tocEl.classList.toggle("is-visible", hs.length > 0);
+  }
+
+  /* ---------- prev / next ---------- */
+  pages.forEach(function (p, i) {
+    var pn = document.createElement("div");
+    pn.className = "pn";
+    var html2 = "";
+    if (i > 0) {
+      html2 += '<a class="prev" href="#' + pages[i - 1].id + '"><b>Назад</b><span>' + pages[i - 1].dataset.title + "</span></a>";
+    }
+    if (i < pages.length - 1) {
+      html2 += '<a class="next" href="#' + pages[i + 1].id + '"><b>Далее</b><span>' + pages[i + 1].dataset.title + "</span></a>";
+    }
+    if (html2) { pn.innerHTML = html2; p.appendChild(pn); }
+  });
+
+  /* ---------- навигация и scroll-spy ---------- */
+  var activePage = null;
+  var scrollFrame = 0;
+  var userInterruptedScroll = false;
+  var programmaticScroll = false;
+
+  function activatePage(page, keepMenuCentered) {
+    if (!page) return;
+    activePage = page;
+    sbLinks.forEach(function (link) {
+      var active = link.dataset.target === page.id;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    });
+    setOpenGroup(page.dataset.group);
+    rebuildToc(page);
+    if (keepMenuCentered !== false) {
+      var selected = sidebar.querySelector(".sb-link.active");
+      if (selected && selected.scrollIntoView) selected.scrollIntoView({block: "nearest", behavior: "smooth"});
+    }
+  }
+
+  function cancelProgrammaticScroll() {
+    if (!programmaticScroll) return;
+    userInterruptedScroll = true;
+    programmaticScroll = false;
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+  }
+  window.addEventListener("wheel", cancelProgrammaticScroll, {passive:true});
+  window.addEventListener("touchstart", cancelProgrammaticScroll, {passive:true});
+  window.addEventListener("keydown", function (ev) {
+    if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].indexOf(ev.key) !== -1 && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) cancelProgrammaticScroll();
+  });
+
+  function goTo(id) {
+    var target = document.getElementById(id);
+    if (!target) return;
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    userInterruptedScroll = false;
+    var startY = window.pageYOffset || document.documentElement.scrollTop || 0;
+    var headerOffset = window.innerWidth <= 900 ? Math.max(76, document.querySelector(".topbar").offsetHeight + 12) : 82;
+    var targetY = Math.max(0, startY + target.getBoundingClientRect().top - headerOffset);
+    var distance = targetY - startY;
+    var duration = RM ? 260 : Math.max(340, Math.min(1150, Math.abs(distance) * .34 + 220));
+    var startTime = 0;
+    programmaticScroll = true;
+    activatePage(target, true);
+    try { history.replaceState(null, "", "#" + id); } catch (e) {}
+
+    pages.forEach(function (page) { page.classList.remove("flash"); });
+    void target.offsetWidth;
+    target.classList.add("flash");
+    setTimeout(function () { target.classList.remove("flash"); }, 1100);
+
+    function frame(now) {
+      if (!programmaticScroll || userInterruptedScroll) return;
+      if (!startTime) startTime = now;
+      var t = Math.min(1, (now - startTime) / duration);
+      var eased = 1 - Math.pow(1 - t, 3);
+      window.scrollTo(0, startY + distance * eased);
+      if (t < 1) {
+        scrollFrame = requestAnimationFrame(frame);
+      } else {
+        window.scrollTo(0, targetY);
+        scrollFrame = 0;
+        programmaticScroll = false;
+        onScroll();
+      }
+    }
+    scrollFrame = requestAnimationFrame(frame);
+  }
+
+  document.addEventListener("click", function (ev) {
+    var a = ev.target.closest ? ev.target.closest('a[href^="#"]') : null;
+    if (!a) return;
+    var id = a.getAttribute("href").slice(1);
+    if (!id || !document.getElementById(id)) return;
+    ev.preventDefault();
+    goTo(id);
+    if (window.innerWidth <= 900) setMobileNav(false);
+  });
+
+  function onScroll() {
+    if (programmaticScroll) return;
+    var cur = pages[0];
+    var marker = window.innerWidth <= 900 ? 116 : 126;
+    for (var i = 0; i < pages.length; i++) {
+      if (pages[i].getBoundingClientRect().top <= marker) cur = pages[i];
+      else break;
+    }
+    if (window.innerHeight + window.pageYOffset >= document.documentElement.scrollHeight - 8) cur = pages[pages.length - 1];
+    if (cur !== activePage) activatePage(cur, true);
+
+    if (activePage) {
+      var hs = [].slice.call(activePage.querySelectorAll("h3"));
+      var curH = null;
+      for (var j = 0; j < hs.length; j++) {
+        if (hs[j].getBoundingClientRect().top <= 150) curH = hs[j];
+      }
+      [].slice.call(tocBody.children).forEach(function (link) {
+        link.classList.toggle("active", !!(curH && link.getAttribute("href") === "#" + curH.id));
+      });
+    }
+    updateChrome();
+  }
+  window.addEventListener("scroll", onScroll, {passive:true});
+  window.addEventListener("resize", onScroll);
+  onScroll();
+
+  /* ---------- тема ---------- */
+  var themeBtn = document.getElementById("theme-btn");
+  var themeUse = document.getElementById("theme-ico-use");
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    document.documentElement.style.colorScheme = t;
+    themeUse.setAttribute("href", t === "dark" ? "#i-sun" : "#i-moon");
+    themeBtn.setAttribute("aria-label", t === "dark" ? "Включить светлую тему" : "Включить тёмную тему");
+    themeBtn.setAttribute("aria-pressed", t === "light" ? "true" : "false");
+    themeBtn.setAttribute("title", t === "dark" ? "Светлая тема" : "Тёмная тема");
+    try { localStorage.setItem("epk-theme", t); } catch (e) {}
+  }
+  var saved = null;
+  try { saved = localStorage.getItem("epk-theme"); } catch (e) {}
+  applyTheme(saved === "light" || saved === "dark" ? saved : "dark");
+  themeBtn.addEventListener("click", function () {
+    themeBtn.classList.toggle("alt");
+    applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  });
+
+  /* ---------- мобильное меню ---------- */
+  var burger = document.getElementById("burger");
+  var backdrop = document.getElementById("sb-backdrop");
+  function setMobileNav(open) {
+    document.body.classList.toggle("nav-open", !!open);
+    burger.setAttribute("aria-expanded", open ? "true" : "false");
+    burger.setAttribute("aria-label", open ? "Закрыть меню" : "Открыть меню");
+    if (open) closeSearch();
+  }
+  burger.setAttribute("aria-expanded", "false");
+  burger.addEventListener("click", function () {
+    setMobileNav(!document.body.classList.contains("nav-open"));
+  });
+  backdrop.addEventListener("click", function () { setMobileNav(false); });
+
+  /* ---------- подсветка синтаксиса и копирование ---------- */
+  function escapeCode(value) {
+    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function highlightSource(raw) {
+    var tokenRe = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:class|extends|function|return|var|let|const|if|else|for|while|new|this|super|throw|try|catch|finally|async|await|break|continue|switch|case|default|instanceof|typeof|delete|void|yield|import|export|from|as|of|in|static|get|set)\b|\b(?:true|false|null|undefined|NaN|Infinity)\b|\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b|[A-Za-z_$][\w$]*(?=\s*\()|[A-Za-z_$][\w$]*)/g;
+    var out = "", last = 0, match;
+    while ((match = tokenRe.exec(raw))) {
+      out += escapeCode(raw.slice(last, match.index));
+      var token = match[0], cls = "tok-ident";
+      if (/^\/\//.test(token) || /^\/\*/.test(token)) cls = "tok-comment";
+      else if (/^["'`]/.test(token)) cls = "tok-string";
+      else if (/^\d/.test(token)) cls = "tok-number";
+      else if (/^(true|false|null|undefined|NaN|Infinity)$/.test(token)) cls = "tok-literal";
+      else if (/^(class|extends|function|return|var|let|const|if|else|for|while|new|this|super|throw|try|catch|finally|async|await|break|continue|switch|case|default|instanceof|typeof|delete|void|yield|import|export|from|as|of|in|static|get|set)$/.test(token)) cls = "tok-keyword";
+      else if (/^[A-Z]/.test(token)) cls = "tok-type";
+      else if (/^[A-Za-z_$][\w$]*$/.test(token) && /^\s*\(/.test(raw.slice(tokenRe.lastIndex))) cls = "tok-function";
+      else if (/^[A-Za-z_$][\w$]*$/.test(token) && (raw[match.index - 1] === "." || /^\s*:/.test(raw.slice(tokenRe.lastIndex)))) cls = "tok-property";
+      out += '<span class="' + cls + '">' + escapeCode(token) + '</span>';
+      last = tokenRe.lastIndex;
+    }
+    out += escapeCode(raw.slice(last));
+    return out;
+  }
+
+  [].slice.call(document.querySelectorAll("pre.code")).forEach(function (pre) {
+    var code = pre.querySelector("code");
+    var raw = code ? code.textContent : pre.textContent;
+    pre.dataset.rawCode = raw;
+    if (code) code.innerHTML = highlightSource(raw);
+
+    var btn = document.createElement("button");
+    btn.className = "copy-btn";
+    btn.type = "button";
+    btn.setAttribute("aria-label", "Скопировать код");
+    btn.setAttribute("title", "Скопировать код");
+    btn.innerHTML = '<svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h2"></path></svg><svg class="copied-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>';
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var text = pre.dataset.rawCode || (code ? code.textContent : pre.textContent);
+      function done() {
+        btn.classList.add("done");
+        btn.setAttribute("aria-label", "Код скопирован");
+        btn.setAttribute("title", "Код скопирован");
+        setTimeout(function () {
+          btn.classList.remove("done");
+          btn.setAttribute("aria-label", "Скопировать код");
+          btn.setAttribute("title", "Скопировать код");
+        }, 1450);
+      }
+      function fallback() {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+      else fallback();
+    });
+    pre.appendChild(btn);
+  });
+
+  /* ---------- поиск ---------- */
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function escRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  function markTokens(text, tokens) {
+    if (!tokens.length) return esc(text);
+    var re = new RegExp("(" + tokens.map(escRe).join("|") + ")", "gi");
+    return esc(text).replace(re, "<mark>$1</mark>");
+  }
+
+  var index = [];
+  pages.forEach(function (p, pi) {
+    var blocks = [{text: p.dataset.title + " " + p.dataset.group, kind: "text"}];
+    var lead = p.querySelector(".lead");
+    if (lead) blocks.push({text: lead.textContent, kind: "text"});
+    [].slice.call(p.querySelectorAll("h3")).forEach(function (h) {
+      blocks.push({text: h.textContent, kind: "text"});
+    });
+    [].slice.call(p.querySelectorAll(".page p, .page li, .page td, .callout p")).forEach(function (el) {
+      blocks.push({text: el.textContent, kind: "text"});
+    });
+    [].slice.call(p.querySelectorAll("pre.code code")).forEach(function (el) {
+      el.textContent.split("\n").forEach(function (line) {
+        if (line.trim()) blocks.push({text: line, kind: "code"});
+      });
+    });
+    index.push({page: p, pi: pi, title: p.dataset.title, group: p.dataset.group, blocks: blocks});
+  });
+
+  function runSearch(query) {
+    var tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    var results = [];
+    if (tokens.length) {
+      index.forEach(function (entry) {
+        var titleAll = tokens.every(function (t) { return entry.title.toLowerCase().indexOf(t) >= 0; });
+        var hits = [];
+        entry.blocks.forEach(function (b) {
+          var low = b.text.toLowerCase();
+          if (tokens.every(function (t) { return low.indexOf(t) >= 0; })) hits.push(b);
+        });
+        if (hits.length || titleAll) {
+          results.push({entry: entry, block: hits[0] || null, score: (titleAll ? 5 : 0) + hits.length});
+        }
+      });
+      results.sort(function (a, b) { return b.score - a.score || a.entry.pi - b.entry.pi; });
+      results = results.slice(0, 14);
+    }
+    var out = results.length ? '<div class="sr-meta">РЕЗУЛЬТАТЫ ПОИСКА <span>' + results.length + '</span></div>' : "";
+    results.forEach(function (r, i) {
+      var snip = "";
+      if (r.block) {
+        var text = r.block.text.trim();
+        var low = text.toLowerCase();
+        var pos = -1, j;
+        for (j = 0; j < tokens.length; j++) { pos = low.indexOf(tokens[j]); if (pos >= 0) break; }
+        if (pos < 0) pos = 0;
+        var start = Math.max(0, pos - 55);
+        var end = Math.min(text.length, pos + 105);
+        if (start > 0) text = "…" + text.slice(start); else text = text.slice(0, end);
+        if (end < r.block.text.length) text += "…";
+        snip = '<div class="sr-snip">' + (r.block.kind === "code" ? "<code>" : "") + markTokens(text, tokens) + (r.block.kind === "code" ? "</code>" : "") + "</div>";
+      }
+      out += '<button class="sr-item" type="button" data-target="' + r.entry.page.id + '">' +
+        '<div class="sr-title">' + markTokens(r.entry.title, tokens) + ' <span class="sr-group">· ' + esc(r.entry.group) + "</span></div>" + snip + "</button>";
+    });
+    if (!out) out = '<div class="sr-empty">Ничего не найдено. Попробуйте иначе: <b>scheduleDate</b>, <b>спойлер</b>, <b>parse_text</b>…</div>';
+    out += '<div class="sr-hint">↑↓ выбор · Enter переход · Esc закрыть</div>';
+    qResults.innerHTML = out;
+    qResults.classList.add("open");
+    selIdx = 0;
+    updateSel();
+  }
+
+  var selIdx = -1;
+  function items() { return [].slice.call(qResults.querySelectorAll(".sr-item")); }
+  function updateSel() {
+    items().forEach(function (el, i) { el.classList.toggle("sel", i === selIdx); });
+    var s = qResults.querySelector(".sr-item.sel");
+    // Scroll only the suggestions panel. Element.scrollIntoView() also moved the page
+    // itself on mobile Safari/Chrome, making every keystroke look like navigation.
+    if (s) {
+      var itemRect = s.getBoundingClientRect();
+      var panelRect = qResults.getBoundingClientRect();
+      if (itemRect.top < panelRect.top) qResults.scrollTop -= panelRect.top - itemRect.top;
+      else if (itemRect.bottom > panelRect.bottom) qResults.scrollTop += itemRect.bottom - panelRect.bottom;
+    }
+  }
+  function closeSearch() {
+    qResults.classList.remove("open");
+    selIdx = -1;
+  }
+  function goSel() {
+    var its = items();
+    var el = its[selIdx] || its[0];
+    if (!el) return;
+    closeSearch();
+    goTo(el.dataset.target);
+  }
+
+  qInput.addEventListener("input", function () {
+    var v = qInput.value.trim();
+    if (v.length < 2) { closeSearch(); qResults.classList.remove("open"); return; }
+    runSearch(v);
+  });
+  qInput.addEventListener("focus", function () {
+    if (window.innerWidth <= 900 && document.body.classList.contains("nav-open")) setMobileNav(false);
+    if (qInput.value.trim().length >= 2) runSearch(qInput.value.trim());
+  });
+  qInput.addEventListener("keydown", function (ev) {
+    var its = items();
+    if (ev.key === "Escape") { closeSearch(); qInput.blur(); return; }
+    if (!qResults.classList.contains("open") || !its.length) return;
+    if (ev.key === "ArrowDown") { ev.preventDefault(); selIdx = Math.min(its.length - 1, selIdx + 1); updateSel(); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); selIdx = Math.max(0, selIdx - 1); updateSel(); }
+    else if (ev.key === "Enter") { ev.preventDefault(); goSel(); }
+  });
+  qResults.addEventListener("click", function (ev) {
+    var it = ev.target.closest ? ev.target.closest(".sr-item") : null;
+    if (it) { closeSearch(); goTo(it.dataset.target); }
+  });
+  document.addEventListener("keydown", function (ev) {
+    var inField = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
+      ev.preventDefault();
+      qInput.focus();
+      qInput.select();
+    } else if (ev.key === "/" && !inField) {
+      ev.preventDefault();
+      qInput.focus();
+    }
+  });
+  document.addEventListener("click", function (ev) {
+    if (!qResults.classList.contains("open")) return;
+    if (ev.target.closest && ev.target.closest(".searchbox")) return;
+    closeSearch();
+  });
+
+  /* ---------- reversible scroll reveal, progress, TOC indicator ---------- */
+  var RM = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+  var RSEL = ".page > h2, .lead, .hero h1, .hero-sub, .factline, .card, .whatsnew, " +
+    ".page h3, .page p:not(.callout p), .page ul:not(.whatsnew ul), .page ol, " +
+    ".tbl-wrap, pre.code, .callout, .pn";
+  pages.forEach(function (p) {
+    [].slice.call(p.querySelectorAll(RSEL)).forEach(function (el, i) {
+      el.classList.add("rv");
+      el.style.setProperty("--d", Math.min(i * 38, 220) + "ms");
+    });
+  });
+
+  var revealElements = [].slice.call(document.querySelectorAll("#content .rv"));
+  var lastRevealY = window.pageYOffset || document.documentElement.scrollTop || 0;
+  var revealFrame = 0;
+
+  function updateRevealDirection() {
+    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    var delta = y - lastRevealY;
+    if (delta > 0.5) {
+      document.body.classList.add("scroll-down");
+      document.body.classList.remove("scroll-up");
+    } else if (delta < -0.5) {
+      document.body.classList.add("scroll-up");
+      document.body.classList.remove("scroll-down");
+    }
+    lastRevealY = y;
+  }
+
+  function revealPass() {
+    revealFrame = 0;
+    if (RM) {
+      revealElements.forEach(function (el) { el.classList.add("in"); el.classList.remove("out"); });
+      return;
+    }
+    var vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight);
+    var activeTop = vh * 0.97;
+    var activeBottom = vh * 0.035;
+    revealElements.forEach(function (el) {
+      var rect = el.getBoundingClientRect();
+      var visible = rect.bottom > activeBottom && rect.top < activeTop;
+      if (visible) {
+        el.dataset.revealSide = "inside";
+        if (!el.classList.contains("in")) {
+          el.classList.remove("out");
+          el.classList.add("in");
+        }
+      } else {
+        var side = rect.bottom <= activeBottom ? "above" : "below";
+        el.dataset.revealSide = side;
+        if (el.classList.contains("in")) {
+          el.classList.remove("in");
+          el.classList.add("out");
+        } else if (!el.classList.contains("out")) {
+          el.classList.add("out");
+        }
+      }
+    });
+  }
+  function scheduleReveal() {
+    if (!revealFrame) revealFrame = requestAnimationFrame(revealPass);
+  }
+  window.addEventListener("scroll", updateRevealDirection, {passive:true});
+  window.addEventListener("scroll", scheduleReveal, {passive:true});
+  window.addEventListener("resize", scheduleReveal, {passive:true});
+  if (RM) {
+    revealElements.forEach(function (el) { el.classList.add("in"); el.classList.remove("out"); });
+  } else {
+    revealElements.forEach(function (el) { el.classList.remove("in"); el.classList.add("out"); });
+    scheduleReveal();
+  }
+
+  var progress = document.createElement("div");
+  progress.id = "progress";
+  document.body.appendChild(progress);
+
+  var tocInd = document.createElement("span");
+  tocInd.className = "toc-ind";
+  tocEl.appendChild(tocInd);
+
+  function updateChrome() {
+    if (!progress || !tocInd) return;
+    var max = document.documentElement.scrollHeight - window.innerHeight;
+    var p = max > 0 ? window.scrollY / max : 1;
+    if (p < 0) p = 0; if (p > 1) p = 1;
+    progress.style.transform = "scaleX(" + p + ")";
+    var la = tocBody.querySelector("a.active");
+    if (la) {
+      tocInd.style.opacity = "1";
+      tocInd.style.top = la.offsetTop + "px";
+      tocInd.style.height = la.offsetHeight + "px";
+    } else {
+      tocInd.style.opacity = "0";
+    }
+  }
+
+  /* ---------- старт: перейти по хэшу ---------- */
+  if (location.hash) {
+    var t = document.getElementById(location.hash.slice(1));
+    if (t) setTimeout(function () { goTo(t.id); }, 60);
+  }
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+  var reduced = false;
+  var finePointer = window.matchMedia && window.matchMedia("(pointer: fine)").matches;
+
+  // Sidebar identity panel: the navigation itself is still generated by the original documentation script.
+  var sidebar = document.getElementById("sidebar");
+  if (sidebar && !sidebar.querySelector(".sidebar-cap")) {
+    var cap = document.createElement("div");
+    cap.className = "sidebar-cap";
+    cap.innerHTML = '<div class="sidebar-cap-top"><span class="sidebar-cap-mark">EPK</span><span>ExteraPluginKit</span></div><small>PLUGIN API · IOS RUNTIME</small>';
+    sidebar.insertBefore(cap, sidebar.firstChild);
+  }
+
+  // Soft cursor aura, interpolated to avoid the usual cheap mouse-follow jitter.
+  if (finePointer && !reduced) {
+    var aura = document.createElement("div");
+    aura.id = "cursor-aura";
+    document.body.appendChild(aura);
+    var cursorCore = document.createElement("div");
+    cursorCore.className = "cursor-core";
+    document.body.appendChild(cursorCore);
+    var tx = 0, ty = 0, x = 0, y = 0, cx = 0, cy = 0;
+    var cursorFrame = 0, cursorReady = false, lastCursorFrame = 0;
+    document.addEventListener("pointermove", function (ev) {
+      tx = ev.clientX; ty = ev.clientY;
+      if (!cursorReady) {
+        cursorReady = true;
+        x = cx = tx; y = cy = ty;
+        aura.style.transform = "translate3d(" + x + "px," + y + "px,0) translate3d(-50%,-50%,0)";
+        cursorCore.style.transform = "translate3d(" + cx + "px," + cy + "px,0) translate3d(-50%,-50%,0)";
+      }
+      document.body.classList.add("has-pointer");
+      var hoverTarget = ev.target && ev.target.closest ? ev.target.closest("a,button,.card,.fact,pre.code") : null;
+      document.body.classList.toggle("cursor-over", !!hoverTarget);
+      if (!cursorFrame) cursorFrame = requestAnimationFrame(moveAura);
+    }, {passive:true});
+    document.addEventListener("pointerleave", function () {
+      document.body.classList.remove("has-pointer");
+      document.body.classList.remove("cursor-over");
+    }, {passive:true});
+    function moveAura(now) {
+      var dt = lastCursorFrame ? Math.min(40, now - lastCursorFrame) : 16.67;
+      lastCursorFrame = now;
+      var auraEase = 1 - Math.exp(-dt / 190);
+      var coreEase = 1 - Math.exp(-dt / 76);
+      x += (tx - x) * auraEase; y += (ty - y) * auraEase;
+      cx += (tx - cx) * coreEase; cy += (ty - cy) * coreEase;
+      aura.style.transform = "translate3d(" + x.toFixed(2) + "px," + y.toFixed(2) + "px,0) translate3d(-50%,-50%,0)";
+      cursorCore.style.transform = "translate3d(" + cx.toFixed(2) + "px," + cy.toFixed(2) + "px,0) translate3d(-50%,-50%,0)";
+      var auraGap = Math.abs(tx-x) + Math.abs(ty-y);
+      var coreGap = Math.abs(tx-cx) + Math.abs(ty-cy);
+      if (auraGap > .12 || coreGap > .12) {
+        cursorFrame = requestAnimationFrame(moveAura);
+      } else {
+        x = cx = tx; y = cy = ty;
+        cursorFrame = 0;
+        lastCursorFrame = 0;
+      }
+    }
+  }
+
+  // Hero parallax: spring-smoothed in both directions, including the return to rest.
+  var hero = document.querySelector(".hero");
+  var scene = document.querySelector(".hero-scene");
+  var canvas = document.getElementById("hero-particles");
+  if (hero && scene && finePointer && !reduced) {
+    var targetPX = 0, targetPY = 0, currentPX = 0, currentPY = 0;
+    var parallaxFrame = 0, parallaxLastTime = 0;
+
+    function queueParallax() {
+      if (!parallaxFrame) parallaxFrame = requestAnimationFrame(animateParallax);
+    }
+    function animateParallax(now) {
+      var dt = parallaxLastTime ? Math.min(40, now - parallaxLastTime) : 16.67;
+      parallaxLastTime = now;
+      var ease = 1 - Math.exp(-dt / 210);
+      currentPX += (targetPX - currentPX) * ease;
+      currentPY += (targetPY - currentPY) * ease;
+      scene.style.setProperty("--px", currentPX.toFixed(3) + "px");
+      scene.style.setProperty("--py", currentPY.toFixed(3) + "px");
+
+      if (Math.abs(targetPX - currentPX) > .025 || Math.abs(targetPY - currentPY) > .025) {
+        parallaxFrame = requestAnimationFrame(animateParallax);
+      } else {
+        currentPX = targetPX;
+        currentPY = targetPY;
+        scene.style.setProperty("--px", currentPX.toFixed(3) + "px");
+        scene.style.setProperty("--py", currentPY.toFixed(3) + "px");
+        parallaxFrame = 0;
+        parallaxLastTime = 0;
+      }
+    }
+
+    hero.addEventListener("pointermove", function (ev) {
+      var r = hero.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      var nx = Math.max(-.5, Math.min(.5, (ev.clientX - r.left) / r.width - .5));
+      var ny = Math.max(-.5, Math.min(.5, (ev.clientY - r.top) / r.height - .5));
+      targetPX = nx * 26;
+      targetPY = ny * 22;
+      if (canvas) {
+        canvas.dataset.mx = String(ev.clientX - r.left);
+        canvas.dataset.my = String(ev.clientY - r.top);
+      }
+      queueParallax();
+    }, {passive:true});
+
+    function returnParallaxToRest() {
+      targetPX = 0;
+      targetPY = 0;
+      if (canvas) { canvas.dataset.mx = "-1000"; canvas.dataset.my = "-1000"; }
+      queueParallax();
+    }
+    hero.addEventListener("pointerleave", returnParallaxToRest, {passive:true});
+    hero.addEventListener("pointercancel", returnParallaxToRest, {passive:true});
+  }
+
+  // Lightweight animated constellation on the hero only.
+  if (canvas && !reduced && canvas.getContext) {
+    var ctx = canvas.getContext("2d");
+    if (ctx) {
+      var w = 0, h = 0, dpr = Math.min(window.devicePixelRatio || 1, 1.6), dots = [], raf = 0;
+      var box = canvas.parentElement;
+      function resize() {
+        var rect = box.getBoundingClientRect();
+        w = Math.max(1, rect.width); h = Math.max(1, rect.height);
+        canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+        ctx.setTransform(dpr,0,0,dpr,0,0);
+        var count = Math.max(28, Math.min(68, Math.round(w * h / 12500)));
+        dots = Array.from({length:count}, function () { return {x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.22,vy:(Math.random()-.5)*.22,r:.45+Math.random()*1.05,a:.18+Math.random()*.48}; });
+      }
+      function draw() {
+        ctx.clearRect(0,0,w,h);
+        var mx = Number(canvas.dataset.mx || -1000), my = Number(canvas.dataset.my || -1000);
+        for (var i=0;i<dots.length;i++) {
+          var p=dots[i]; p.x+=p.vx; p.y+=p.vy;
+          if(p.x<0||p.x>w)p.vx*=-1; if(p.y<0||p.y>h)p.vy*=-1;
+          var dx=p.x-mx,dy=p.y-my,dist=Math.sqrt(dx*dx+dy*dy);
+          if(dist<125 && dist>0){var force=(125-dist)/125*.012;p.vx+=(dx/dist)*force;p.vy+=(dy/dist)*force;}
+          p.vx=Math.max(-.34,Math.min(.34,p.vx));p.vy=Math.max(-.34,Math.min(.34,p.vy));
+          ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fillStyle="rgba(193,255,162,"+p.a+")";ctx.fill();
+          for(var j=i+1;j<dots.length;j++){
+            var q=dots[j],lx=p.x-q.x,ly=p.y-q.y,dd=lx*lx+ly*ly;
+            if(dd<105*105){ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.strokeStyle="rgba(125,218,203,"+(1-dd/(105*105))*.105+")";ctx.lineWidth=.65;ctx.stroke();}
+          }
+        }
+        raf=requestAnimationFrame(draw);
+      }
+      resize(); draw();
+      window.addEventListener("resize", function () { cancelAnimationFrame(raf); resize(); draw(); }, {passive:true});
+      document.addEventListener("visibilitychange", function () { if(document.hidden){cancelAnimationFrame(raf);}else if(!reduced){draw();} });
+    }
+  }
+
+  // Subtle 3D tilt with a light hotspot on feature cards.
+  if (finePointer && !reduced) {
+    Array.prototype.forEach.call(document.querySelectorAll(".cards .card"), function (card) {
+      card.addEventListener("pointermove", function (ev) {
+        var r=card.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
+        var rx=(mx/r.width-.5), ry=(my/r.height-.5);
+        card.style.setProperty("--mx",mx+"px"); card.style.setProperty("--my",my+"px");
+        card.style.transform="perspective(900px) rotateX("+(-ry*5).toFixed(2)+"deg) rotateY("+(rx*6).toFixed(2)+"deg) translateY(-5px)";
+      }, {passive:true});
+      card.addEventListener("pointerleave", function () { card.style.transform=""; card.style.setProperty("--mx", "50%"); card.style.setProperty("--my", "50%"); }, {passive:true});
+    });
+  }
+
+  // Reveal the original hero scene after load instead of flashing it in at full intensity.
+  if (!reduced) {
+    var stage=document.querySelector(".hero-stage");
+    if(stage){stage.classList.add("stage-ready");}
+  }
+
+  // Touch devices get a small light ripple instead of a cursor follower.
+  if (!finePointer && !reduced) {
+    document.addEventListener("pointerdown", function (ev) {
+      if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
+      if (ev.target && ev.target.closest && ev.target.closest("input,textarea,select")) return;
+      var ripple = document.createElement("span");
+      ripple.className = "touch-ripple";
+      ripple.style.left = ev.clientX + "px";
+      ripple.style.top = ev.clientY + "px";
+      document.body.appendChild(ripple);
+      ripple.addEventListener("animationend", function () { ripple.remove(); }, {once:true});
+    }, {passive:true});
+  }
+})();
+</script>
+
+</body>
+</html>
