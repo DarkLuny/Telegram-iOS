@@ -26,7 +26,7 @@ public enum PluginLog {
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }
                 handle.seekToEndOfFile()
-                handle.write(data)
+                try? handle.write(contentsOf: data)
                 if handle.offsetInFile > UInt64(self.maxBytes) {
                     try? handle.truncate(atOffset: 0)
                 }

@@ -1211,7 +1211,18 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                 // runtime. Both belong to the app's launch path.
                 PluginCrashGuard.shared.beginSession()
                 if !PluginCrashGuard.shared.isSafeModeEnabled {
-                    startTgWsProxyIfEnabled(sharedContext: sharedContext)
+                    // Start the tunnel after the first launch turn, not in the
+                    // middle of Telegram's own connection setup. Activating a
+                    // local proxy entry while the account is opening its
+                    // datacenters swapped the transport under the initial
+                    // handshake; two seconds later Telegram is either online
+                    // through the tunnel or has already failed once and is
+                    // ready to retry.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        if !PluginCrashGuard.shared.isSafeModeEnabled {
+                            startTgWsProxyIfEnabled(sharedContext: sharedContext)
+                        }
+                    }
                 }
                 PluginRuntime.shared.activate(sharedContext: sharedContext)
             }

@@ -205,13 +205,63 @@ public final class PluginManager: PluginHost {
     /// plugin that gates a feature on `__sdk_version__` gets the true answer.
     static let supportedSDKVersion = "1.4.5.0"
 
+    /// Moves the old `tg_ws_proxy` plugin's settings into the built-in Extension
+    /// and removes the plugin. The proxy is not a plugin any more; keeping the old
+    /// script would let it call `proxy.local_start` on every launch, which fights
+    /// the extension over the listener and the active proxy entry.
+    private func retireLegacyTgWsPluginIfNeeded() {
+        let pluginId = "tg_ws_proxy"
+        let defaults = UserDefaults.standard
+        let settingsKey = "extera.plugin.settings.\(pluginId)"
+        let migrationKey = "extera.extensions.tgwsproxy.legacy_migrated"
+
+        let installed = self.store.pluginSources().contains { source in
+            return source.id == pluginId || source.url.lastPathComponent.hasPrefix(pluginId)
+        }
+
+        if !defaults.bool(forKey: migrationKey) {
+            let settings = defaults.dictionary(forKey: settingsKey)
+            if let enabled = settings?["enabled"] as? NSNumber {
+                defaults.set(enabled.boolValue, forKey: "extera.extensions.tgwsproxy.enabled")
+            } else if installed {
+                // The plugin defaulted to enabled and started the tunnel as soon
+                // as it loaded. Preserve that intent when there is no saved switch.
+                defaults.set(true, forKey: "extera.extensions.tgwsproxy.enabled")
+            }
+            if let zone = settings?["zone_index"] as? NSNumber {
+                defaults.set(zone.intValue, forKey: "extera.extensions.tgwsproxy.zone_index")
+            }
+            if let custom = settings?["custom_domain"] as? String {
+                defaults.set(custom, forKey: "extera.extensions.tgwsproxy.custom_domain")
+            }
+            defaults.set(true, forKey: migrationKey)
+        }
+
+        if installed {
+            self.pluginLog(pluginId: "extensions", text: "TG WS Proxy moved to Settings → Extensions; the old plugin was removed.")
+            self.store.remove(pluginId: pluginId)
+            // `remove` clears the disabled flag so a later install works; this id
+            // must stay blocked even if a bundle copy has a different folder name.
+            self.store.setEnabled(false, pluginId: pluginId)
+        }
+    }
+
     private func loadAllOnQueue() {
         guard let bootstrapSource = self.pluginSource else {
             return
         }
-        // Safe Mode is checked before the plugin directory is even read. A
-        // plugin that crashed the previous launch must not get as far as its
-        // top-level code this time.
+        // The local proxy used to be a plugin. It is now the built-in Extension
+        // at Settings → Extensions, and leaving the old plugin installed would
+        // let it start the same listener a second time, stop it from
+        // `on_plugin_unload`, or conflict with the extension's saved zone. The
+        // migration moves its settings once and removes the plugin file. It
+        // runs before the Safe Mode gate: it only moves files and defaults, so
+        // the old proxy plugin is not listed as a plugin even while Safe Mode
+        // is on.
+        self.retireLegacyTgWsPluginIfNeeded()
+        // Safe Mode is checked before any plugin code is evaluated. A plugin
+        // that crashed the previous launch must not get as far as its top-level
+        // code this time.
         if PluginCrashGuard.shared.isSafeModeEnabled {
             self.pluginLog(pluginId: "safe-mode", text: "Safe Mode is on; no plugins were loaded")
             return
@@ -247,6 +297,14 @@ public final class PluginManager: PluginHost {
                 }
                 let manifest = try loader.readManifest(from: source, fallbackId: fallbackId)
                 reportedId = manifest.id
+                // A bundle copy can live in a folder whose name is not the id,
+                // so the sweep above may not have found it. The declared id is
+                // authoritative: never evaluate the old proxy plugin again.
+                if manifest.id == "tg_ws_proxy" {
+                    self.pluginLog(pluginId: manifest.id, text: "TG WS Proxy is built in now; open Settings → Extensions. This plugin was not loaded.")
+                    self.store.setEnabled(false, pluginId: manifest.id)
+                    continue
+                }
                 // The settings screen stores the switch against the declared id,
                 // while a bundle-style plugin's folder may be named differently.
                 // Checking the declared id here keeps a disabled plugin disabled.

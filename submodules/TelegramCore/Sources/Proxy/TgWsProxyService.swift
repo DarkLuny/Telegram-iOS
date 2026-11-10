@@ -150,8 +150,10 @@ public final class TgWsProxyService {
             // "not a host name:".
             domain = first
         }
+        TgWsProxyEventLog.write("start domain=\(domain) zones=\(zones.count)")
         self.operationQueue.async {
             guard !domain.isEmpty else {
+                TgWsProxyEventLog.write("start failed: no zone")
                 var status = self.currentStatus()
                 status.running = false
                 status.error = "No proxy zone is configured."
@@ -163,6 +165,7 @@ public final class TgWsProxyService {
             // A running server for the same zone only needs its entry restored:
             // this happens when the app reconnects and the plugin loads again.
             if let server = self.server, server.domain == domain, server.port > 0 {
+                TgWsProxyEventLog.write("start reuses listener port=\(server.port)")
                 self.activate(accountManager: accountManager, secret: secret, port: server.port, domain: domain, completion: completion)
                 return
             }
@@ -192,6 +195,7 @@ public final class TgWsProxyService {
             server.onReady = { [weak server] port in
                 // The server calls back on its own queue; the controller's state
                 // lives on `operationQueue`, so it is only touched from there.
+                TgWsProxyEventLog.write("listener ready port=\(port)")
                 self.operationQueue.async {
                     guard let server = server, self.server === server else {
                         return
@@ -200,6 +204,7 @@ public final class TgWsProxyService {
                 }
             }
             server.onFailure = { [weak server] message in
+                TgWsProxyEventLog.write("listener failed: \(message)")
                 self.operationQueue.async {
                     guard let server = server, self.server === server else {
                         return
@@ -215,12 +220,14 @@ public final class TgWsProxyService {
                 }
             }
             self.server = server
+            TgWsProxyEventLog.write("listener starting")
             server.start(preferredPort: TgWsProxyService.preferredPort)
         }
     }
 
     /// Stops the listener and takes its entry out of the proxy list.
     public func stop(accountManager: AccountManager<TelegramAccountManagerTypes>, completion: @escaping (Status) -> Void) {
+        TgWsProxyEventLog.write("stop")
         self.operationQueue.async {
             self.server?.stop()
             self.server = nil
@@ -244,6 +251,20 @@ public final class TgWsProxyService {
     }
 
     private func activate(accountManager: AccountManager<TelegramAccountManagerTypes>, secret: Data, port: UInt16, domain: String, completion: @escaping (Status) -> Void) {
+        TgWsProxyEventLog.write("activate port=\(port) domain=\(domain)")
+        // A zero port produces an entry that Telegram can never dial. Treat it
+        // as a listener failure instead of letting the network stack try to
+        // connect to port 0 and report a generic error much later.
+        guard port > 0 else {
+            var status = self.currentStatus()
+            status.running = false
+            status.port = 0
+            status.active = false
+            status.error = "The local listener did not get a port."
+            self.setStatus(status)
+            completion(status)
+            return
+        }
         let server = ProxyServerSettings(host: "127.0.0.1", port: Int32(port), connection: .mtp(secret: secret))
         // The listener is already up at this point, so the status says so before
         // the list transaction runs; `active` follows it.
@@ -311,6 +332,49 @@ public final class TgWsProxyService {
             return ""
         }
         return value
+    }
+}
+
+// MARK: - Event log
+
+/// A small, bounded event log for the local proxy.
+///
+/// It exists for one reason: when the client crashes while traffic is going
+/// through the tunnel, the crash report needs to say what the proxy was doing.
+/// The proxy lives in TelegramCore, which cannot import `ExteraPluginKit`, so
+/// it writes this file and the crash guard reads its tail. Only state changes
+/// are recorded — never packet contents or message data.
+private enum TgWsProxyEventLog {
+    private static let lock = NSLock()
+    private static let maxBytes = 64 * 1024
+
+    private static var url: URL {
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("extera-tgws-events.log")
+    }
+
+    static func write(_ message: String) {
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970)
+        let data = Data("[\(stamp)] \(message)\n".utf8)
+        self.lock.lock()
+        defer {
+            self.lock.unlock()
+        }
+        let url = self.url
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: data)
+            if handle.offsetInFile > UInt64(self.maxBytes) {
+                let keep = self.maxBytes / 2
+                let start = handle.offsetInFile - UInt64(keep)
+                handle.seek(toFileOffset: start)
+                let retained = handle.readDataToEndOfFile()
+                try? retained.write(to: url, options: .atomic)
+            }
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 }
 
@@ -658,9 +722,11 @@ private final class LocalMTProxyServer {
         // The listener is not bound to loopback (Network.framework has no such
         // switch for listeners), so anything that is not this device is refused.
         guard LocalMTProxyServer.isLoopback(connection.endpoint) else {
+            TgWsProxyEventLog.write("client rejected: non-loopback")
             connection.cancel()
             return
         }
+        TgWsProxyEventLog.write("client accepted")
         let identifier = ObjectIdentifier(connection)
         let client = LocalMTProxyConnection(
             connection: connection,
@@ -776,7 +842,12 @@ private final class LocalMTProxyConnection {
     private var splittingDisabled = false
     private var isClosed = false
 
-    private static let maximumBufferedBytes = 8 * 1024 * 1024
+    /// Four megabytes is enough for a normal MTProto transport packet, but
+    /// small enough that a stuck or malicious stream cannot hold tens of
+    /// megabytes per Telegram connection. The client opens several connections
+    /// at once, and the old eight-megabyte bound multiplied by all of them was
+    /// a plausible memory-pressure kill on a phone.
+    private static let maximumBufferedBytes = 4 * 1024 * 1024
 
     /// The reference's `dcOverrides`: DC 203 has no web front, and the front that
     /// serves it is the one named after DC 2.
@@ -823,6 +894,7 @@ private final class LocalMTProxyConnection {
         guard !self.isClosed else {
             return
         }
+        TgWsProxyEventLog.write("client close")
         self.isClosed = true
         self.setUpstreamReady(false)
         self.upstream?.stop()
@@ -882,9 +954,11 @@ private final class LocalMTProxyConnection {
             return
         }
         guard let keys = LocalMTProxyObfuscation.accept(header: header, secret: self.secret) else {
+            TgWsProxyEventLog.write("client header rejected")
             self.close()
             return
         }
+        TgWsProxyEventLog.write("client header dc=\(keys.datacenterId) tag=\(String(format: "%08x", keys.tag))")
         self.keys = keys
         self.openUpstream(datacenterId: keys.datacenterId, tag: keys.tag)
         if !rest.isEmpty {
@@ -936,6 +1010,7 @@ private final class LocalMTProxyConnection {
         if !address.isEmpty {
             targets.append(.tcp(host: address, port: 443))
         }
+        TgWsProxyEventLog.write("upstream targets=\(targets.count) dc=\(datacenter) media=\(isMedia)")
 
         // The client's framing decides how the stream is cut into WebSocket
         // frames; the parser is a second stream with the same state, so it can
@@ -994,6 +1069,7 @@ private final class LocalMTProxyConnection {
         self.packetBuffer.append(cipher)
         self.framingBuffer.append(mirrored)
         if self.packetBuffer.count > LocalMTProxyConnection.maximumBufferedBytes {
+            TgWsProxyEventLog.write("client buffer limit reached, closing")
             self.close()
             return
         }
@@ -1116,6 +1192,7 @@ private final class LocalMTProxyUpstream {
     private var reportedReady = false
     private var isClosed = false
     private var queued: [Data] = []
+    private var queuedBytes = 0
     private var pingTimer: DispatchSourceTimer?
     private var lastTargetDescription = ""
     /// Whether any payload byte has crossed this tunnel. Once one has, the
@@ -1124,7 +1201,11 @@ private final class LocalMTProxyUpstream {
     /// rather than continued on another target.
     private var hasTransferredPayload = false
 
-    private static let maximumBufferedBytes = 8 * 1024 * 1024
+    private static let maximumBufferedBytes = 4 * 1024 * 1024
+    /// Client bytes held while the WebSocket upgrade is in flight. Telegram
+    /// sends only a small MTProto handshake before the tunnel is ready; anything
+    /// above this is a stuck session, not a legitimate backlog.
+    private static let maximumQueuedBytes = 2 * 1024 * 1024
     private static let pingInterval: TimeInterval = 30.0
 
     init(queue: DispatchQueue, targets: [Target], initialHeader: Data, decryptor: LocalMTProxyAesCtr, onPayload: @escaping (Data) -> Void, onReadyState: @escaping (Bool) -> Void, onError: @escaping (String) -> Void, onClose: @escaping () -> Void) {
@@ -1154,7 +1235,13 @@ private final class LocalMTProxyUpstream {
         if self.isReady {
             self.write(packet)
         } else {
+            if self.queuedBytes + packet.count > LocalMTProxyUpstream.maximumQueuedBytes {
+                TgWsProxyEventLog.write("upstream queue limit reached, failing")
+                self.fail(reason: "client sent too much before the front was ready")
+                return
+            }
             self.queued.append(packet)
+            self.queuedBytes += packet.count
         }
     }
 
@@ -1168,6 +1255,8 @@ private final class LocalMTProxyUpstream {
         self.pingTimer = nil
         self.connection?.cancel()
         self.connection = nil
+        self.queued.removeAll()
+        self.queuedBytes = 0
     }
 
     private func fail(reason: String? = nil) {
@@ -1176,6 +1265,7 @@ private final class LocalMTProxyUpstream {
         }
         // The reason is what the plugin's status row shows while the session
         // keeps retrying. Without it "connecting" has no cause attached.
+        TgWsProxyEventLog.write("upstream fail: \(reason ?? "connection closed") target=\(self.lastTargetDescription)")
         if let reason = reason, !reason.isEmpty {
             self.onError(reason)
         }
@@ -1187,6 +1277,8 @@ private final class LocalMTProxyUpstream {
         self.receiveBuffer = Data()
         self.isReady = false
         self.isWebSocket = false
+        self.queued.removeAll()
+        self.queuedBytes = 0
         if self.hasTransferredPayload {
             // The stream has moved past its header, so no second target can
             // pick it up: it would start its cipher at offset 64 while our
@@ -1213,9 +1305,11 @@ private final class LocalMTProxyUpstream {
         switch target {
         case let .webSocket(host):
             self.lastTargetDescription = "wss://\(host)/apiws"
+            TgWsProxyEventLog.write("dial \(self.lastTargetDescription)")
             self.openWebSocket(host: host)
         case let .tcp(host, port):
             self.lastTargetDescription = "tcp://\(host):\(port)"
+            TgWsProxyEventLog.write("dial \(self.lastTargetDescription)")
             self.openTCP(host: host, port: port)
         }
     }
@@ -1224,12 +1318,15 @@ private final class LocalMTProxyUpstream {
         guard !self.isClosed else {
             return
         }
+        TgWsProxyEventLog.write("upstream close target=\(self.lastTargetDescription)")
         self.isClosed = true
         self.reportReady(false)
         self.pingTimer?.cancel()
         self.pingTimer = nil
         self.connection?.cancel()
         self.connection = nil
+        self.queued.removeAll()
+        self.queuedBytes = 0
         self.onClose()
     }
 
@@ -1343,6 +1440,7 @@ private final class LocalMTProxyUpstream {
         }
         let packets = self.queued
         self.queued = []
+        self.queuedBytes = 0
         for packet in packets {
             self.write(packet)
         }
@@ -1390,7 +1488,8 @@ private final class LocalMTProxyUpstream {
             if let data = data, !data.isEmpty {
                 self.receiveBuffer.append(data)
                 if self.receiveBuffer.count > LocalMTProxyUpstream.maximumBufferedBytes {
-                    self.fail()
+                    TgWsProxyEventLog.write("upstream buffer limit reached, retrying")
+                    self.fail(reason: "front sent more than the buffer limit")
                     return
                 }
                 if self.isWebSocket {
@@ -1441,6 +1540,7 @@ private final class LocalMTProxyUpstream {
                 }
             }
         }
+        TgWsProxyEventLog.write("upstream ready \(self.lastTargetDescription)")
         self.isReady = true
         self.reportReady(true)
         // The header first, then whatever the client already produced.
